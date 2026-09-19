@@ -110,7 +110,7 @@ A strong score in one dimension cannot cancel a critical failure in another. Num
 
 ### Zero-config audit
 
-- `npx <package> audit --open` works without generating configuration.
+- `npx jev-test-auditor audit --open` works without generating configuration.
 - Framework, workspace, and test discovery decisions appear in the report.
 - An optional initialization command creates configuration only for overrides.
 

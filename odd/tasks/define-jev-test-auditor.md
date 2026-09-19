@@ -35,7 +35,7 @@ The repository is empty and the product boundaries currently exist only in conve
 
 - Strategy: `single-pr`
 - Forecast: approximately 475 authored changed lines after the accepted benchmark-review addition, generated files excluded.
-- Running authored count: 392 lines in committed work units.
+- Running authored count: 434 lines in committed work units.
 - Chain strategy: not applicable; the user explicitly chose one delivery.
 - Size exception: accepted for the initial documentation set because the repository is new and the three artifacts form one coherent definition.
 - RDD: disabled/unmanaged.
@@ -63,19 +63,19 @@ The repository is empty and the product boundaries currently exist only in conve
   - Update the PRD and technical design for a benchmark-only project skill that dispatches lightweight subagents without an LLM API integration.
   - Preserve blind first-pass review, deterministic oracle authority, immutable artifacts, and persisted comparison evidence.
   - Check: normal audits remain independent of the agent skill and its cost/latency.
-  - Evidence: PRD and technical design updated; validation confirmed blind review, no secondary-model API dependency, deterministic-oracle authority, and isolation from normal audits; `git diff --check` passed. Commit pending.
-- [ ] **DOC-3 — Implementation plan and consistency verification**
+  - Evidence: commit `d784678`; validation confirmed blind review, no secondary-model API dependency, deterministic-oracle authority, and isolation from normal audits; `git diff --check` passed.
+- [x] **DOC-3 — Implementation plan and consistency verification**
   - Create `docs/implementation-plan.md` with sequenced work units and acceptance checks.
   - Validate cross-document terminology, links, scope, and Markdown structure.
   - Check: no unresolved contradiction blocks implementation.
-  - Evidence: pending.
+  - Evidence: implementation plan created with 9 ordered work units and quality gates; cross-document validation passed for naming, scope, benchmark-agent boundaries, Markdown structure, and local links; `git diff --check` passed. The first validation caught and removed one stale `<package>` placeholder. Commit pending.
 
 ## Progress
 
-- Current task: DOC-3.
-- Completed tasks: DOC-1, DOC-2, DOC-2A.
-- Verification: PRD and technical-design structure, constraints, cross-document invariants, and benchmark agent-review boundaries passed; repository whitespace check passed.
+- Current task: none.
+- Completed tasks: DOC-1, DOC-2, DOC-2A, DOC-3.
+- Verification: all three documents passed naming, scope, benchmark-agent, Markdown, local-link, and whitespace checks.
 
 ## Next step
 
-Record the benchmark-review update, then write and verify the implementation plan.
+Implementation requires a separate explicit authorization; no product source code has been added.
