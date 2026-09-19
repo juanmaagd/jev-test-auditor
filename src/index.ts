@@ -50,7 +50,22 @@ export {
   type FrameworkEvidenceSource,
 } from './domain/discovery.js';
 export { extractTestCases } from './adapters/test-extraction.js';
+export { readSourceFile } from './adapters/source-reader.js';
 export {
   type TestExtractionRequest,
   type TestExtractionResult,
 } from './domain/extraction.js';
+
+export { runAudit } from './application/audit.js';
+export {
+  type AuditDiagnostic,
+  type AuditDiscoveryPort,
+  type AuditExtractorPort,
+  type AuditFileResult,
+  type AuditPorts,
+  type AuditRequest,
+  type AuditResult,
+  type AuditSourceReaderPort,
+  type AuditTotals,
+  type SourceReadRequest,
+} from './domain/audit.js';

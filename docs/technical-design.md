@@ -40,13 +40,17 @@ Dependencies point inward: CLI and renderers depend on application services; app
 
 Identifiers use normalized repository-relative paths plus structural test ancestry and a source hash. Line numbers are presentation metadata, not identity.
 
-## Discovery and extraction
+## Discovery, extraction, and the Phase 2 audit seam
 
-1. Find workspace manifests and Jest/Vitest configuration without executing arbitrary project scripts.
-2. Apply framework defaults plus user include/exclude overrides.
-3. Parse JavaScript, JSX, TypeScript, and TSX with the TypeScript compiler API.
-4. Extract `describe`, `test`, `it`, parameterized variants, modifiers, hooks, imports, mocks, and assertion calls.
-5. Emit one `TestCase` per statically identifiable case. Dynamic cases that cannot be enumerated receive explicit extraction metadata rather than invented identities.
+1. Discover repository-local `.test`/`.spec` JavaScript, JSX, TypeScript, and TSX files with lexical ordering, default/configured exclusions, symlink containment, and conservative E2E signals.
+2. Read source through a root-contained filesystem adapter. Discovery and reading inspect text only; they never execute audited files, package scripts, test runners, or configuration modules.
+3. Attribute Jest/Vitest from syntax-aware static imports and package metadata. Conflicting evidence remains `unknown` and is preserved in the discovery record.
+4. Parse JavaScript, JSX, TypeScript, and TSX with the TypeScript compiler API.
+5. Extract `describe`, `test`, `it`, parameterized variants, modifiers, hooks, imports, mocks, and assertion calls.
+6. Emit one `TestCase` per statically identifiable case. Dynamic cases that cannot be enumerated receive explicit extraction metadata rather than invented identities.
+7. The application service composes discovery, safe source reading, and extraction through injected ports. It processes included files sequentially in repository-relative lexical order and returns per-file lineage, exclusions, root diagnostics, and `reportingOnly: true`.
+
+`jev-test-auditor audit` projects this result to one deterministic JSON line containing the configured `rootDir`, included file path/framework/count summaries, excluded paths/reasons, totals, and diagnostics. Parser, read, and discovery diagnostics are informational for CLI policy: `audit` exits zero after emitting the summary; usage errors exit one.
 
 Skipped and todo cases remain visible but are not silently treated as evaluated active tests. E2E framework files are excluded in v1.
 
