@@ -35,7 +35,7 @@ The repository is empty and the product boundaries currently exist only in conve
 
 - Strategy: `single-pr`
 - Forecast: approximately 475 authored changed lines after the accepted benchmark-review addition, generated files excluded.
-- Running authored count: 434 lines in committed work units.
+- Running authored count: 570 lines in committed work units before final evidence bookkeeping.
 - Chain strategy: not applicable; the user explicitly chose one delivery.
 - Size exception: accepted for the initial documentation set because the repository is new and the three artifacts form one coherent definition.
 - RDD: disabled/unmanaged.
@@ -68,7 +68,7 @@ The repository is empty and the product boundaries currently exist only in conve
   - Create `docs/implementation-plan.md` with sequenced work units and acceptance checks.
   - Validate cross-document terminology, links, scope, and Markdown structure.
   - Check: no unresolved contradiction blocks implementation.
-  - Evidence: implementation plan created with 9 ordered work units and quality gates; cross-document validation passed for naming, scope, benchmark-agent boundaries, Markdown structure, and local links; `git diff --check` passed. The first validation caught and removed one stale `<package>` placeholder. Commit pending.
+  - Evidence: commit `428215b`; implementation plan created with 9 ordered work units and quality gates; cross-document validation passed for naming, scope, benchmark-agent boundaries, Markdown structure, and local links; `git diff --check` passed. The first validation caught and removed one stale `<package>` placeholder.
 
 ## Progress
 
