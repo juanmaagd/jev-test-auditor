@@ -97,7 +97,7 @@ Semantic scoring is only trustworthy when its evidence is minimal, reproducible,
 
 ## Progress
 
-- Current task: **none — Phase 3 complete**.
+- Current task: **P3-5**.
 - Completed tasks: **P3-1, P3-2, P3-3, P3-4**.
 - Running authored count: **5,190**, well above the 1,450 forecast; every task exceeds the ~400-line per-task heuristic because contracts/canonicalization and the resolver's containment/deny/cycle rules, selection/budget rules, and application/CLI wiring with its golden and packed smokes each form one boundary with exhaustive tests. Each task stays its own chained slice.
 - Scope addition: P3-5 is a provisional ~250–400 authored-line final slice; the historical 1,450 forecast and running count above are intentionally unchanged.
@@ -109,4 +109,4 @@ Semantic scoring is only trustworthy when its evidence is minimal, reproducible,
 
 ## Next step
 
-Integrating the Phase 3 chain into `main` is the user's decision. Then plan Phase 4 (thin end-to-end Jev MVP: evidence → Jev → deterministic classification → terminal/JSON) as a new ODD feature.
+Implement P3-5 on `feat/phase-3-dry-run-estimator` (branched from `feat/phase-3-application-cli`) with strict TDD, review, and a work-unit commit. Integrating the Phase 3 chain into `main` remains the user's decision after P3-5.
