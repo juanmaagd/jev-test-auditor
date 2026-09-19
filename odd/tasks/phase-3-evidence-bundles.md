@@ -86,9 +86,10 @@ Semantic scoring is only trustworthy when its evidence is minimal, reproducible,
   - Map test-body identifiers to import bindings and top-level declarations in resolved files; choose the smallest declaration spans; enforce per-fragment and per-bundle budgets; order deterministically.
   - Verify named/default/namespace imports, mock targets, unreferenced imports omitted, truncation, budget exhaustion, and deterministic ordering.
   - Evidence: `6b28f2d` (`feat: select minimal evidence fragments within budgets`) on `feat/phase-3-fragment-selection`; 5 files, 2,046 additions and 2 deletions (2,048 authored changed lines, 1,174 of them tests). Suite 12 files/209 tests, typecheck, build, lint, and diff check passed. Observed RED before implementation. Extended the P3-1 contract with `omitted` (`bundle-budget-exhausted`) so budget losses stay visible. Priority: test body, hooks in scope, hop-1, hop-2; per-fragment truncation at the last fitting line with a UTF-8-safe byte fallback; the first fragment that overflows the bundle is line-truncated or omitted, and all later ones are omitted. Re-exports are selected as statements and not followed; types and CommonJS exports select nothing. Review found the lexical specifier fallback could attach the wrong file on key collisions (`x.ts` vs `x/index.ts`); fixed to require a unique match, including mock classification. Mutations on unreferenced imports, mock kind, truncation, omitted, re-export following, hop priority, and first-match fallback turned RED; a beyond-hop-2 mutation is structurally unreachable (typed `1 | 2`, P3-2 never resolves further). Known gaps for P3-4: no cross-test read cache; reference collection is syntactic, not scope-aware.
-- [ ] **P3-4 — Integrate application, configuration, and CLI**
+- [x] **P3-4 — Integrate application, configuration, and CLI**
   - Add an evidence port to `runAudit`, configuration for budgets and deny paths, evidence totals in the default JSON line, and `--inspect-payloads`; update README (fix the Phase 2 row that claims evidence bundles) and technical design.
   - Verify golden payloads, CLI flags, no network, reporting-only exit behavior, and packed-install smoke.
+  - Evidence: `3891713` (`feat: integrate evidence bundles into audit and inspect payloads`) on `feat/phase-3-application-cli`; 16 files, 1,291 additions and 41 deletions (1,332 authored changed lines). Suite 14 files/233 tests, typecheck, build, lint, and diff check passed; packed-install smoke covers evidence totals and `--inspect-payloads`. Observed RED before implementation. Configuration adds validated `evidence` budgets and additive deny patterns. One memoizing reader per run covers resolution and selection reads. Default output stays one JSON line with evidence totals and per-file `evidenceBundleCount`; `--inspect-payloads` adds one canonical bundle per line ordered by file and test case. Review corrections: a failed per-test selection now yields no bundle plus an `evidence-selection-failed` diagnostic (no silent empty placeholder), and the golden test asserts a literal canonical line whose hashes, byte counts, spans, and test id were independently verified. Architecture test forbids network modules and `fetch` in `src/`. README Phase 2 row corrected; technical design documents delivered context resolution. Mutations on file-failure isolation, memoization, default-mode payload leakage, deny config, inspect ordering, placeholder reintroduction, and selection reason turned RED.
 - [ ] **P3-5 — Add dry-run cost and call estimator**
   - Add `audit --dry-run` and `--dry-run --json` as a no-network, no-write aggregate preview over the discovered evidence bundles. Report exact discovered/evaluable/skipped counts, exact serialized evidence bytes, exact initial calls (one per evaluable test), and a possible follow-up call range; report approximate input-token and cost ranges using a versioned local model/pricing/overhead snapshot with model and as-of disclosure.
   - Keep detailed bundle rendering exclusively under `--inspect-payloads`; do not implement Jev calls, rubric/classification, cache-aware billing, SQLite writes, or exact wire-token claims. Reject invalid pricing/budget inputs deterministically.
@@ -96,15 +97,16 @@ Semantic scoring is only trustworthy when its evidence is minimal, reproducible,
 
 ## Progress
 
-- Current task: **P3-4**.
-- Completed tasks: **P3-1, P3-2, P3-3**.
-- Running authored count: **3,858**, well above the 1,450 forecast; P3-1, P3-2, and P3-3 each exceed the ~400-line per-task heuristic because contracts/canonicalization and the resolver's containment/deny/cycle rules, and selection/budget rules each form one boundary with exhaustive tests. Each task stays its own chained slice.
+- Current task: **none — Phase 3 complete**.
+- Completed tasks: **P3-1, P3-2, P3-3, P3-4**.
+- Running authored count: **5,190**, well above the 1,450 forecast; every task exceeds the ~400-line per-task heuristic because contracts/canonicalization and the resolver's containment/deny/cycle rules, selection/budget rules, and application/CLI wiring with its golden and packed smokes each form one boundary with exhaustive tests. Each task stays its own chained slice.
 - Scope addition: P3-5 is a provisional ~250–400 authored-line final slice; the historical 1,450 forecast and running count above are intentionally unchanged.
 - Slice ledger:
   - `feat/phase-3-evidence-domain`: `4a91962` — evidence bundle domain contracts and canonical serialization.
   - `feat/phase-3-import-resolution`: `d0505ab` — safe static relative import resolution with one helper hop.
   - `feat/phase-3-fragment-selection`: `6b28f2d` — minimal fragment selection, budgets, truncation, and omitted provenance.
+  - `feat/phase-3-application-cli`: `3891713` — audit/config/CLI integration, `--inspect-payloads`, literal golden, and documentation.
 
 ## Next step
 
-Branch `feat/phase-3-application-cli` from `feat/phase-3-fragment-selection` and delegate P3-4 to one writer with strict TDD (include a memoizing reader across the run and per-test error handling for evidence failures), then implement P3-5 as the final Phase 3 slice after reviewing P3-4.
+Integrating the Phase 3 chain into `main` is the user's decision. Then plan Phase 4 (thin end-to-end Jev MVP: evidence → Jev → deterministic classification → terminal/JSON) as a new ODD feature.
