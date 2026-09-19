@@ -34,7 +34,11 @@ A minimal foundation makes the next work units faster while preserving the centr
 
 - Strategy: `ask-on-risk`.
 - Forecast: approximately 350 authored changed lines, generated diagram output excluded.
-- Chain strategy: not required unless the running authored count exceeds approximately 400 lines.
+- Running authored count: approximately 703 lines through the verified but uncommitted **FOUND-2** work, excluding generated `docs/architecture.html` and `package-lock.json`.
+- Chain strategy: `feature-branch-chain`, explicitly confirmed by the user.
+- Local slice 1 (tracker boundary): `feat/phase-1-foundation`, containing architecture commits `3ef4fe4` and `69037f8` plus the chain-strategy record.
+- Local slice 2 (current implementation boundary): `feat/phase-1-foundation-cli`, based on slice 1 and containing FOUND-2 package, CLI, configuration, tests, and `AGENTS.md`.
+- Remote tracker/child pull requests: not created; push and PR creation remain unauthorized remote operations.
 - RDD: disabled/unmanaged.
 - TDD: enabled by explicit user confirmation; require observed RED, GREEN, and REFACTOR evidence.
 - Test runner: Vitest.
@@ -74,8 +78,8 @@ A minimal foundation makes the next work units faster while preserving the centr
 
 - Current task: **FOUND-2**.
 - Completed tasks: **FOUND-1**.
-- Verification: the delivered architecture passes showcase validation, browser containment/readability checks, and perceptual inspection in light and dark themes.
+- Verification: the delivered architecture passes showcase validation, browser containment/readability checks, and perceptual inspection in light and dark themes. Delegated FOUND-2 implementation passes 4 Vitest files/9 tests, typecheck, build, lint, `git diff --check`, a packed-and-installed npm bin smoke test, immutable reporting-only runtime verification, and an observed architecture mutation that detects bare provider, singular adapter, and `require` violations. Independent Luna review found and verified corrections for the package-bin seam, dependency-boundary test, configuration aliasing, direct ESLint dependency, and reporting-only invariant.
 
 ## Next step
 
-Delegate **FOUND-2** to a Luna implementation worker, then review its TDD evidence, architecture boundaries, and diff before integration.
+Create the local child branch, commit the verified **FOUND-2** work there, and record its evidence without performing remote operations.
