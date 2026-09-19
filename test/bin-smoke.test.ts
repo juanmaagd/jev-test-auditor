@@ -218,6 +218,56 @@ describe('packed installed package', () => {
       expect(bundle.unresolved).toEqual([{ specifier: 'vitest', reason: 'bare-specifier' }]);
       expect(bundle.denied).toEqual([]);
       await expect(access(join(fixtureRoot, 'executed.marker'))).rejects.toThrow();
+
+      // `--dry-run --json` on the same fixture: packed.test.ts contributes the only
+      // discovered/evaluable test case (broken.test.ts and canary.spec.ts extract no
+      // test cases at all), so counts are exact; `evidenceBytes` is cross-checked
+      // exactly against the canonical bundle line captured above rather than
+      // hand-duplicating evidence resolution/selection in this test.
+      const dryRunOutput = execInstalledBin(binPath, ['audit', '--dry-run', '--json'], fixtureRoot);
+      const dryRunLines = dryRunOutput.trim().split(/\r?\n/u);
+      expect(dryRunLines).toHaveLength(1);
+
+      interface DryRunSummary {
+        readonly dryRun: true;
+        readonly reportingOnly: true;
+        readonly model: string;
+        readonly snapshotVersion: number;
+        readonly asOf: string;
+        readonly discovered: number;
+        readonly evaluable: number;
+        readonly skipped: { readonly total: number; readonly byReason: Record<string, number> };
+        readonly initialCalls: number;
+        readonly followUpCalls: { readonly min: number; readonly max: number };
+        readonly evidenceBytes: number;
+        readonly estimatedInputTokens: { readonly min: number; readonly max: number };
+        readonly estimatedFollowUpInputTokens: { readonly min: number; readonly max: number };
+        readonly estimatedUsd: { readonly min: number; readonly max: number };
+        readonly bundlesOverCeiling: number;
+        readonly requestTokenCeiling: number;
+        readonly networkCalls: number;
+        readonly filesWritten: number;
+      }
+      const dryRunSummary = JSON.parse(dryRunLines[0] ?? '') as DryRunSummary;
+      expect(dryRunSummary.dryRun).toBe(true);
+      expect(dryRunSummary.reportingOnly).toBe(true);
+      expect(dryRunSummary.discovered).toBe(1);
+      expect(dryRunSummary.evaluable).toBe(1);
+      expect(dryRunSummary.skipped).toEqual({ total: 0, byReason: { skip: 0, todo: 0, 'evidence-unavailable': 0 } });
+      expect(dryRunSummary.initialCalls).toBe(1);
+      expect(dryRunSummary.followUpCalls).toEqual({ min: 0, max: 1 });
+      expect(dryRunSummary.bundlesOverCeiling).toBe(0);
+      expect(dryRunSummary.networkCalls).toBe(0);
+      expect(dryRunSummary.filesWritten).toBe(0);
+      expect(dryRunSummary.evidenceBytes).toBe(Buffer.byteLength(inspectLines[1] ?? '', 'utf8'));
+      expect(dryRunSummary.estimatedInputTokens.min).toBeLessThanOrEqual(dryRunSummary.estimatedInputTokens.max);
+      expect(dryRunSummary.estimatedUsd.min).toBeGreaterThan(0);
+      expect(dryRunSummary.estimatedUsd.min).toBeLessThanOrEqual(dryRunSummary.estimatedUsd.max);
+
+      // Flag-combination usage errors: --json without --dry-run, and --dry-run with --inspect-payloads.
+      expect(installedBinStatus(binPath, ['audit', '--json'], fixtureRoot)).toBe(1);
+      expect(installedBinStatus(binPath, ['audit', '--dry-run', '--inspect-payloads'], fixtureRoot)).toBe(1);
+      await expect(access(join(fixtureRoot, 'executed.marker'))).rejects.toThrow();
     } finally {
       await rm(temporaryRoot, { recursive: true, force: true });
     }

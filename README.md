@@ -30,9 +30,20 @@ jev-test-auditor --help
 | `--help` | Prints usage and command information. |
 | `audit` | Discovers `.test`/`.spec` JavaScript and TypeScript files, extracts Jest/Vitest test cases, selects each test case's local evidence bundle, and prints a reporting-only JSON summary. Diagnostics do not change the zero exit status. |
 | `audit --rootDir <path>` | Audits a configured repository root instead of the current directory. |
-| `audit --inspect-payloads` | Prints the same summary line first, then one JSON line per selected evidence bundle (`canonicalizeEvidenceBundle` output), ordered by file path then test-case order. This is the local evidence state selected on disk — fragments, provenance, denials, truncation — **not** the Jev wire request shape (that belongs to a later phase), and it makes no network call either way. |
+| `audit --inspect-payloads` | Prints the same summary line first, then one JSON line per selected evidence bundle (`canonicalizeEvidenceBundle` output), ordered by file path then test-case order. This is the local evidence state selected on disk — fragments, provenance, denials, truncation — **not** the Jev wire request shape (that belongs to a later phase), and it makes no network call either way. Cannot be combined with `--dry-run`. |
+| `audit --dry-run` | Prints a no-network, no-write aggregate cost/call preview **instead of** the normal summary: exact discovered/evaluable/skipped-by-reason counts, exact initial Jev calls (one per evaluable test case) and evidence bytes, plus clearly labeled *approximate* input-token and USD ranges from a versioned local pricing/overhead snapshot. Makes no network or provider call, requires no API key, and writes nothing to disk. Cannot be combined with `--inspect-payloads`. |
+| `audit --dry-run --json` | Same dry-run preview as one machine-readable JSON line (stable key order) instead of the human-readable text report. `--json` without `--dry-run` is a usage error (exit 1). |
 
 The default summary's `totals` include evidence counters (`evidenceBundles`, `evidenceFragments`, `evidenceTruncatedFragments`, `evidenceOmitted`, `evidenceDenied`, `evidenceUnresolved`), and each file entry carries `evidenceBundleCount`. Bundle *contents* — fragment text, spans, hashes — never appear in the default line; only `--inspect-payloads` prints them.
+
+## Dry-run cost and call estimate
+
+`audit --dry-run` (and `--dry-run --json`) previews the aggregate Jev calls and cost an audit would make, without ever calling Jev, requiring an API key, or writing anything to disk. It runs the exact same no-network, no-write discovery/extraction/evidence pipeline as a normal audit, then reports:
+
+- **Exact**: discovered test-case count; `evaluable` count and `skipped` count broken down by reason (`skip`, `todo`, `evidence-unavailable` — no evidence bundle was built for that test case); `initialCalls` (one Jev call per evaluable test case); `evidenceBytes` (the exact sum of `canonicalizeEvidenceBundle` UTF-8 byte lengths over every evaluable bundle). A conditional `skipIf`/`runIf` modifier counts as evaluable — it is a runtime condition, not a statically known skip.
+- **A possible range, exactly bounded**: `followUpCalls` (`0` to `evaluable * maxFollowUpsPerTest`) — a follow-up call happens only when an earlier Jev result identifies a specific evidence need, never an automatic retry, so the true count is unknown ahead of time but its upper bound is exact.
+- **Clearly labeled approximate**: `estimatedInputTokens`, `estimatedFollowUpInputTokens`, and `estimatedUsd` ranges, derived from evidence bytes through a versioned local `bytesPerToken`/`requestOverheadTokens`/`usdPerMillionInputTokens` pricing snapshot (`JEV_ESTIMATE_SNAPSHOT` in `src/domain/estimate.ts`; currently Jev `1.13`, USD 0.042 per 1,000,000 input tokens, output tokens unbilled, as of 2026-09-19). `bundlesOverCeiling` counts evaluable bundles whose own worst-case tokens would exceed the provider's 64k-token request ceiling (expected `0` under the current evidence budgets).
+- Phase 4 replaces the approximate token math with the exact request `state` and `questions` (including the finer 32k state-plus-longest-question provider sub-limit, which needs per-question text this phase doesn't have); Phase 5 adds cache-hit and billable-call accuracy on top of that.
 
 ## Delivery phases
 
@@ -40,7 +51,7 @@ The default summary's `totals` include evidence counters (`evidenceBundles`, `ev
 | --- | --- | --- |
 | 1. Foundation | One TypeScript package, inward dependency boundaries, configuration, and CLI entry point. | **Completed** |
 | 2. Test understanding | Discover and parse Jest/Vitest tests into deterministic structural test understanding (test cases, imports, mocks, assertions). | **Completed** |
-| 3. Evidence and context | For every extracted test case, resolve its relative imports safely and select the smallest useful helper/production-seam evidence within configured budgets, exposed locally through `--inspect-payloads`. | **Completed** |
+| 3. Evidence and context | For every extracted test case, resolve its relative imports safely and select the smallest useful helper/production-seam evidence within configured budgets, exposed locally through `--inspect-payloads`, plus a no-network `--dry-run` cost/call estimate. | **Completed** |
 | 4. Evaluation and reporting | Add Jev judgments, deterministic classification, persistence, caching, scheduling, JSON, and HTML reports. | Planned; not implemented |
 | 5. Benchmarks and hardening | Add deterministic benchmarks, benchmark review tooling, calibration, privacy/recovery documentation, and release hardening. | Planned; not implemented |
 

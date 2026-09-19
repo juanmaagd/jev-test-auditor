@@ -97,6 +97,19 @@ export {
   createMemoizingSourceReader,
   type SourceReader,
 } from './adapters/evidence-audit-port.js';
+export {
+  classifyTestCase,
+  estimateDryRun,
+  JEV_ESTIMATE_SNAPSHOT,
+  validateJevEstimateSnapshot,
+  type DryRunClassification,
+  type DryRunEstimate,
+  type DryRunFileInput,
+  type DryRunRange,
+  type DryRunSkippedReason,
+  type DryRunSkippedTotals,
+  type JevEstimateSnapshot,
+} from './domain/estimate.js';
 
 export { runAudit } from './application/audit.js';
 export {

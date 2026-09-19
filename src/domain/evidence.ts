@@ -183,8 +183,8 @@ export interface EvidenceBundleInput {
   readonly omitted: readonly OmittedEvidence[];
 }
 
-/** UTF-8 byte length of a string, via the global `TextEncoder` (no Node imports; domain stays pure). */
-function utf8ByteLength(value: string): number {
+/** UTF-8 byte length of a string, via the global `TextEncoder` (no Node imports; domain stays pure). Exported for reuse by `src/domain/estimate.ts`, which sums this over canonicalized bundles rather than duplicating it. */
+export function utf8ByteLength(value: string): number {
   return new TextEncoder().encode(value).length;
 }
 
