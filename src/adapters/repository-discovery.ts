@@ -72,7 +72,13 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.+^${}()|[\]\\]/gu, '\\$&');
 }
 
-function globRegExp(pattern: string): RegExp {
+/**
+ * Compiles a glob pattern (`*`, `**`, `**\/`, `?`, `{a,b}`) into a `RegExp`
+ * anchored to the full candidate string. Exported for reuse by evidence
+ * deny-pattern matching (`src/adapters/evidence-resolution.ts`), which
+ * matches a pattern with no `/` against a candidate's basename alone.
+ */
+export function globRegExp(pattern: string): RegExp {
   const normalized = normalizeRelativePath(pattern);
   let source = '^';
   for (let index = 0; index < normalized.length; index += 1) {
@@ -108,7 +114,8 @@ function globRegExp(pattern: string): RegExp {
   return new RegExp(`${source}$`, 'u');
 }
 
-function matchesGlob(pattern: string, candidate: string): boolean {
+/** Matches a full repository-relative path against a glob pattern. See {@link globRegExp}. */
+export function matchesGlob(pattern: string, candidate: string): boolean {
   const normalizedPattern = normalizeRelativePath(pattern);
   const normalizedCandidate = normalizeRelativePath(candidate);
   return globRegExp(normalizedPattern).test(normalizedCandidate)

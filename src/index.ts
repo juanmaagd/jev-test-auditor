@@ -60,6 +60,7 @@ export {
   buildEvidenceBundle,
   canonicalizeEvidenceBundle,
   DEFAULT_EVIDENCE_BUDGET,
+  DEFAULT_EVIDENCE_DENY_PATTERNS,
   validateEvidenceBudget,
   type DeniedEvidence,
   type EvidenceBudget,
@@ -70,6 +71,7 @@ export {
   type EvidenceSelectionReason,
   type EvidenceTotals,
   type EvidenceTruncation,
+  type ResolvedEvidenceFile,
   type UnresolvedEvidence,
   type UnresolvedEvidenceReason,
 } from './domain/evidence.js';
@@ -77,6 +79,11 @@ export {
   hashEvidenceBundle,
   hashEvidenceContent,
 } from './adapters/evidence-hash.js';
+export {
+  resolveEvidenceFiles,
+  type EvidenceResolutionRequest,
+  type EvidenceResolutionResult,
+} from './adapters/evidence-resolution.js';
 
 export { runAudit } from './application/audit.js';
 export {

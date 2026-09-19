@@ -62,6 +62,57 @@ export interface UnresolvedEvidence {
   readonly reason: UnresolvedEvidenceReason;
 }
 
+/**
+ * A repository-local file reached while resolving a test case's relative
+ * imports (Phase 3 import resolution). `hop` is `1` for a direct import of
+ * the test file and `2` for a relative import of a hop-1 `helper` file
+ * (production files and hop-2 files are never expanded further).
+ * `sourceText` is present only when the resolver actually read the file's
+ * content, which today is exactly the hop-1 helper files it must inspect to
+ * discover hop-2 imports; every other resolved file carries no
+ * `sourceText`, leaving its content read to fragment selection (Phase 3
+ * task 3).
+ */
+export interface ResolvedEvidenceFile {
+  readonly repositoryRelativePath: string;
+  readonly role: 'helper' | 'production';
+  readonly hop: 1 | 2;
+  /** Repository-relative path of the file whose import produced this entry. */
+  readonly importedFrom: string;
+  /** The import specifier text as written by the importer (empty when the import record carried none, e.g. a non-literal dynamic import). */
+  readonly specifier: string;
+  readonly sourceText?: string;
+}
+
+/**
+ * Default deny patterns evaluated against a repository-relative candidate
+ * path before it is ever read as evidence (see `resolveEvidenceFiles` in
+ * `src/adapters/evidence-resolution.ts`). A pattern with no `/` matches the
+ * candidate's basename at any depth (e.g. `*.pem` denies `secrets/key.pem`
+ * as well as a top-level `key.pem`); a pattern containing `/` matches the
+ * full repository-relative path using the same `**`/`*`/`{a,b}` glob
+ * semantics as repository discovery's exclude patterns. Additive with any
+ * caller-supplied deny patterns, never replaced by them.
+ */
+export const DEFAULT_EVIDENCE_DENY_PATTERNS: readonly string[] = [
+  '.env*',
+  '*.pem',
+  '*.key',
+  '*.p12',
+  '*.pfx',
+  'id_rsa*',
+  '**/secrets/**',
+  '**/.git/**',
+  '**/node_modules/**',
+  '**/dist/**',
+  '**/build/**',
+  '**/coverage/**',
+  '**/vendor/**',
+  '*.min.js',
+  '*.map',
+  '*.d.ts',
+];
+
 export interface EvidenceBudget {
   readonly maxFragmentBytes: number;
   readonly maxBundleBytes: number;

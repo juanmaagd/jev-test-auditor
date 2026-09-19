@@ -720,7 +720,14 @@ function expandParameterContext(
   };
 }
 
-function importRecordsFor(sourceFile: ts.SourceFile): readonly ImportRecord[] {
+/**
+ * Static import/export-from/dynamic-import/require specifiers of a parsed
+ * source file, each with its source span. Shared with evidence import
+ * resolution (`src/adapters/evidence-resolution.ts`), which reuses this
+ * exact scan for a resolved helper file's own imports (hop 2) instead of
+ * duplicating a second TypeScript-compiler-API walk.
+ */
+export function importRecordsFor(sourceFile: ts.SourceFile): readonly ImportRecord[] {
   const records: ImportRecord[] = [];
   const visit = (node: ts.Node): void => {
     if (ts.isImportDeclaration(node)) {
