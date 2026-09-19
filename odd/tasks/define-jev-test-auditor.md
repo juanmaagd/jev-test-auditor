@@ -34,7 +34,8 @@ The repository is empty and the product boundaries currently exist only in conve
 ## Delivery
 
 - Strategy: `ask-on-risk`
-- Forecast: approximately 360 authored changed lines, generated files excluded.
+- Forecast: approximately 400 authored changed lines, generated files excluded.
+- Running authored count: 262 lines in committed work units.
 - Chain strategy: not required at the current forecast.
 - RDD: disabled/unmanaged.
 - TDD: not applicable to documentation-only work.
@@ -52,11 +53,11 @@ The repository is empty and the product boundaries currently exist only in conve
 - [x] **DOC-1 — Product requirements**
   - Create `docs/PRD.md` from the validated discovery decisions.
   - Check: every agreed product constraint is represented and open questions are explicit.
-  - Evidence: validation script passed for 188 lines and all required sections; `git diff --check` passed. An initial case-sensitive keyword check produced a false negative for `Reporting-only` and passed after the checker was corrected.
-- [ ] **DOC-2 — Technical design**
+  - Evidence: commit `1d48484`; validation script passed for 188 lines and all required sections; `git diff --check` passed. An initial case-sensitive keyword check produced a false negative for `Reporting-only` and passed after the checker was corrected.
+- [x] **DOC-2 — Technical design**
   - Create `docs/technical-design.md` with architecture, data contracts, orchestration, persistence, privacy, and failure behavior.
   - Check: design supports every PRD requirement without expanding v1 scope.
-  - Evidence: pending.
+  - Evidence: validation script passed for 113 lines and required architecture/PRD invariants; `git diff --check` passed. Commit pending.
 - [ ] **DOC-3 — Implementation plan and consistency verification**
   - Create `docs/implementation-plan.md` with sequenced work units and acceptance checks.
   - Validate cross-document terminology, links, scope, and Markdown structure.
@@ -65,10 +66,10 @@ The repository is empty and the product boundaries currently exist only in conve
 
 ## Progress
 
-- Current task: DOC-2.
-- Completed tasks: DOC-1.
-- Verification: PRD structure and constraints passed; repository whitespace check passed.
+- Current task: DOC-3.
+- Completed tasks: DOC-1, DOC-2.
+- Verification: PRD and technical-design structure, constraints, and cross-document invariants passed; repository whitespace check passed.
 
 ## Next step
 
-Record the PRD work-unit commit, then write the technical design.
+Record the technical-design work-unit commit, then write and verify the implementation plan.
