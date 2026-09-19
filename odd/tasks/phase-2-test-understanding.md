@@ -78,9 +78,10 @@ Semantic scoring is only as reliable as the test boundaries and evidence supplie
   - Add deterministic walking, supported filename filtering, explicit exclusions, framework evidence, and root/symlink containment.
   - Verify JS/JSX/TS/TSX, lexical ordering, configured exclusions, E2E reasons, ambiguous frameworks, and no code execution.
   - Evidence: `0052a18` (`feat: add safe test discovery`) on `feat/phase-2-discovery`; 6 files/47 tests, typecheck, build, lint, diff check, npm dry-run, and packed-install root API/CLI smokes passed. Independent review verified syntax-aware evidence, import precedence, E2E-v1 exclusions, diagnostics, and drive/UNC containment; critical discovery mutations turned RED.
-- [ ] **P2-3 — Extract structural test cases**
+- [x] **P2-3 — Extract structural test cases**
   - Parse suites, tests, modifiers, hooks, source spans, and framework aliases using the TypeScript compiler API.
   - Verify nested/duplicate names, skipped/todo/only/concurrent states, hook scope, malformed syntax diagnostics, and stable identities.
+  - Evidence: `fef533a` (`feat: extract structural test cases`) on `feat/phase-2-structural-extraction`; 7 files/76 tests, typecheck, build, lint, diff check, and a built public-seam smoke passed. Independent review verified scope-aware ESM/CommonJS aliases, suite modifier and hook inheritance, dynamic non-invention, syntax diagnostics, cross-extension parsing, and nested-scope mutations.
 - [ ] **P2-4 — Extract parameterization and static signals**
   - Add supported static parameter cases plus dynamic registration metadata, imports, mocks, assertions, and matcher details.
   - Verify literal and template tables, dynamic expressions, alias handling, Jest/Vitest mocks, negated assertions, and no expression execution.
@@ -90,14 +91,15 @@ Semantic scoring is only as reliable as the test boundaries and evidence supplie
 
 ## Progress
 
-- Current task: **P2-3**.
-- Completed tasks: **P2-1, P2-2**.
-- Verification: P2-1 and P2-2 passed independent Luna review, complete local checks, and critical mutation probes. P2-2 contains 784 authored lines excluding the generated lockfile; its safe traversal, syntax-aware evidence, public package seam, and behavioral fixtures were kept together because splitting them would leave an unverified or non-installable discovery unit.
-- Running authored count: **1,193** lines across completed Phase 2 work-unit commits, generated lockfile excluded.
+- Current task: **P2-4**.
+- Completed tasks: **P2-1, P2-2, P2-3**.
+- Verification: P2-1 through P2-3 passed independent Luna review, complete local checks, and critical mutation probes. P2-3 contains 970 authored lines because the scope-aware structural traversal, stable identity integration, dynamic guards, and behavioral matrix form one coupled correctness boundary; splitting them would hide cross-scope false positives that the final review exposed.
+- Running authored count: **2,163** lines across completed Phase 2 work-unit commits, generated lockfile excluded.
 - Slice ledger:
   - `feat/phase-2-identity`: `2c77016` — stable identity contracts and implementation.
   - `feat/phase-2-discovery`: `0052a18` — safe static test discovery and installable public API.
+  - `feat/phase-2-structural-extraction`: `fef533a` — scope-aware structural AST extraction.
 
 ## Next step
 
-Create the P2-3 structural extraction child branch from `feat/phase-2-discovery`, delegate TypeScript AST extraction to Luna, and independently verify ancestry, modifiers, hook scope, diagnostics, stable identities, and no-execution behavior.
+Create the P2-4 parameterization/signals child branch from `feat/phase-2-structural-extraction`, delegate static parameter expansion and evidence-signal extraction to Luna, and independently verify no-evaluation behavior and per-case identities.
