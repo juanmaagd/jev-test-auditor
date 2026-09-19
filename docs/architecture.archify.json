@@ -1,0 +1,155 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Jev Test Auditor — Simple Architecture",
+    "subtitle": "One TypeScript package, one process, explicit boundaries",
+    "locale": "en",
+    "animation": "trace",
+    "visual_preset": "signal-flow",
+    "quality_profile": "showcase",
+    "viewBox": [1280, 720],
+    "views": [
+      {
+        "id": "audit-path",
+        "label": "Audit path",
+        "focus": ["repository", "cli", "audit", "understanding", "scheduler", "jev", "policy", "store", "report"],
+        "note": "Follow one test from local discovery to evidence-backed findings and portable reports."
+      },
+      {
+        "id": "trust-path",
+        "label": "Trust path",
+        "focus": ["benchmark", "scheduler", "policy", "store"],
+        "note": "Benchmarks reuse production seams while deterministic oracles remain the authority."
+      }
+    ],
+    "legend": {
+      "mode": "hidden",
+      "entries": {
+        "frontend": { "label": "User-facing boundary" },
+        "backend": { "label": "Application or adapter" },
+        "database": { "label": "Durable local state" },
+        "cloud": { "label": "External model" },
+        "security": { "label": "Pure deterministic policy" },
+        "external": { "label": "Input or output" }
+      }
+    }
+  },
+  "components": [
+    {
+      "id": "repository",
+      "type": "external",
+      "label": "JS/TS repository",
+      "sublabel": "Tests + source seam",
+      "tag": "Input",
+      "pos": [36, 260],
+      "size": [166, 78]
+    },
+    {
+      "id": "cli",
+      "type": "frontend",
+      "label": "CLI",
+      "sublabel": "audit · benchmark · inspect",
+      "tag": "Phase 1",
+      "pos": [242, 260],
+      "size": [146, 78]
+    },
+    {
+      "id": "audit",
+      "type": "backend",
+      "label": "Audit application",
+      "sublabel": "Orchestrates one resumable run",
+      "tag": "Phase 1",
+      "pos": [428, 260],
+      "size": [166, 78]
+    },
+    {
+      "id": "understanding",
+      "type": "backend",
+      "label": "Test understanding",
+      "sublabel": "Discover · extract · evidence",
+      "tag": "Phase 2",
+      "pos": [634, 120],
+      "size": [186, 78]
+    },
+    {
+      "id": "scheduler",
+      "type": "backend",
+      "label": "Evaluation scheduler",
+      "sublabel": "Cache · limits · retries · resume",
+      "tag": "Phase 3",
+      "pos": [634, 260],
+      "size": [186, 78]
+    },
+    {
+      "id": "jev",
+      "type": "cloud",
+      "label": "TypeSafe Jev",
+      "sublabel": "Noul + Score judgments",
+      "tag": "External",
+      "pos": [860, 260],
+      "size": [156, 78]
+    },
+    {
+      "id": "policy",
+      "type": "security",
+      "label": "Domain policy",
+      "sublabel": "Rubric · gates · classification",
+      "tag": "Pure",
+      "pos": [634, 400],
+      "size": [186, 78]
+    },
+    {
+      "id": "store",
+      "type": "database",
+      "label": "SQLite run store",
+      "sublabel": "Append-only results + cache",
+      "tag": "Local",
+      "pos": [860, 400],
+      "size": [166, 78]
+    },
+    {
+      "id": "report",
+      "type": "frontend",
+      "label": "Portable reports",
+      "sublabel": "Canonical JSON + offline HTML",
+      "tag": "Output",
+      "pos": [1066, 400],
+      "size": [178, 78]
+    },
+    {
+      "id": "benchmark",
+      "type": "backend",
+      "label": "Benchmark application",
+      "sublabel": "Oracles + blind review",
+      "tag": "Phase 4",
+      "pos": [428, 560],
+      "size": [186, 78]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Single local TypeScript package and process",
+      "wraps": ["cli", "audit", "understanding", "scheduler", "policy", "store", "report", "benchmark"],
+      "pad": 22
+    }
+  ],
+  "connections": [
+    { "id": "repo-cli", "from": "repository", "to": "cli", "label": "run locally", "variant": "emphasis", "labelAt": [222, 352] },
+    { "id": "cli-audit", "from": "cli", "to": "audit", "label": "resolved config", "variant": "emphasis", "labelAt": [408, 352] },
+    { "id": "audit-understanding", "from": "audit", "to": "understanding", "label": "test scope", "fromSide": "right", "toSide": "left", "route": "orthogonal-h" },
+    { "id": "understanding-scheduler", "from": "understanding", "to": "scheduler", "label": "evidence bundle", "fromSide": "bottom", "toSide": "top", "labelAt": [727, 212] },
+    { "id": "scheduler-jev", "from": "scheduler", "to": "jev", "label": "batched questions", "variant": "emphasis", "labelAt": [930, 352] },
+    { "id": "jev-policy", "from": "jev", "to": "policy", "label": "raw judgments" },
+    { "id": "policy-store", "from": "policy", "to": "store", "label": "classified result", "labelAt": [930, 492] },
+    { "id": "store-report", "from": "store", "to": "report", "label": "versioned run data", "variant": "emphasis", "labelAt": [1046, 492] },
+    { "id": "benchmark-scheduler", "from": "benchmark", "to": "scheduler", "label": "same evaluator", "variant": "dashed", "fromSide": "top", "toSide": "bottom" },
+    { "id": "benchmark-policy", "from": "benchmark", "to": "policy", "label": "oracle proof", "variant": "dashed", "fromSide": "top", "toSide": "bottom" },
+    { "id": "benchmark-store", "from": "benchmark", "to": "store", "label": "metrics + comparisons", "variant": "dashed" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Build path", "items": ["Phase 1 — Foundation", "Phase 2 — Test understanding"] },
+    { "dot": "emerald", "title": "Trust path", "items": ["Phase 3 — Audit execution", "Phase 4 — Trust and release"] }
+  ]
+}
