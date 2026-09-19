@@ -56,6 +56,28 @@ export {
   type TestExtractionResult,
 } from './domain/extraction.js';
 
+export {
+  buildEvidenceBundle,
+  canonicalizeEvidenceBundle,
+  DEFAULT_EVIDENCE_BUDGET,
+  validateEvidenceBudget,
+  type DeniedEvidence,
+  type EvidenceBudget,
+  type EvidenceBundle,
+  type EvidenceBundleInput,
+  type EvidenceFragment,
+  type EvidenceFragmentKind,
+  type EvidenceSelectionReason,
+  type EvidenceTotals,
+  type EvidenceTruncation,
+  type UnresolvedEvidence,
+  type UnresolvedEvidenceReason,
+} from './domain/evidence.js';
+export {
+  hashEvidenceBundle,
+  hashEvidenceContent,
+} from './adapters/evidence-hash.js';
+
 export { runAudit } from './application/audit.js';
 export {
   type AuditDiagnostic,
