@@ -21,7 +21,8 @@ Benchmark application
  ├─ Git-versioned fixture/operator catalog
  ├─ Executable deterministic oracles
  ├─ Same evaluation scheduler and policy
- └─ SQLite history, comparisons, and JSONL export
+ ├─ SQLite history, comparisons, and JSONL export
+ └─ Optional project skill ── lightweight runtime subagents
 ```
 
 Dependencies point inward: CLI and renderers depend on application services; application services depend on domain contracts; repository, Jev, SQLite, and filesystem concerns implement ports.
@@ -98,6 +99,14 @@ The versioned JSON schema is canonical. The HTML renderer embeds that JSON and s
 Fixture operators introduce one known change, such as removing an assertion, weakening an expectation, adding shared state, mocking owned logic, pinning an implementation detail, or introducing uncontrolled time. Executable oracles validate the expected effect through production mutation, assertion mutation, semantics-preserving refactoring, or repeated/randomized execution.
 
 Only dimensions proven by an operator and oracle count toward accuracy. Unproven real-world observations remain `unverified`. Jev never labels its own benchmark.
+
+## Benchmark agent-review skill
+
+The repository includes a development skill, not a product runtime dependency. Given an immutable completed benchmark run, it selects disagreements, regressions, and calibrated samples, then shards them across lightweight read-only subagents provided by the active Codex or Claude environment. It never owns API credentials or calls a second model from the CLI.
+
+First-pass workers receive the test, minimal production context, rubric, and available deterministic oracle proof, but not Jev's verdict. They return a structured assessment with evidence and uncertainty. After those results are frozen, a comparison stage may see both outputs to classify likely model error, rubric ambiguity, context-selection error, or unsupported disagreement.
+
+SQLite records the skill version, worker runtime/model identity when available, immutable input hashes, prompts, structured findings, and comparison outcome. These judgments guide rubric refinement but do not become ground truth unless an executable oracle independently proves the claim. Normal audits never invoke this skill.
 
 ## Security and failure boundaries
 

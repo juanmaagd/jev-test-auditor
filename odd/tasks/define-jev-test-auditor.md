@@ -33,10 +33,11 @@ The repository is empty and the product boundaries currently exist only in conve
 
 ## Delivery
 
-- Strategy: `ask-on-risk`
-- Forecast: approximately 400 authored changed lines, generated files excluded.
-- Running authored count: 262 lines in committed work units.
-- Chain strategy: not required at the current forecast.
+- Strategy: `single-pr`
+- Forecast: approximately 475 authored changed lines after the accepted benchmark-review addition, generated files excluded.
+- Running authored count: 392 lines in committed work units.
+- Chain strategy: not applicable; the user explicitly chose one delivery.
+- Size exception: accepted for the initial documentation set because the repository is new and the three artifacts form one coherent definition.
 - RDD: disabled/unmanaged.
 - TDD: not applicable to documentation-only work.
 
@@ -57,7 +58,12 @@ The repository is empty and the product boundaries currently exist only in conve
 - [x] **DOC-2 — Technical design**
   - Create `docs/technical-design.md` with architecture, data contracts, orchestration, persistence, privacy, and failure behavior.
   - Check: design supports every PRD requirement without expanding v1 scope.
-  - Evidence: validation script passed for 113 lines and required architecture/PRD invariants; `git diff --check` passed. Commit pending.
+  - Evidence: commit `214ffa2`; validation script passed for 113 lines and required architecture/PRD invariants; `git diff --check` passed.
+- [x] **DOC-2A — Benchmark agent-review workflow**
+  - Update the PRD and technical design for a benchmark-only project skill that dispatches lightweight subagents without an LLM API integration.
+  - Preserve blind first-pass review, deterministic oracle authority, immutable artifacts, and persisted comparison evidence.
+  - Check: normal audits remain independent of the agent skill and its cost/latency.
+  - Evidence: PRD and technical design updated; validation confirmed blind review, no secondary-model API dependency, deterministic-oracle authority, and isolation from normal audits; `git diff --check` passed. Commit pending.
 - [ ] **DOC-3 — Implementation plan and consistency verification**
   - Create `docs/implementation-plan.md` with sequenced work units and acceptance checks.
   - Validate cross-document terminology, links, scope, and Markdown structure.
@@ -67,9 +73,9 @@ The repository is empty and the product boundaries currently exist only in conve
 ## Progress
 
 - Current task: DOC-3.
-- Completed tasks: DOC-1, DOC-2.
-- Verification: PRD and technical-design structure, constraints, and cross-document invariants passed; repository whitespace check passed.
+- Completed tasks: DOC-1, DOC-2, DOC-2A.
+- Verification: PRD and technical-design structure, constraints, cross-document invariants, and benchmark agent-review boundaries passed; repository whitespace check passed.
 
 ## Next step
 
-Record the technical-design work-unit commit, then write and verify the implementation plan.
+Record the benchmark-review update, then write and verify the implementation plan.

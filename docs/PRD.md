@@ -2,12 +2,12 @@
 
 ## Executive summary
 
-Build an open-source, local-first CLI that audits the semantic quality of existing JavaScript and TypeScript tests. The tool discovers Jest and Vitest test cases, gives Jev a small evidence package for each case, evaluates seven quality dimensions, and produces transparent JSON and HTML reports. It helps developers detect tests that increase coverage without reliably protecting behavior.
+Build `jev-test-auditor`, an open-source, local-first CLI that audits the semantic quality of existing JavaScript and TypeScript tests. The tool discovers Jest and Vitest test cases, gives Jev a small evidence package for each case, evaluates seven quality dimensions, and produces transparent JSON and HTML reports. It helps developers detect tests that increase coverage without reliably protecting behavior.
 
 ## Quick path
 
 ```bash
-npx <package> audit --open
+npx jev-test-auditor audit --open
 ```
 
 The command detects the repository and test framework, scans all supported tests, reuses valid cached judgments, evaluates stale cases concurrently, and opens a self-contained report.
@@ -146,6 +146,10 @@ A strong score in one dimension cannot cancel a critical failure in another. Num
 - SQLite stores append-only cases, runs, judgments, metrics, failures, and provenance.
 - JSONL exports support backup, CI, and interchange.
 - Benchmarks use controlled transformations and executable oracles rather than Jev-generated labels.
+- A project skill can inspect completed benchmark runs with lightweight Codex or Claude subagents supplied by the active agent runtime; the product does not call those models through an API.
+- Subagents work in bounded shards. Their blind first pass sees test evidence, rubric, and deterministic oracle data without seeing Jev's verdict; a later comparison stage investigates frozen disagreements.
+- Agent reviews are persisted as diagnostic evidence and never replace deterministic ground truth.
+- Normal user audits do not invoke the agent-review skill or inherit its cost and latency.
 - Real-world cases without deterministic ground truth may be observed but do not count toward accuracy.
 - Every run records exact model, rubric, question, test, and context identities.
 
@@ -180,7 +184,6 @@ Benchmark reporting is broken down by dimension and includes precision, recall, 
 
 ## Open questions
 
-- Final product and npm package name.
 - Open-source license.
 - Exact baseline thresholds after the deterministic corpus exists.
 - Which later ecosystem should validate the language-adapter boundary first.
