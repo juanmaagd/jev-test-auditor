@@ -49,3 +49,8 @@ export {
   type FrameworkEvidence,
   type FrameworkEvidenceSource,
 } from './domain/discovery.js';
+export { extractTestCases } from './adapters/test-extraction.js';
+export {
+  type TestExtractionRequest,
+  type TestExtractionResult,
+} from './domain/extraction.js';
