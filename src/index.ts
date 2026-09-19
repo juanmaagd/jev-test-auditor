@@ -100,6 +100,7 @@ export {
 export {
   classifyTestCase,
   estimateDryRun,
+  estimateTokensFromBytes,
   JEV_ESTIMATE_SNAPSHOT,
   validateJevEstimateSnapshot,
   type DryRunClassification,
@@ -110,6 +111,41 @@ export {
   type DryRunSkippedTotals,
   type JevEstimateSnapshot,
 } from './domain/estimate.js';
+
+export {
+  JEV_MODEL_ID,
+  RUBRIC_DIMENSION_IDS,
+  RUBRIC_QUALITY_LEVEL_COUNT,
+  RUBRIC_QUALITY_LEVELS,
+  RUBRIC_V1,
+  validateRubric,
+  type NoulCriteria,
+  type Rubric,
+  type RubricDimension,
+  type RubricDimensionId,
+  type RubricNoulQuestion,
+  type RubricQuestion,
+  type RubricScoreQuestion,
+} from './domain/rubric.js';
+export {
+  assertJevRequestWithinBudget,
+  buildJevRequest,
+  buildJevState,
+  canonicalizeJevRequest,
+  checkJevRequestBudget,
+  JEV_REQUEST_LIMITS,
+  type BuildJevRequestInput,
+  type JevQuestion,
+  type JevRequest,
+  type JevRequestBudgetCheck,
+  type JevRequestLimits,
+  type JevState,
+  type JevStateAncestrySegment,
+  type JevStateDenied,
+  type JevStateFragment,
+  type JevStateOmitted,
+  type JevStateUnresolved,
+} from './domain/jev-request.js';
 
 export { runAudit } from './application/audit.js';
 export {

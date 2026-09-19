@@ -131,6 +131,26 @@ export function validateJevEstimateSnapshot(snapshot: JevEstimateSnapshot): void
   }
 }
 
+/**
+ * Converts an exact UTF-8 byte count into an approximate token range using
+ * `bytesPerToken`'s min/max bounds, rounding OUTWARD (`floor` for the
+ * fewer-tokens `min` bound, via the larger `bytesPerToken.max` divisor;
+ * `ceil` for the more-tokens `max` bound, via the smaller `bytesPerToken.min`
+ * divisor) so the reported range never under-covers the true value it
+ * approximates. Exported so `src/domain/jev-request.ts`'s provider-budget
+ * check (Phase 4, task P4-1) reuses this exact conversion instead of
+ * duplicating it; `estimateDryRun` below uses it for the same reason.
+ */
+export function estimateTokensFromBytes(
+  bytes: number,
+  bytesPerToken: { readonly min: number; readonly max: number },
+): DryRunRange {
+  return {
+    min: Math.floor(bytes / bytesPerToken.max),
+    max: Math.ceil(bytes / bytesPerToken.min),
+  };
+}
+
 export type DryRunSkippedReason = 'skip' | 'todo' | 'evidence-unavailable';
 
 export type DryRunClassification =
@@ -287,8 +307,7 @@ export function estimateDryRun(
       evaluable += 1;
       const bytes = utf8ByteLength(canonicalizeEvidenceBundle(bundle));
       evidenceBytes += bytes;
-      const bundleTokensMin = Math.floor(bytes / snapshot.bytesPerToken.max);
-      const bundleTokensMax = Math.ceil(bytes / snapshot.bytesPerToken.min);
+      const { min: bundleTokensMin, max: bundleTokensMax } = estimateTokensFromBytes(bytes, snapshot.bytesPerToken);
       initialTokensMin += bundleTokensMin;
       initialTokensMax += bundleTokensMax;
       if (bundleTokensMax + snapshot.requestOverheadTokens.max > snapshot.requestTokenCeiling) {
