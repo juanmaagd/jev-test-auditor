@@ -36,8 +36,9 @@ A minimal foundation makes the next work units faster while preserving the centr
 - Forecast: approximately 350 authored changed lines, generated diagram output excluded.
 - Running authored count: approximately 703 lines through the verified but uncommitted **FOUND-2** work, excluding generated `docs/architecture.html` and `package-lock.json`.
 - Chain strategy: `feature-branch-chain`, explicitly confirmed by the user.
-- Local slice 1 (tracker boundary): `feat/phase-1-foundation`, containing architecture commits `3ef4fe4` and `69037f8` plus the chain-strategy record.
-- Local slice 2 (current implementation boundary): `feat/phase-1-foundation-cli`, based on slice 1 and containing FOUND-2 package, CLI, configuration, tests, and `AGENTS.md`.
+- Local slice 1 (tracker boundary): `feat/phase-1-foundation`, containing architecture commits `3ef4fe4`, `69037f8`, and chain record `a0e6fd6`.
+- Local slice 2: `feat/phase-1-foundation-config`, based on slice 1; commit `8a0e4af` contains the toolchain, configuration seam, architecture contract, tests, and `AGENTS.md`.
+- Local slice 3 (current boundary): `feat/phase-1-foundation-cli`, based on slice 2; commit `a8a9f61` contains the package bin, CLI seam, and behavioral/smoke tests.
 - Remote tracker/child pull requests: not created; push and PR creation remain unauthorized remote operations.
 - RDD: disabled/unmanaged.
 - TDD: enabled by explicit user confirmation; require observed RED, GREEN, and REFACTOR evidence.
@@ -65,21 +66,22 @@ A minimal foundation makes the next work units faster while preserving the centr
   - Keep the primary runtime path to at most ten conceptual nodes.
   - Verify the diagram schema, quality profile, rendered layout, and phase mapping.
   - Evidence: commit `3ef4fe4`; `docs/architecture.archify.json` and `docs/architecture.html`; showcase validation passed 9/9 with 0 errors and 0 warnings; automated browser evidence passed at 1440×900, 1600×1000, 1920×1080, and 2048×1320 in both captured themes; visual inspection passed in light and dark; specification SHA-256 `8687798e50fe9841c7c948604fd0615be2f5e612398182639cdedec1facecbbe`; artifact SHA-256 `70fb4e9b524be0fbc7d5010421984a8701eae62d8fe3abf3d85ea7a38e0d9f7f`; two focused visual correction rounds. Focused runtime harness: N/A because this work unit contains a static documentation artifact. Rollback boundary: remove the two architecture artifacts and this task evidence without affecting the approved PRD or technical design.
-- [ ] **FOUND-2 — Establish the executable package foundation**
+- [x] **FOUND-2 — Establish the executable package foundation**
   - Use strict TDD with Vitest and record observed RED, GREEN, and REFACTOR evidence.
   - Add the TypeScript Node package, CLI entry point, resolved configuration seam, domain primitives, and dependency-boundary check.
   - Add `AGENTS.md` with concise repository-specific implementation rules.
   - Verify CLI help, configuration behavior, architecture boundaries, type checking, and build output.
+  - Evidence: commits `8a0e4af` and `a8a9f61`; delegated RED/GREEN evidence covered zero-config defaults, selective overrides, array isolation, immutable reporting-only behavior, CLI help/audit output, installed bin execution, and architectural import boundaries. Final GREEN: 4 Vitest files/9 tests. Checks passed: `npm test`, `npm run typecheck`, `npm run build`, `npm run lint`, and `git diff --check`. Runtime harness passed by packing and installing the package in a temporary project, then running `npx --no-install jev-test-auditor --help` and `audit`; audit emitted `reportingOnly: true`. Mutation verification turned the architecture test red for singular adapter, bare provider, and CommonJS `require` dependencies, then returned GREEN after restoration. Independent Luna review found and verified fixes for the npm-bin seam, mutable configuration aliases, incomplete boundary detection, undeclared lint dependency, and reporting-only override. Rollback boundary: revert `a8a9f61` to remove only the executable CLI, or revert `8a0e4af` after it to remove the full package foundation without touching architecture/product documents.
 - [ ] **FOUND-3 — Close and document the foundation**
   - Document local development and the phase boundaries from the executable perspective.
   - Run the complete foundation checks and reconcile implementation evidence.
 
 ## Progress
 
-- Current task: **FOUND-2**.
-- Completed tasks: **FOUND-1**.
+- Current task: **FOUND-3**.
+- Completed tasks: **FOUND-1**, **FOUND-2**.
 - Verification: the delivered architecture passes showcase validation, browser containment/readability checks, and perceptual inspection in light and dark themes. Delegated FOUND-2 implementation passes 4 Vitest files/9 tests, typecheck, build, lint, `git diff --check`, a packed-and-installed npm bin smoke test, immutable reporting-only runtime verification, and an observed architecture mutation that detects bare provider, singular adapter, and `require` violations. Independent Luna review found and verified corrections for the package-bin seam, dependency-boundary test, configuration aliasing, direct ESLint dependency, and reporting-only invariant.
 
 ## Next step
 
-Create the local child branch, commit the verified **FOUND-2** work there, and record its evidence without performing remote operations.
+Document the local development path, run the complete Phase 1 checks, and close the feature without performing remote operations.
