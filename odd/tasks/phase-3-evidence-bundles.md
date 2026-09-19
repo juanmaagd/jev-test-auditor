@@ -70,10 +70,11 @@ Semantic scoring is only trustworthy when its evidence is minimal, reproducible,
   - Add `EvidenceBundle`, `EvidenceFragment` (kind `test` | `helper` | `production-seam` | `mock-target`), selection reasons, truncation, denied and unresolved provenance, budgets, and canonical serialization with stable ordering; reuse normalized-source SHA-256 hashing for content hashes.
   - Verify canonical ordering, hash stability under newline changes, budget validation, and path normalization.
   - Evidence: `4a91962` (`feat: add evidence bundle domain contracts`) on `feat/phase-3-evidence-domain`; 6 files, 756 additions and 5 deletions (761 authored changed lines). Suite 10 files/144 tests, typecheck, build, lint, and diff check passed. Observed RED before implementation. Orchestrator review found sort-before-normalize and unenforced byte accounting; both fixed with RED tests (normalize before sort; `includedBytes` equals UTF-8 bytes of normalized content; `truncated` consistent). Mutations on kind order, newline normalization, budget validation, path normalization, normalize-before-sort, and byte check turned RED. Shared `sha256` extracted to `src/adapters/hash.ts` with identity tests unchanged. Contract for P3-3: `buildEvidenceBundle` validates and throws; selection must truncate before building.
-- [ ] **P3-2 — Resolve relative imports safely**
+- [x] **P3-2 — Resolve relative imports safely**
   - Hand-rolled static resolver for relative specifiers with extension/index probing, realpath containment, deny-before-read, and unresolved reasons for bare/alias specifiers.
   - Classify resolved files as helper or production and expand exactly one extra hop through helpers.
   - Verify path escape, symlink escape, denied secret paths, index/extension probing order, bare specifiers, helper classification, helper-hop limit, cycles, and no execution.
+  - Evidence: `d0505ab` (`feat: resolve relative evidence imports safely`) on `feat/phase-3-import-resolution`; 6 files, 1,046 additions and 3 deletions (1,049 authored changed lines, 564 of them tests). Suite 11 files/178 tests, typecheck, build, lint, and diff check passed. Observed RED before implementation. Probing order: exact, TS-ESM rewrite, extension append (`.ts`, `.tsx`, `.js`, `.jsx`, `.mts`, `.cts`, `.mjs`, `.cjs`), then `index<ext>`. Deny patterns without `/` match the basename at any depth; patterns with `/` match the full path. `@/`, `~/`, `#` are `alias-specifier`; every other non-relative specifier, including scoped aliases, is `bare-specifier` (review removed an unverifiable npm-scope allowlist). Mutations on deny-before-read, production expansion, lexical escape, probe order, dedupe, realpath containment, and the `#` alias branch turned RED. Reused `importRecordsFor` and discovery glob helpers. Known gaps: a helper read failure rejects the whole resolution (P3-4 handles errors per test); unresolved/denied entries carry no importer.
 - [ ] **P3-3 — Select minimal helper and production fragments**
   - Map test-body identifiers to import bindings and top-level declarations in resolved files; choose the smallest declaration spans; enforce per-fragment and per-bundle budgets; order deterministically.
   - Verify named/default/namespace imports, mock targets, unreferenced imports omitted, truncation, budget exhaustion, and deterministic ordering.
@@ -83,12 +84,13 @@ Semantic scoring is only trustworthy when its evidence is minimal, reproducible,
 
 ## Progress
 
-- Current task: **P3-2**.
-- Completed tasks: **P3-1**.
-- Running authored count: **761** (over the ~400-line per-task heuristic because contracts, canonicalization, and their exhaustive tests form one boundary).
+- Current task: **P3-3**.
+- Completed tasks: **P3-1, P3-2**.
+- Running authored count: **1,810** (over the ~400-line per-task heuristic because contracts, canonicalization, and their exhaustive tests form one boundary).
 - Slice ledger:
   - `feat/phase-3-evidence-domain`: `4a91962` — evidence bundle domain contracts and canonical serialization.
+  - `feat/phase-3-import-resolution`: `d0505ab` — safe static relative import resolution with one helper hop.
 
 ## Next step
 
-Branch `feat/phase-3-import-resolution` from `feat/phase-3-evidence-domain` and delegate P3-2 (including the one-hop helper expansion) to one writer with strict TDD, then review before the work-unit commit.
+Branch `feat/phase-3-fragment-selection` from `feat/phase-3-import-resolution` and delegate P3-3 to one writer with strict TDD, then review before the work-unit commit.
