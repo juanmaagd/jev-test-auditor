@@ -9,6 +9,7 @@ import {
   type EvidenceBundle,
   type EvidenceBundleInput,
   type EvidenceFragment,
+  type OmittedEvidence,
   type UnresolvedEvidence,
 } from '../src/domain/evidence.js';
 import type { TestCaseId } from '../src/domain/test-understanding.js';
@@ -70,6 +71,16 @@ const deniedSecret = { repositoryRelativePath: 'secrets/key.pem', rule: 'deny-li
 const unresolvedLodash: UnresolvedEvidence = { specifier: 'lodash', reason: 'bare-specifier' };
 const unresolvedAlias: UnresolvedEvidence = { specifier: '@app/utils', reason: 'alias-specifier' };
 
+const omittedHelper: OmittedEvidence = {
+  repositoryRelativePath: 'src/helpers/big.ts',
+  symbol: 'bigHelper',
+  reason: 'bundle-budget-exhausted',
+};
+const omittedNoSymbol: OmittedEvidence = {
+  repositoryRelativePath: 'src/lib/other.ts',
+  reason: 'bundle-budget-exhausted',
+};
+
 function baseInput(overrides: Partial<EvidenceBundleInput> = {}): EvidenceBundleInput {
   return {
     testCaseId,
@@ -77,6 +88,7 @@ function baseInput(overrides: Partial<EvidenceBundleInput> = {}): EvidenceBundle
     fragments: [fragment(), helperFragment, productionFragment, mockFragment],
     denied: [deniedEnv, deniedSecret],
     unresolved: [unresolvedLodash, unresolvedAlias],
+    omitted: [omittedHelper, omittedNoSymbol],
     ...overrides,
   };
 }
@@ -90,18 +102,20 @@ function rawBundle(overrides: Partial<EvidenceBundle> = {}): EvidenceBundle {
     fragments: [],
     denied: [],
     unresolved: [],
+    omitted: [],
     totals: { fragments: 0, includedBytes: 0, truncatedFragments: 0 },
     ...overrides,
   };
 }
 
 describe('evidence bundle canonicalization', () => {
-  it('orders fragments, denied, and unresolved entries independent of input order', () => {
+  it('orders fragments, denied, unresolved, and omitted entries independent of input order', () => {
     const ordered = buildEvidenceBundle(baseInput());
     const shuffled = buildEvidenceBundle(baseInput({
       fragments: [mockFragment, fragment(), productionFragment, helperFragment],
       denied: [deniedSecret, deniedEnv],
       unresolved: [unresolvedAlias, unresolvedLodash],
+      omitted: [omittedNoSymbol, omittedHelper],
     }));
 
     expect(canonicalizeEvidenceBundle(shuffled)).toBe(canonicalizeEvidenceBundle(ordered));
@@ -131,6 +145,18 @@ describe('evidence bundle canonicalization', () => {
 
     expect(parsed.denied.map((entry) => entry.repositoryRelativePath)).toEqual(['.env', 'secrets/key.pem']);
     expect(parsed.unresolved.map((entry) => entry.specifier)).toEqual(['@app/utils', 'lodash']);
+  });
+
+  it('sorts omitted entries by repository-relative path, then symbol, then reason', () => {
+    const bundle = buildEvidenceBundle(baseInput({ omitted: [omittedNoSymbol, omittedHelper] }));
+    const parsed = JSON.parse(canonicalizeEvidenceBundle(bundle)) as {
+      omitted: Array<{ repositoryRelativePath: string; symbol: string | null; reason: string }>;
+    };
+
+    expect(parsed.omitted).toEqual([
+      { repositoryRelativePath: 'src/helpers/big.ts', symbol: 'bigHelper', reason: 'bundle-budget-exhausted' },
+      { repositoryRelativePath: 'src/lib/other.ts', symbol: null, reason: 'bundle-budget-exhausted' },
+    ]);
   });
 
   it('produces byte-identical serialization for structurally equal inputs', () => {
@@ -195,6 +221,27 @@ describe('evidence bundle canonicalization', () => {
     const alreadyNormalizedAndReversed = rawBundle({ denied: [deniedBCleanAgain, deniedAClean] });
 
     expect(canonicalizeEvidenceBundle(spelledDifferently)).toBe(canonicalizeEvidenceBundle(alreadyNormalizedAndReversed));
+  });
+
+  it('normalizes omitted paths before sorting, so equivalent bundles canonicalize identically regardless of spelling or order', () => {
+    const omittedASpelledOddly: OmittedEvidence = { repositoryRelativePath: 'zzz/../src/a.ts', reason: 'bundle-budget-exhausted' };
+    const omittedBClean: OmittedEvidence = { repositoryRelativePath: 'src/b.ts', reason: 'bundle-budget-exhausted' };
+    const omittedAClean: OmittedEvidence = { repositoryRelativePath: 'src/a.ts', reason: 'bundle-budget-exhausted' };
+    const omittedBCleanAgain: OmittedEvidence = { repositoryRelativePath: 'src/b.ts', reason: 'bundle-budget-exhausted' };
+
+    const spelledDifferently = rawBundle({ omitted: [omittedASpelledOddly, omittedBClean] });
+    const alreadyNormalizedAndReversed = rawBundle({ omitted: [omittedBCleanAgain, omittedAClean] });
+
+    expect(canonicalizeEvidenceBundle(spelledDifferently)).toBe(canonicalizeEvidenceBundle(alreadyNormalizedAndReversed));
+  });
+
+  it('rejects an omitted entry whose path escapes the repository root', () => {
+    expect(() => buildEvidenceBundle(baseInput({
+      fragments: [],
+      denied: [],
+      unresolved: [],
+      omitted: [{ repositoryRelativePath: '../outside.ts', reason: 'bundle-budget-exhausted' }],
+    }))).toThrow(/repository-relative/u);
   });
 });
 
@@ -283,7 +330,7 @@ describe('evidence budget validation', () => {
       helperFragment,
     ];
 
-    expect(() => buildEvidenceBundle({ testCaseId, budget: tightBudget, fragments, denied: [], unresolved: [] }))
+    expect(() => buildEvidenceBundle({ testCaseId, budget: tightBudget, fragments, denied: [], unresolved: [], omitted: [] }))
       .toThrow(/bundle budget/u);
   });
 });

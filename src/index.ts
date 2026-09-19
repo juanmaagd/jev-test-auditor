@@ -71,6 +71,8 @@ export {
   type EvidenceSelectionReason,
   type EvidenceTotals,
   type EvidenceTruncation,
+  type OmittedEvidence,
+  type OmittedEvidenceReason,
   type ResolvedEvidenceFile,
   type UnresolvedEvidence,
   type UnresolvedEvidenceReason,
@@ -84,6 +86,10 @@ export {
   type EvidenceResolutionRequest,
   type EvidenceResolutionResult,
 } from './adapters/evidence-resolution.js';
+export {
+  selectEvidence,
+  type EvidenceSelectionRequest,
+} from './adapters/evidence-selection.js';
 
 export { runAudit } from './application/audit.js';
 export {

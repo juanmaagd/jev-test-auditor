@@ -62,6 +62,22 @@ export interface UnresolvedEvidence {
   readonly reason: UnresolvedEvidenceReason;
 }
 
+/** Why a candidate fragment, otherwise selectable, was left out of the bundle. */
+export type OmittedEvidenceReason = 'bundle-budget-exhausted';
+
+/**
+ * A fragment that fragment selection (Phase 3 task 3,
+ * `src/adapters/evidence-selection.ts`) identified as useful evidence but
+ * could not include because the bundle byte budget was already spent by
+ * higher-priority fragments. Recorded so a caller can see what evidence was
+ * left out, rather than the fragment silently disappearing.
+ */
+export interface OmittedEvidence {
+  readonly repositoryRelativePath: string;
+  readonly symbol?: string;
+  readonly reason: OmittedEvidenceReason;
+}
+
 /**
  * A repository-local file reached while resolving a test case's relative
  * imports (Phase 3 import resolution). `hop` is `1` for a direct import of
@@ -154,6 +170,7 @@ export interface EvidenceBundle {
   readonly fragments: readonly EvidenceFragment[];
   readonly denied: readonly DeniedEvidence[];
   readonly unresolved: readonly UnresolvedEvidence[];
+  readonly omitted: readonly OmittedEvidence[];
   readonly totals: EvidenceTotals;
 }
 
@@ -163,6 +180,7 @@ export interface EvidenceBundleInput {
   readonly fragments: readonly EvidenceFragment[];
   readonly denied: readonly DeniedEvidence[];
   readonly unresolved: readonly UnresolvedEvidence[];
+  readonly omitted: readonly OmittedEvidence[];
 }
 
 /** UTF-8 byte length of a string, via the global `TextEncoder` (no Node imports; domain stays pure). */
@@ -184,6 +202,13 @@ function normalizeDeniedPath(denied: DeniedEvidence): DeniedEvidence {
     : { ...denied, repositoryRelativePath };
 }
 
+function normalizeOmittedPath(omitted: OmittedEvidence): OmittedEvidence {
+  const repositoryRelativePath = normalizeRepositoryRelativePath(omitted.repositoryRelativePath);
+  return repositoryRelativePath === omitted.repositoryRelativePath
+    ? omitted
+    : { ...omitted, repositoryRelativePath };
+}
+
 /**
  * Builds a deterministic {@link EvidenceBundle}: normalizes and validates
  * fragment/denied repository-relative paths, enforces the per-fragment and
@@ -201,6 +226,7 @@ export function buildEvidenceBundle(input: EvidenceBundleInput): EvidenceBundle 
 
   const fragments = input.fragments.map(normalizeFragmentPath);
   const denied = input.denied.map(normalizeDeniedPath);
+  const omitted = input.omitted.map(normalizeOmittedPath);
 
   let includedBytes = 0;
   let truncatedFragments = 0;
@@ -253,6 +279,7 @@ export function buildEvidenceBundle(input: EvidenceBundleInput): EvidenceBundle 
     fragments,
     denied,
     unresolved: input.unresolved,
+    omitted,
     totals: {
       fragments: fragments.length,
       includedBytes,
@@ -306,6 +333,12 @@ interface CanonicalUnresolvedEvidence {
   readonly reason: UnresolvedEvidenceReason;
 }
 
+interface CanonicalOmittedEvidence {
+  readonly repositoryRelativePath: string;
+  readonly symbol: string | null;
+  readonly reason: OmittedEvidenceReason;
+}
+
 /**
  * Produces the canonical (normalized path, normalized content) form of a
  * fragment. Must run before any order-dependent step (sorting) so that
@@ -347,6 +380,15 @@ function canonicalUnresolved(unresolved: UnresolvedEvidence): CanonicalUnresolve
   };
 }
 
+/** Produces the canonical (normalized path) form of an omitted entry. Must run before sorting; see {@link canonicalFragment}. */
+function canonicalOmitted(omitted: OmittedEvidence): CanonicalOmittedEvidence {
+  return {
+    repositoryRelativePath: normalizeRepositoryRelativePath(omitted.repositoryRelativePath),
+    symbol: omitted.symbol ?? null,
+    reason: omitted.reason,
+  };
+}
+
 function compareCanonicalFragments(left: CanonicalEvidenceFragment, right: CanonicalEvidenceFragment): number {
   return (
     compareNumbers(FRAGMENT_KIND_ORDER[left.kind], FRAGMENT_KIND_ORDER[right.kind])
@@ -372,6 +414,14 @@ function compareUnresolved(left: UnresolvedEvidence, right: UnresolvedEvidence):
   );
 }
 
+function compareCanonicalOmitted(left: CanonicalOmittedEvidence, right: CanonicalOmittedEvidence): number {
+  return (
+    compareStrings(left.repositoryRelativePath, right.repositoryRelativePath)
+    || compareStrings(left.symbol ?? '', right.symbol ?? '')
+    || compareStrings(left.reason, right.reason)
+  );
+}
+
 /**
  * Serializes an {@link EvidenceBundle} to a stable JSON string: fixed key
  * order, fragments/denied/unresolved entries sorted deterministically
@@ -389,6 +439,7 @@ export function canonicalizeEvidenceBundle(bundle: EvidenceBundle): string {
   const fragments = bundle.fragments.map(canonicalFragment).sort(compareCanonicalFragments);
   const denied = bundle.denied.map(canonicalDenied).sort(compareCanonicalDenied);
   const unresolved = [...bundle.unresolved].sort(compareUnresolved).map(canonicalUnresolved);
+  const omitted = bundle.omitted.map(canonicalOmitted).sort(compareCanonicalOmitted);
 
   return JSON.stringify({
     version: bundle.version,
@@ -405,5 +456,6 @@ export function canonicalizeEvidenceBundle(bundle: EvidenceBundle): string {
     fragments,
     denied,
     unresolved,
+    omitted,
   });
 }
