@@ -117,7 +117,19 @@ describe('packed installed package', () => {
       expect(apiSmoke.trim()).toBe('api-ok');
 
       await mkdir(fixtureRoot, { recursive: true });
-      await writeFile(join(fixtureRoot, 'packed.test.ts'), "import { test } from 'vitest'; test('packed', () => {});");
+      // `shared.ts` is a production module reached only through the helper
+      // (basename contains "helper"), exercising evidence resolution's
+      // hop-1 (helper) -> hop-2 (production-seam) expansion through the
+      // packed, installed build.
+      await writeFile(join(fixtureRoot, 'shared.ts'), 'export function add(a, b) {\n  return a + b;\n}\n');
+      await writeFile(
+        join(fixtureRoot, 'shared.helper.ts'),
+        "import { add } from './shared.js';\nexport function helperAdd(a, b) {\n  return add(a, b);\n}\n",
+      );
+      await writeFile(
+        join(fixtureRoot, 'packed.test.ts'),
+        "import { expect, test } from 'vitest';\nimport { helperAdd } from './shared.helper.js';\ntest('packed', () => { expect(helperAdd(1, 2)).toBe(3); });",
+      );
       await writeFile(join(fixtureRoot, 'broken.test.ts'), 'const = ;');
       await writeFile(join(fixtureRoot, 'canary.spec.ts'), "import { writeFileSync } from 'node:fs'; writeFileSync('executed.marker', 'bad');");
 
@@ -129,23 +141,82 @@ describe('packed installed package', () => {
       );
       const help = execInstalledBin(binPath, ['--help'], fixtureRoot);
       expect(help).toContain('Usage:');
+      expect(help).toContain('--inspect-payloads');
 
       const output = execInstalledBin(binPath, ['audit'], fixtureRoot);
       const lines = output.trim().split(/\r?\n/u);
-      const summary = JSON.parse(lines[0] ?? '') as {
+      interface Summary {
         readonly reportingOnly: boolean;
-        readonly files: readonly { readonly path: string; readonly framework: string; readonly testCaseCount: number; readonly dynamicMetadataCount: number }[];
-        readonly totals: { readonly files: number; readonly testCases: number; readonly diagnostics: number };
-      };
+        readonly files: readonly {
+          readonly path: string;
+          readonly framework: string;
+          readonly testCaseCount: number;
+          readonly dynamicMetadataCount: number;
+          readonly evidenceBundleCount: number;
+        }[];
+        readonly totals: {
+          readonly files: number;
+          readonly testCases: number;
+          readonly diagnostics: number;
+          readonly evidenceBundles: number;
+          readonly evidenceFragments: number;
+          readonly evidenceTruncatedFragments: number;
+          readonly evidenceOmitted: number;
+          readonly evidenceDenied: number;
+          readonly evidenceUnresolved: number;
+        };
+      }
+      const summary = JSON.parse(lines[0] ?? '') as Summary;
       expect(lines).toHaveLength(1);
       expect(summary.reportingOnly).toBe(true);
       expect(summary.files).toEqual([
-        { path: 'broken.test.ts', framework: 'unknown', testCaseCount: 0, dynamicMetadataCount: 0 },
-        { path: 'canary.spec.ts', framework: 'unknown', testCaseCount: 0, dynamicMetadataCount: 0 },
-        { path: 'packed.test.ts', framework: 'vitest', testCaseCount: 1, dynamicMetadataCount: 0 },
+        { path: 'broken.test.ts', framework: 'unknown', testCaseCount: 0, dynamicMetadataCount: 0, evidenceBundleCount: 0 },
+        { path: 'canary.spec.ts', framework: 'unknown', testCaseCount: 0, dynamicMetadataCount: 0, evidenceBundleCount: 0 },
+        { path: 'packed.test.ts', framework: 'vitest', testCaseCount: 1, dynamicMetadataCount: 0, evidenceBundleCount: 1 },
       ]);
-      expect(summary.totals).toMatchObject({ files: 3, testCases: 1, diagnostics: 1 });
+      expect(summary.totals).toMatchObject({
+        files: 3,
+        testCases: 1,
+        diagnostics: 1,
+        evidenceBundles: 1,
+        evidenceDenied: 0,
+      });
+      expect(summary.totals.evidenceFragments).toBeGreaterThanOrEqual(2); // at least the test body and the resolved `add` production seam
       expect(installedBinStatus(binPath, ['invalid'], fixtureRoot)).toBe(1);
+      await expect(access(join(fixtureRoot, 'executed.marker'))).rejects.toThrow();
+
+      const inspectOutput = execInstalledBin(binPath, ['audit', '--inspect-payloads'], fixtureRoot);
+      const inspectLines = inspectOutput.trim().split(/\r?\n/u);
+      const inspectSummary = JSON.parse(inspectLines[0] ?? '') as Summary;
+      expect(inspectSummary.totals.evidenceBundles).toBe(1);
+      // Exactly one bundle line, following the summary line, for the one test case packed.test.ts contains.
+      expect(inspectLines).toHaveLength(1 + inspectSummary.totals.evidenceBundles);
+
+      interface BundleLine {
+        readonly version: 1;
+        readonly testCaseId: string;
+        readonly budget: { readonly maxFragmentBytes: number; readonly maxBundleBytes: number };
+        readonly totals: { readonly fragments: number; readonly includedBytes: number; readonly truncatedFragments: number };
+        readonly fragments: readonly {
+          readonly kind: string;
+          readonly repositoryRelativePath: string;
+          readonly content: string;
+          readonly contentHash: string;
+          readonly selectionReason: string;
+          readonly truncation: { readonly truncated: boolean; readonly originalBytes: number; readonly includedBytes: number };
+        }[];
+        readonly denied: readonly unknown[];
+        readonly unresolved: readonly { readonly specifier: string; readonly reason: string }[];
+        readonly omitted: readonly unknown[];
+      }
+      const bundle = JSON.parse(inspectLines[1] ?? '') as BundleLine;
+      expect(bundle.version).toBe(1);
+      expect(bundle.testCaseId).toMatch(/^tc:v1:/u);
+      expect(bundle.fragments.map((fragment) => fragment.kind).sort()).toEqual(['helper', 'production-seam', 'test']);
+      expect(bundle.fragments.find((fragment) => fragment.kind === 'production-seam')?.repositoryRelativePath).toBe('shared.ts');
+      expect(bundle.fragments.find((fragment) => fragment.kind === 'helper')?.repositoryRelativePath).toBe('shared.helper.ts');
+      expect(bundle.unresolved).toEqual([{ specifier: 'vitest', reason: 'bare-specifier' }]);
+      expect(bundle.denied).toEqual([]);
       await expect(access(join(fixtureRoot, 'executed.marker'))).rejects.toThrow();
     } finally {
       await rm(temporaryRoot, { recursive: true, force: true });

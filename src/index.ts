@@ -3,7 +3,9 @@ export {
   DEFAULT_CONFIGURATION,
   resolveConfiguration,
   type ConfigurationOverrides,
+  type EvidenceConfigurationOverrides,
   type ResolvedConfiguration,
+  type ResolvedEvidenceConfiguration,
 } from './domain/config.js';
 export { createTestCaseId } from './adapters/test-case-identity.js';
 export {
@@ -90,11 +92,19 @@ export {
   selectEvidence,
   type EvidenceSelectionRequest,
 } from './adapters/evidence-selection.js';
+export {
+  createAuditEvidencePort,
+  createMemoizingSourceReader,
+  type SourceReader,
+} from './adapters/evidence-audit-port.js';
 
 export { runAudit } from './application/audit.js';
 export {
   type AuditDiagnostic,
   type AuditDiscoveryPort,
+  type AuditEvidenceBuildRequest,
+  type AuditEvidenceBuildResult,
+  type AuditEvidencePort,
   type AuditExtractorPort,
   type AuditFileResult,
   type AuditPorts,

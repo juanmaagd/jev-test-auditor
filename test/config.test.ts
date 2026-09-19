@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_CONFIGURATION, resolveConfiguration } from '../src/domain/config.js';
+import { DEFAULT_EVIDENCE_BUDGET } from '../src/domain/evidence.js';
 
 describe('resolved configuration', () => {
   it('uses deterministic zero-config defaults', () => {
@@ -8,6 +9,11 @@ describe('resolved configuration', () => {
       include: ['**/*.{test,spec}.{js,jsx,ts,tsx}'],
       exclude: ['**/node_modules/**', '**/dist/**'],
       concurrency: 4,
+      evidence: {
+        maxFragmentBytes: DEFAULT_EVIDENCE_BUDGET.maxFragmentBytes,
+        maxBundleBytes: DEFAULT_EVIDENCE_BUDGET.maxBundleBytes,
+        deny: [],
+      },
       reportingOnly: true,
     });
   });
@@ -47,5 +53,49 @@ describe('resolved configuration', () => {
     const resolved = resolveConfiguration({ reportingOnly: false });
 
     expect(resolved.reportingOnly).toBe(true);
+  });
+});
+
+describe('evidence configuration', () => {
+  it('defaults to the default evidence budget and an empty additive deny list', () => {
+    const resolved = resolveConfiguration();
+
+    expect(resolved.evidence).toEqual({
+      maxFragmentBytes: DEFAULT_EVIDENCE_BUDGET.maxFragmentBytes,
+      maxBundleBytes: DEFAULT_EVIDENCE_BUDGET.maxBundleBytes,
+      deny: [],
+    });
+  });
+
+  it('overrides only the requested evidence settings', () => {
+    const resolved = resolveConfiguration({ evidence: { maxFragmentBytes: 1024 } });
+
+    expect(resolved.evidence).toEqual({
+      maxFragmentBytes: 1024,
+      maxBundleBytes: DEFAULT_EVIDENCE_BUDGET.maxBundleBytes,
+      deny: [],
+    });
+  });
+
+  it('treats configured deny patterns as additive (defaults still apply downstream, this only carries the extras)', () => {
+    const resolved = resolveConfiguration({ evidence: { deny: ['**/fixtures/**'] } });
+
+    expect(resolved.evidence.deny).toEqual(['**/fixtures/**']);
+  });
+
+  it('clones the caller-provided deny array', () => {
+    const deny = ['**/fixtures/**'];
+    const resolved = resolveConfiguration({ evidence: { deny } });
+
+    expect(resolved.evidence.deny).toEqual(deny);
+    expect(resolved.evidence.deny).not.toBe(deny);
+  });
+
+  it('validates the resolved evidence budget and throws for a non-positive maxFragmentBytes', () => {
+    expect(() => resolveConfiguration({ evidence: { maxFragmentBytes: 0 } })).toThrow(RangeError);
+  });
+
+  it('validates the resolved evidence budget and throws when maxFragmentBytes exceeds maxBundleBytes', () => {
+    expect(() => resolveConfiguration({ evidence: { maxFragmentBytes: 999_999 } })).toThrow(RangeError);
   });
 });

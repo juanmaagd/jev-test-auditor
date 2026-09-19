@@ -9,6 +9,7 @@ import {
   type UnresolvedEvidenceReason,
 } from '../domain/evidence.js';
 import { normalizeRepositoryRelativePath, type ImportRecord } from '../domain/test-understanding.js';
+import type { SourceReadRequest } from '../domain/audit.js';
 import { isOutsideRootRelative } from './containment.js';
 import { globRegExp, matchesGlob } from './repository-discovery.js';
 import { readSourceFile } from './source-reader.js';
@@ -22,6 +23,14 @@ export interface EvidenceResolutionRequest {
   readonly imports: readonly ImportRecord[];
   /** Additive glob deny patterns, layered on top of {@link DEFAULT_EVIDENCE_DENY_PATTERNS}. */
   readonly deny?: readonly string[];
+  /**
+   * Injectable reader for the hop-1 helper files this function must read to
+   * discover hop-2 imports. Defaults to {@link readSourceFile}. A caller that
+   * shares one memoizing reader across an entire audit run (see
+   * `src/adapters/evidence-audit-port.ts`) passes it here too, so a helper
+   * read by resolution is never re-read by fragment selection.
+   */
+  readonly readSource?: (request: SourceReadRequest) => Promise<string>;
 }
 
 export interface EvidenceResolutionResult {
@@ -337,6 +346,7 @@ export async function resolveEvidenceFiles(request: EvidenceResolutionRequest): 
   const rootDir = await realpath(requestedRoot);
   const testFilePath = normalizeRepositoryRelativePath(request.testFilePath);
   const denyPatterns: readonly string[] = [...DEFAULT_EVIDENCE_DENY_PATTERNS, ...(request.deny ?? [])];
+  const readSource = request.readSource ?? readSourceFile;
 
   const denied: DeniedEvidence[] = [];
   const unresolved: UnresolvedEvidence[] = [];
@@ -360,7 +370,7 @@ export async function resolveEvidenceFiles(request: EvidenceResolutionRequest): 
     .sort((left, right) => compareStrings(left.repositoryRelativePath, right.repositoryRelativePath));
 
   for (const helper of hop1Helpers) {
-    const sourceText = await readSourceFile({
+    const sourceText = await readSource({
       rootDir: request.rootDir,
       repositoryRelativePath: helper.repositoryRelativePath,
     });

@@ -1,6 +1,6 @@
 # jev-test-auditor
 
-`jev-test-auditor` is a local-first CLI for auditing the semantic quality of existing JavaScript and TypeScript tests. The current Phase 2 pipeline discovers supported test files, reads them without executing project code, and extracts deterministic structural test understanding. Evaluation, persistence, and quality findings are later phases.
+`jev-test-auditor` is a local-first CLI for auditing the semantic quality of existing JavaScript and TypeScript tests. The pipeline discovers supported test files, reads them without executing project code, extracts deterministic structural test understanding, and — for every extracted test case — selects a minimal, provenance-aware local evidence bundle (the test body plus the smallest useful helper and production fragments it references). Nothing built here is sent anywhere: Jev evaluation, persistence, and quality findings are later phases.
 
 ## Quick path
 
@@ -25,19 +25,32 @@ jev-test-auditor audit [options]
 jev-test-auditor --help
 ```
 
-| Command | Foundation behavior |
+| Command / option | Behavior |
 | --- | --- |
 | `--help` | Prints usage and command information. |
-| `audit` | Discovers `.test`/`.spec` JavaScript and TypeScript files, extracts Jest/Vitest test cases, and prints a reporting-only JSON summary. Diagnostics do not change the zero exit status. |
+| `audit` | Discovers `.test`/`.spec` JavaScript and TypeScript files, extracts Jest/Vitest test cases, selects each test case's local evidence bundle, and prints a reporting-only JSON summary. Diagnostics do not change the zero exit status. |
+| `audit --rootDir <path>` | Audits a configured repository root instead of the current directory. |
+| `audit --inspect-payloads` | Prints the same summary line first, then one JSON line per selected evidence bundle (`canonicalizeEvidenceBundle` output), ordered by file path then test-case order. This is the local evidence state selected on disk — fragments, provenance, denials, truncation — **not** the Jev wire request shape (that belongs to a later phase), and it makes no network call either way. |
+
+The default summary's `totals` include evidence counters (`evidenceBundles`, `evidenceFragments`, `evidenceTruncatedFragments`, `evidenceOmitted`, `evidenceDenied`, `evidenceUnresolved`), and each file entry carries `evidenceBundleCount`. Bundle *contents* — fragment text, spans, hashes — never appear in the default line; only `--inspect-payloads` prints them.
 
 ## Delivery phases
 
 | Phase | Scope | Status |
 | --- | --- | --- |
 | 1. Foundation | One TypeScript package, inward dependency boundaries, configuration, and CLI entry point. | **Completed** |
-| 2. Test understanding | Discover and parse Jest/Vitest tests and build minimal, provenance-aware evidence bundles. | **Current and completed** |
-| 3. Evaluation and reporting | Add Jev judgments, deterministic classification, persistence, caching, scheduling, JSON, and HTML reports. | Planned; not implemented |
-| 4. Benchmarks and hardening | Add deterministic benchmarks, benchmark review tooling, calibration, privacy/recovery documentation, and release hardening. | Planned; not implemented |
+| 2. Test understanding | Discover and parse Jest/Vitest tests into deterministic structural test understanding (test cases, imports, mocks, assertions). | **Completed** |
+| 3. Evidence and context | For every extracted test case, resolve its relative imports safely and select the smallest useful helper/production-seam evidence within configured budgets, exposed locally through `--inspect-payloads`. | **Completed** |
+| 4. Evaluation and reporting | Add Jev judgments, deterministic classification, persistence, caching, scheduling, JSON, and HTML reports. | Planned; not implemented |
+| 5. Benchmarks and hardening | Add deterministic benchmarks, benchmark review tooling, calibration, privacy/recovery documentation, and release hardening. | Planned; not implemented |
+
+## Evidence bundles
+
+- **Budgets**: each fragment is capped at `maxFragmentBytes` (default 4 KiB) and each bundle at `maxBundleBytes` (default 16 KiB), overridable through configuration (`evidence: { maxFragmentBytes, maxBundleBytes }`); values are provisional until later calibration. A fragment that would overflow is truncated at the last fitting line (falling back to a UTF-8-safe byte cut); a fragment that cannot fit at all is recorded as `omitted` rather than invented.
+- **Deny list**: sensitive, generated, and vendor paths (`.env*`, `*.pem`, `*.key`, `**/node_modules/**`, `**/dist/**`, and more — see `DEFAULT_EVIDENCE_DENY_PATTERNS`) are denied *before* any read. Configuration (`evidence: { deny: [...] }`) adds patterns on top of these defaults; it can never remove or replace them.
+- **Import depth**: direct relative imports of the test file (hop 1), plus one extra hop only through helper files (a test file, a file under `test`/`tests`/`__tests__`/`__mocks__`, or a file whose basename contains `helper`, `fixture`, or `setup`). Production files are never expanded further. Only relative specifiers are resolved; bare and aliased specifiers are recorded as `unresolved` with a reason.
+- **Failure isolation, two levels, never a placeholder bundle**: uncertainty is not quality, so a failure never produces an empty-but-structurally-valid bundle standing in for "this test genuinely has no supporting evidence." A whole-file failure (e.g. a helper read failing) is isolated to that file — one `evidence-failed` diagnostic naming the path, an empty `evidence` array for that file, every other file unaffected. A single test case's selection failing does not drop that file's other bundles, and produces no bundle of its own — only one `evidence-selection-failed` diagnostic naming that test case's id and name. Either way the diagnostic is merged into both the file's own diagnostics and the root `diagnostics` (with the file path attached), exactly like an extraction diagnostic. `evidenceBundleCount` and the evidence totals always reflect only the bundles that were actually built. Nothing here executes audited code, package scripts, test runners, or configuration modules.
+- **Nothing is sent anywhere**: evidence selection is entirely local. `src/` contains no network client (no `node:http`/`node:https`/`node:net`/`node:tls`/`undici`, no `fetch` call), enforced by an architecture test alongside the inward-dependency check.
 
 ## Product boundaries
 
@@ -46,7 +59,7 @@ jev-test-auditor --help
 - E2E frameworks, automatic test rewriting, general source review, and languages outside JavaScript/TypeScript are out of scope.
 - Discovery is repository-local and lexical. Generated/vendor/build paths, symlink escapes, and conservative E2E signals are excluded explicitly.
 - The audit pipeline is reporting-only: it never executes audited source, package scripts, test runners, or configuration modules. Read and parse diagnostics are emitted in JSON and do not fail the audit.
-- Phase 2 emits structural test understanding only. Jev evaluation, scoring, persistence, HTML reports, and SQLite remain future phases.
+- Phases 2 and 3 emit structural test understanding and local evidence bundles only. Jev evaluation, scoring, persistence, HTML reports, and SQLite remain future phases.
 - CI is reporting-only in V1; findings do not fail a build.
 - Normal operation is autonomous and does not require human-in-the-loop labeling or approval.
 

@@ -6,6 +6,8 @@ import { runAudit } from '../application/audit.js';
 import { discoverTestFiles } from '../adapters/repository-discovery.js';
 import { readSourceFile } from '../adapters/source-reader.js';
 import { extractTestCases } from '../adapters/test-extraction.js';
+import { createAuditEvidencePort } from '../adapters/evidence-audit-port.js';
+import { canonicalizeEvidenceBundle } from '../domain/evidence.js';
 import type { AuditPorts, AuditRequest, AuditResult } from '../domain/audit.js';
 import type { ConfigurationOverrides } from '../domain/config.js';
 
@@ -27,15 +29,29 @@ Commands:
   audit       Discover and extract test understanding without executing project code
 
 Options:
-  --rootDir <path>  Audit a configured repository root
-  --help            Show this help message
+  --rootDir <path>   Audit a configured repository root
+  --inspect-payloads Also print each test case's local evidence bundle, one JSON line per bundle,
+                      after the summary line. This is the local evidence state selected on disk
+                      (fragments, provenance, denials, truncation) — not the Jev wire request
+                      shape, and no network call is made either way.
+  --help             Show this help message
 `;
 
-const productionPorts: AuditPorts = {
-  discovery: { discover: discoverTestFiles },
-  sourceReader: { read: readSourceFile },
-  extractor: { extract: extractTestCases },
-};
+/**
+ * Fresh per invocation (never a module-level singleton): `createAuditEvidencePort`
+ * builds one memoizing source-read cache for the port it returns, and that cache
+ * must live for exactly one audit run — reusing it across runs (e.g. repeated
+ * `runCli` calls against different roots within the same process, as tests do)
+ * would let content read for an earlier run leak into a later one.
+ */
+function createProductionPorts(): AuditPorts {
+  return {
+    discovery: { discover: discoverTestFiles },
+    sourceReader: { read: readSourceFile },
+    extractor: { extract: extractTestCases },
+    evidence: createAuditEvidencePort(),
+  };
+}
 
 function summary(result: AuditResult): string {
   return JSON.stringify({
@@ -46,6 +62,7 @@ function summary(result: AuditResult): string {
       framework: file.discovered.framework,
       testCaseCount: file.testCases.length,
       dynamicMetadataCount: file.dynamicMetadata.length,
+      evidenceBundleCount: file.evidence.length,
     })),
     excluded: result.excluded.map((file) => ({ path: file.repositoryRelativePath, reason: file.reason })),
     totals: result.totals,
@@ -58,11 +75,26 @@ function summary(result: AuditResult): string {
   });
 }
 
-function parseAuditOptions(args: readonly string[]): { readonly overrides: ConfigurationOverrides } | { readonly error: string } | { readonly help: true } {
+/** One canonical bundle line per test case's evidence bundle, ordered by file path (already sorted in `result.files`) then test-case order (each file's `evidence` array mirrors its `testCases` order). */
+function inspectPayloadLines(result: AuditResult): readonly string[] {
+  return result.files.flatMap((file) => file.evidence.map((bundle) => canonicalizeEvidenceBundle(bundle)));
+}
+
+interface ParsedAuditOptions {
+  readonly overrides: ConfigurationOverrides;
+  readonly inspectPayloads: boolean;
+}
+
+function parseAuditOptions(args: readonly string[]): ParsedAuditOptions | { readonly error: string } | { readonly help: true } {
   const overrides: ConfigurationOverrides = {};
+  let inspectPayloads = false;
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
     if (argument === '--help') return { help: true };
+    if (argument === '--inspect-payloads') {
+      inspectPayloads = true;
+      continue;
+    }
     if (argument === '--rootDir' || argument === '--root-dir') {
       const rootDir = args[index + 1];
       if (rootDir === undefined || rootDir.startsWith('--')) return { error: `${argument} requires a path` };
@@ -72,7 +104,7 @@ function parseAuditOptions(args: readonly string[]): { readonly overrides: Confi
     }
     return { error: `Unknown option: ${argument ?? ''}` };
   }
-  return { overrides };
+  return { overrides, inspectPayloads };
 }
 
 export async function runCli(
@@ -102,9 +134,12 @@ export async function runCli(
 
   const configuration = getResolvedConfiguration(parsed.overrides);
   const result = dependencies.audit === undefined
-    ? await runAudit(configuration, productionPorts)
+    ? await runAudit(configuration, createProductionPorts())
     : await dependencies.audit(configuration);
   io.writeLine(summary(result));
+  if (parsed.inspectPayloads) {
+    for (const line of inspectPayloadLines(result)) io.writeLine(line);
+  }
   return 0;
 }
 

@@ -123,3 +123,60 @@ describe('architecture boundaries', () => {
     await expect(findBoundaryViolations()).resolves.toEqual([]);
   });
 });
+
+/**
+ * `--inspect-payloads` (Phase 3, P3-4) prints only the already-selected local
+ * evidence state; nothing in the audit pipeline may reach the network to
+ * produce or supplement it. This is a static, repository-wide guard (all of
+ * `src/`, not just `domain`/`application`) alongside the runtime check in
+ * `test/cli.test.ts` that stubs `globalThis.fetch` during a real audit run.
+ */
+const FORBIDDEN_NETWORK_SPECIFIERS = new Set([
+  'node:http', 'http',
+  'node:https', 'https',
+  'node:net', 'net',
+  'node:tls', 'tls',
+  'undici',
+]);
+
+function containsBareFetchCall(sourceFile: ts.SourceFile): boolean {
+  let found = false;
+  function visit(node: ts.Node): void {
+    if (found) return;
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'fetch') {
+      found = true;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(sourceFile);
+  return found;
+}
+
+describe('no network access', () => {
+  it('never imports a raw network module anywhere under src/', async () => {
+    const files = await sourceFiles(join(process.cwd(), 'src'));
+    const violations: { readonly file: string; readonly specifier: string }[] = [];
+
+    for (const file of files) {
+      const source = ts.createSourceFile(file, await readFile(file, 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+      for (const dependency of importsFrom(source)) {
+        if (FORBIDDEN_NETWORK_SPECIFIERS.has(dependency.specifier)) violations.push({ file, specifier: dependency.specifier });
+      }
+    }
+
+    expect(violations).toEqual([]);
+  });
+
+  it('never calls a bare fetch(...) anywhere under src/', async () => {
+    const files = await sourceFiles(join(process.cwd(), 'src'));
+    const violations: string[] = [];
+
+    for (const file of files) {
+      const source = ts.createSourceFile(file, await readFile(file, 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+      if (containsBareFetchCall(source)) violations.push(file);
+    }
+
+    expect(violations).toEqual([]);
+  });
+});
