@@ -40,7 +40,7 @@ Semantic scoring is only trustworthy when its evidence is minimal, reproducible,
 
 - Deny list defaults: `.env*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_rsa*`, `**/secrets/**`, `**/.git/**`, `**/node_modules/**`, `**/dist/**`, `**/build/**`, `**/coverage/**`, `**/vendor/**`, `*.min.js`, `*.map`, `*.d.ts`; configurable additively.
 - Default budgets: 4 KiB per fragment and 16 KiB per bundle, overridable through configuration; exact values are provisional until Phase 9 calibration.
-- Import depth: direct imports of the test file only (depth 1). Transitive expansion is deferred.
+- Import depth: direct relative imports of the test file (depth 1), plus one extra hop only through helper files (user decision, 2026-09-19). A helper is a test file or a file under `test/`, `tests/`, `__tests__/`, or `__mocks__/`, or whose basename contains `helper`, `fixture`, or `setup`. Production files are never expanded further; all hops share the bundle budget.
 - Default audit JSON adds only evidence totals; full bundles appear only with `--inspect-payloads`.
 
 ## Delivery
@@ -66,12 +66,14 @@ Semantic scoring is only trustworthy when its evidence is minimal, reproducible,
 
 ## Tasks
 
-- [ ] **P3-1 — Define evidence bundle domain contracts**
+- [x] **P3-1 — Define evidence bundle domain contracts**
   - Add `EvidenceBundle`, `EvidenceFragment` (kind `test` | `helper` | `production-seam` | `mock-target`), selection reasons, truncation, denied and unresolved provenance, budgets, and canonical serialization with stable ordering; reuse normalized-source SHA-256 hashing for content hashes.
   - Verify canonical ordering, hash stability under newline changes, budget validation, and path normalization.
+  - Evidence: `4a91962` (`feat: add evidence bundle domain contracts`) on `feat/phase-3-evidence-domain`; 6 files, 756 additions and 5 deletions (761 authored changed lines). Suite 10 files/144 tests, typecheck, build, lint, and diff check passed. Observed RED before implementation. Orchestrator review found sort-before-normalize and unenforced byte accounting; both fixed with RED tests (normalize before sort; `includedBytes` equals UTF-8 bytes of normalized content; `truncated` consistent). Mutations on kind order, newline normalization, budget validation, path normalization, normalize-before-sort, and byte check turned RED. Shared `sha256` extracted to `src/adapters/hash.ts` with identity tests unchanged. Contract for P3-3: `buildEvidenceBundle` validates and throws; selection must truncate before building.
 - [ ] **P3-2 — Resolve relative imports safely**
   - Hand-rolled static resolver for relative specifiers with extension/index probing, realpath containment, deny-before-read, and unresolved reasons for bare/alias specifiers.
-  - Verify path escape, symlink escape, denied secret paths, index/extension probing order, bare specifiers, and no execution.
+  - Classify resolved files as helper or production and expand exactly one extra hop through helpers.
+  - Verify path escape, symlink escape, denied secret paths, index/extension probing order, bare specifiers, helper classification, helper-hop limit, cycles, and no execution.
 - [ ] **P3-3 — Select minimal helper and production fragments**
   - Map test-body identifiers to import bindings and top-level declarations in resolved files; choose the smallest declaration spans; enforce per-fragment and per-bundle budgets; order deterministically.
   - Verify named/default/namespace imports, mock targets, unreferenced imports omitted, truncation, budget exhaustion, and deterministic ordering.
@@ -81,10 +83,12 @@ Semantic scoring is only trustworthy when its evidence is minimal, reproducible,
 
 ## Progress
 
-- Current task: **P3-1**.
-- Completed tasks: none.
-- Running authored count: 0.
+- Current task: **P3-2**.
+- Completed tasks: **P3-1**.
+- Running authored count: **761** (over the ~400-line per-task heuristic because contracts, canonicalization, and their exhaustive tests form one boundary).
+- Slice ledger:
+  - `feat/phase-3-evidence-domain`: `4a91962` — evidence bundle domain contracts and canonical serialization.
 
 ## Next step
 
-Delegate P3-1 to one writer with strict TDD, then independent review before the work-unit commit.
+Branch `feat/phase-3-import-resolution` from `feat/phase-3-evidence-domain` and delegate P3-2 (including the one-hop helper expansion) to one writer with strict TDD, then review before the work-unit commit.
