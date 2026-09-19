@@ -70,9 +70,10 @@ Semantic scoring is only as reliable as the test boundaries and evidence supplie
 
 ## Tasks
 
-- [ ] **P2-1 — Define domain contracts and stable identity**
+- [x] **P2-1 — Define domain contracts and stable identity**
   - Add immutable test-understanding types, normalized source hashing, canonical serialization, and versioned `TestCaseId` generation.
   - Verify duplicate ancestry, line relocation, path/source changes, newline normalization, and static parameter identity.
+  - Evidence: `2c77016` (`feat: add stable test case identity`) on `feat/phase-2-identity`; 5 files/23 tests, typecheck, build, lint, and diff check passed. Independent review found and verified the fix for omitted static parameter hashes; path, newline, ancestry, parameter, source, and runtime-validation mutations turned RED.
 - [ ] **P2-2 — Discover repository-local test files safely**
   - Add deterministic walking, supported filename filtering, explicit exclusions, framework evidence, and root/symlink containment.
   - Verify JS/JSX/TS/TSX, lexical ordering, configured exclusions, E2E reasons, ambiguous frameworks, and no code execution.
@@ -88,10 +89,13 @@ Semantic scoring is only as reliable as the test boundaries and evidence supplie
 
 ## Progress
 
-- Current task: **P2-1**.
-- Completed tasks: none.
-- Verification: read-only Luna exploration completed; existing Phase 1 suite remains the baseline.
+- Current task: **P2-2**.
+- Completed tasks: **P2-1**.
+- Verification: P2-1 passed independent Luna review and the complete local suite. The slice contains 409 authored lines, nine above the planning heuristic because the cohesive public contracts, implementation, and behavioral tests belong in one reviewable unit; no code was compressed or split artificially.
+- Running authored count: **409** lines across completed Phase 2 work-unit commits.
+- Slice ledger:
+  - `feat/phase-2-identity`: `2c77016` — stable identity contracts and implementation.
 
 ## Next step
 
-Create the P2-1 child branch, delegate identity implementation to Luna, and independently review its TDD and mutation evidence before integration.
+Create the P2-2 discovery child branch from `feat/phase-2-identity`, delegate safe discovery implementation to Luna, and independently verify containment, exclusions, deterministic ordering, and no-execution behavior.
