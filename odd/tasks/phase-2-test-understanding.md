@@ -82,24 +82,26 @@ Semantic scoring is only as reliable as the test boundaries and evidence supplie
   - Parse suites, tests, modifiers, hooks, source spans, and framework aliases using the TypeScript compiler API.
   - Verify nested/duplicate names, skipped/todo/only/concurrent states, hook scope, malformed syntax diagnostics, and stable identities.
   - Evidence: `fef533a` (`feat: extract structural test cases`) on `feat/phase-2-structural-extraction`; 7 files/76 tests, typecheck, build, lint, diff check, and a built public-seam smoke passed. Independent review verified scope-aware ESM/CommonJS aliases, suite modifier and hook inheritance, dynamic non-invention, syntax diagnostics, cross-extension parsing, and nested-scope mutations.
-- [ ] **P2-4 — Extract parameterization and static signals**
+- [x] **P2-4 — Extract parameterization and static signals**
   - Add supported static parameter cases plus dynamic registration metadata, imports, mocks, assertions, and matcher details.
   - Verify literal and template tables, dynamic expressions, alias handling, Jest/Vitest mocks, negated assertions, and no expression execution.
+  - Evidence: `51f56ba` (`feat: extract parameterized test signals`) on `feat/phase-2-parameterization-signals`; 7 files/99 tests, typecheck, build, lint, diff check, and runtime ESM smokes passed. Independent review verified typed tagged-table headers, Vitest `.for` semantics, nested identity boundaries, original row spans, imports, scope-isolated mocks/assertions, aliases/shadows, unsafe-table rejection, and critical mutations.
 - [ ] **P2-5 — Integrate the application and CLI seam**
   - Compose discovery and extraction with deterministic ordering and a minimal reporting-only CLI summary.
   - Update README/architecture-facing documentation for delivered behavior and run complete Phase 2 checks.
 
 ## Progress
 
-- Current task: **P2-4**.
-- Completed tasks: **P2-1, P2-2, P2-3**.
-- Verification: P2-1 through P2-3 passed independent Luna review, complete local checks, and critical mutation probes. P2-3 contains 970 authored lines because the scope-aware structural traversal, stable identity integration, dynamic guards, and behavioral matrix form one coupled correctness boundary; splitting them would hide cross-scope false positives that the final review exposed.
-- Running authored count: **2,163** lines across completed Phase 2 work-unit commits, generated lockfile excluded.
+- Current task: **P2-5**.
+- Completed tasks: **P2-1, P2-2, P2-3, P2-4**.
+- Verification: P2-1 through P2-4 passed independent Luna review, complete local checks, runtime seams, and critical mutation probes. P2-4 contains 922 authored changed lines because parameter expansion and its scoped signals share one AST traversal and identity boundary; review-driven corrections were kept with the behavior and tests rather than split into invalid intermediate states.
+- Running authored count: **3,085** lines across completed Phase 2 work-unit commits, generated lockfile excluded.
 - Slice ledger:
   - `feat/phase-2-identity`: `2c77016` — stable identity contracts and implementation.
   - `feat/phase-2-discovery`: `0052a18` — safe static test discovery and installable public API.
   - `feat/phase-2-structural-extraction`: `fef533a` — scope-aware structural AST extraction.
+  - `feat/phase-2-parameterization-signals`: `51f56ba` — static parameter expansion and scoped evidence signals.
 
 ## Next step
 
-Create the P2-4 parameterization/signals child branch from `feat/phase-2-structural-extraction`, delegate static parameter expansion and evidence-signal extraction to Luna, and independently verify no-evaluation behavior and per-case identities.
+Create the P2-5 application/CLI child branch from `feat/phase-2-parameterization-signals`, delegate deterministic orchestration and reporting-only CLI integration to Luna, then complete Phase 2 documentation and end-to-end verification.
