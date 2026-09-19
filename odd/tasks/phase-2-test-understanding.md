@@ -74,9 +74,10 @@ Semantic scoring is only as reliable as the test boundaries and evidence supplie
   - Add immutable test-understanding types, normalized source hashing, canonical serialization, and versioned `TestCaseId` generation.
   - Verify duplicate ancestry, line relocation, path/source changes, newline normalization, and static parameter identity.
   - Evidence: `2c77016` (`feat: add stable test case identity`) on `feat/phase-2-identity`; 5 files/23 tests, typecheck, build, lint, and diff check passed. Independent review found and verified the fix for omitted static parameter hashes; path, newline, ancestry, parameter, source, and runtime-validation mutations turned RED.
-- [ ] **P2-2 — Discover repository-local test files safely**
+- [x] **P2-2 — Discover repository-local test files safely**
   - Add deterministic walking, supported filename filtering, explicit exclusions, framework evidence, and root/symlink containment.
   - Verify JS/JSX/TS/TSX, lexical ordering, configured exclusions, E2E reasons, ambiguous frameworks, and no code execution.
+  - Evidence: `0052a18` (`feat: add safe test discovery`) on `feat/phase-2-discovery`; 6 files/47 tests, typecheck, build, lint, diff check, npm dry-run, and packed-install root API/CLI smokes passed. Independent review verified syntax-aware evidence, import precedence, E2E-v1 exclusions, diagnostics, and drive/UNC containment; critical discovery mutations turned RED.
 - [ ] **P2-3 — Extract structural test cases**
   - Parse suites, tests, modifiers, hooks, source spans, and framework aliases using the TypeScript compiler API.
   - Verify nested/duplicate names, skipped/todo/only/concurrent states, hook scope, malformed syntax diagnostics, and stable identities.
@@ -89,13 +90,14 @@ Semantic scoring is only as reliable as the test boundaries and evidence supplie
 
 ## Progress
 
-- Current task: **P2-2**.
-- Completed tasks: **P2-1**.
-- Verification: P2-1 passed independent Luna review and the complete local suite. The slice contains 409 authored lines, nine above the planning heuristic because the cohesive public contracts, implementation, and behavioral tests belong in one reviewable unit; no code was compressed or split artificially.
-- Running authored count: **409** lines across completed Phase 2 work-unit commits.
+- Current task: **P2-3**.
+- Completed tasks: **P2-1, P2-2**.
+- Verification: P2-1 and P2-2 passed independent Luna review, complete local checks, and critical mutation probes. P2-2 contains 784 authored lines excluding the generated lockfile; its safe traversal, syntax-aware evidence, public package seam, and behavioral fixtures were kept together because splitting them would leave an unverified or non-installable discovery unit.
+- Running authored count: **1,193** lines across completed Phase 2 work-unit commits, generated lockfile excluded.
 - Slice ledger:
   - `feat/phase-2-identity`: `2c77016` — stable identity contracts and implementation.
+  - `feat/phase-2-discovery`: `0052a18` — safe static test discovery and installable public API.
 
 ## Next step
 
-Create the P2-2 discovery child branch from `feat/phase-2-identity`, delegate safe discovery implementation to Luna, and independently verify containment, exclusions, deterministic ordering, and no-execution behavior.
+Create the P2-3 structural extraction child branch from `feat/phase-2-discovery`, delegate TypeScript AST extraction to Luna, and independently verify ancestry, modifiers, hook scope, diagnostics, stable identities, and no-execution behavior.
