@@ -6,11 +6,33 @@ import { describe, expect, it } from 'vitest';
 
 interface PackageManifest {
   bin: string | Record<string, string>;
+  types?: string;
+  exports?: {
+    '.': {
+      types: string;
+      import: string;
+    };
+  };
 }
 
 async function readManifest(): Promise<PackageManifest> {
   return JSON.parse(await readFile(join(process.cwd(), 'package.json'), 'utf8')) as PackageManifest;
 }
+
+describe('package metadata', () => {
+  it('publishes the ESM root API and declaration entry without changing the CLI bin', async () => {
+    const manifest = await readManifest();
+
+    expect(manifest.types).toBe('./dist/index.d.ts');
+    expect(manifest.exports).toEqual({
+      '.': {
+        types: './dist/index.d.ts',
+        import: './dist/index.js',
+      },
+    });
+    expect(manifest.bin).toEqual({ 'jev-test-auditor': 'dist/cli/index.js' });
+  });
+});
 
 describe('installed package binary', () => {
   it('runs help through the package bin symlink', async () => {

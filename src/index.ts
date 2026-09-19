@@ -36,3 +36,16 @@ export {
   type TestModifier,
   type TestModifierKind,
 } from './domain/test-understanding.js';
+
+export { discoverTestFiles } from './adapters/repository-discovery.js';
+export {
+  DEFAULT_DISCOVERY_EXCLUDES,
+  DEFAULT_DISCOVERY_INCLUDE,
+  type DiscoveredTestFile,
+  type DiscoveryExclusionReason,
+  type DiscoveryRequest,
+  type DiscoveryResult,
+  type ExcludedTestFile,
+  type FrameworkEvidence,
+  type FrameworkEvidenceSource,
+} from './domain/discovery.js';
