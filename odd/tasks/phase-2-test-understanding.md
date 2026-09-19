@@ -38,7 +38,7 @@ Semantic scoring is only as reliable as the test boundaries and evidence supplie
 ## Delivery
 
 - Strategy: `auto-chain`.
-- Forecast: approximately 1,450 authored changed lines, generated files excluded.
+- Forecast: approximately 1,450 authored changed lines, generated files excluded; the forecast was exceeded by review corrections and verified scope, with the running authored count recorded below.
 - Chain strategy: cached `feature-branch-chain`, explicitly confirmed for the ongoing local delivery chain.
 - Tracker boundary: `feat/phase-2-test-understanding`, based on `feat/phase-1-foundation-cli`.
 - Planned local child slices: identity, discovery, structural extraction, parameterization/signals, and application/CLI integration.
@@ -86,22 +86,24 @@ Semantic scoring is only as reliable as the test boundaries and evidence supplie
   - Add supported static parameter cases plus dynamic registration metadata, imports, mocks, assertions, and matcher details.
   - Verify literal and template tables, dynamic expressions, alias handling, Jest/Vitest mocks, negated assertions, and no expression execution.
   - Evidence: `51f56ba` (`feat: extract parameterized test signals`) on `feat/phase-2-parameterization-signals`; 7 files/99 tests, typecheck, build, lint, diff check, and runtime ESM smokes passed. Independent review verified typed tagged-table headers, Vitest `.for` semantics, nested identity boundaries, original row spans, imports, scope-isolated mocks/assertions, aliases/shadows, unsafe-table rejection, and critical mutations.
-- [ ] **P2-5 — Integrate the application and CLI seam**
+- [x] **P2-5 — Integrate the application and CLI seam**
   - Compose discovery and extraction with deterministic ordering and a minimal reporting-only CLI summary.
   - Update README/architecture-facing documentation for delivered behavior and run complete Phase 2 checks.
+  - Evidence: `50c46d3` (`feat: integrate reporting-only audit`) on `feat/phase-2-application-cli`; 11 files, 722 additions and 46 deletions (768 authored changed lines). Suite 9 files/116 tests, typecheck, build, lint, and diff check passed. Real `npm pack` plus offline temporary installation verified package-name import, installed bin, exports/dist artifacts, one-line JSON, canary non-execution, diagnostics exit 0, usage exit 1, and Windows `cmd.exe` invocation. Independent Luna final review found no issues; sorting, realpath containment, exports/dist, and Windows invocation mutations turned RED.
 
 ## Progress
 
-- Current task: **P2-5**.
-- Completed tasks: **P2-1, P2-2, P2-3, P2-4**.
-- Verification: P2-1 through P2-4 passed independent Luna review, complete local checks, runtime seams, and critical mutation probes. P2-4 contains 922 authored changed lines because parameter expansion and its scoped signals share one AST traversal and identity boundary; review-driven corrections were kept with the behavior and tests rather than split into invalid intermediate states.
-- Running authored count: **3,085** lines across completed Phase 2 work-unit commits, generated lockfile excluded.
+- Current task: **none — Phase 2 complete**.
+- Completed tasks: **P2-1, P2-2, P2-3, P2-4, P2-5**.
+- Verification: P2-1 through P2-5 passed independent Luna review, complete local checks, runtime seams, packed-install checks, and critical mutation probes. P2-4 contains 922 authored changed lines because parameter expansion and its scoped signals share one AST traversal and identity boundary; review-driven corrections were kept with the behavior and tests rather than split into invalid intermediate states. P2-5 contains 768 authored changed lines because the application ports, safe source reader, async CLI, packed smoke, tests, and documentation form one delivery boundary.
+- Running authored count: **3,853** lines across completed Phase 2 work-unit commits, generated lockfile excluded.
 - Slice ledger:
   - `feat/phase-2-identity`: `2c77016` — stable identity contracts and implementation.
   - `feat/phase-2-discovery`: `0052a18` — safe static test discovery and installable public API.
   - `feat/phase-2-structural-extraction`: `fef533a` — scope-aware structural AST extraction.
   - `feat/phase-2-parameterization-signals`: `51f56ba` — static parameter expansion and scoped evidence signals.
+  - `feat/phase-2-application-cli`: `50c46d3` — reporting-only application orchestration, safe source reading, async CLI summary, documentation, and packed-install verification.
 
 ## Next step
 
-Create the P2-5 application/CLI child branch from `feat/phase-2-parameterization-signals`, delegate deterministic orchestration and reporting-only CLI integration to Luna, then complete Phase 2 documentation and end-to-end verification.
+Plan Phase 3 only; do not begin implementation in this Phase 2 task document.
