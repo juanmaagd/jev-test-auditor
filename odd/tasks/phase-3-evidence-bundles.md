@@ -2,7 +2,7 @@
 
 ## Objective
 
-Assemble one minimal, deterministic, provenance-aware `EvidenceBundle` per extracted `TestCase`, containing the test fragment plus the smallest useful helper and production-seam fragments, without executing repository code, and expose it locally through `--inspect-payloads`.
+Assemble one minimal, deterministic, provenance-aware `EvidenceBundle` per extracted `TestCase`, containing the test fragment plus the smallest useful helper and production-seam fragments, without executing repository code, and expose it locally through `--inspect-payloads` plus a no-network `--dry-run` operational estimate.
 
 ## Problem
 
@@ -20,6 +20,7 @@ Semantic scoring is only trustworthy when its evidence is minimal, reproducible,
 - Select the smallest useful helper and production-seam fragments referenced by the test body within per-fragment and per-bundle byte budgets, recording truncation.
 - Extend configuration with evidence budgets and deny paths.
 - Compose evidence building into the application seam and add `--inspect-payloads` with no network activity.
+- Add a no-network, no-write `--dry-run` operational estimator with aggregate call, byte, follow-up, and clearly labeled approximate token/cost output, including `--json`.
 - Update README and technical design for delivered behavior.
 - Do not implement Jev calls, rubric, classification, SQLite, caching, scheduling, HTML reports, benchmarks, or other languages.
 
@@ -33,6 +34,8 @@ Semantic scoring is only trustworthy when its evidence is minimal, reproducible,
 - Fragments record repository-relative path, span, content hash, selection reason, and truncation state.
 - Bundles are canonically serializable with stable field and fragment ordering so Phase 5 can hash them.
 - `--inspect-payloads` output is the local evidence state, not the Jev wire request (that shape belongs to Phase 4).
+- `--dry-run` is an aggregate operational estimate, not detailed bundle output: it reports exact discovered/evaluable counts, one initial call per evaluable test, exact serialized evidence bytes, a possible follow-up call range, and approximate input-token/cost ranges from a versioned local pricing/overhead snapshot. It makes no network calls, requires no provider/API key, and writes no persistent run state.
+- Phase 4 refines token/cost estimates from the exact request `state` and `questions`; Phase 5 adds cache-hit and billable-call accuracy. Phase 3 must not claim exact wire-token counts or cache-aware billing.
 - Artifacts use English. Preserve unrelated untracked `.atl/` files.
 - Commits use Conventional Commits without AI attribution lines.
 
@@ -50,6 +53,7 @@ Semantic scoring is only trustworthy when its evidence is minimal, reproducible,
 - Chain strategy: cached `feature-branch-chain`, carried forward from Phase 2.
 - Tracker boundary: `feat/phase-3-evidence-bundles`, based on `main` at `8c2b242`.
 - Planned local child slices: domain contracts, import resolution, fragment selection, application/CLI integration.
+- Planned final Phase 3 slice: dry-run cost/call estimator after P3-4 (provisional estimate: approximately 250–400 authored changed lines; this is a scope addition and does not rewrite the historical forecast).
 - Remote tracker/child pull requests: not created; push and PR creation remain unauthorized remote operations.
 - RDD: disabled/unmanaged.
 - TDD: enabled by explicit user confirmation (carried forward from Phase 2); require observed RED, GREEN, REFACTOR, and critical mutation evidence.
@@ -62,6 +66,9 @@ Semantic scoring is only trustworthy when its evidence is minimal, reproducible,
 - Unresolvable or non-relative imports appear as explicit unresolved provenance, never as invented fragments.
 - Budgets are enforced with explicit truncation metadata.
 - `--inspect-payloads` emits the exact local bundles with no network activity; default audit output stays one reporting-only JSON line.
+- `--dry-run` deterministically reports discovered/evaluable/skipped counts, exact initial calls (one per evaluable test), exact serialized evidence bytes, possible follow-up call range, and clearly labeled approximate input-token/cost ranges; output discloses model, pricing/overhead snapshot version, and as-of date.
+- Dry-run makes zero network/provider/API-key calls and no persistent run writes; `--inspect-payloads` remains detailed bundle output and `--dry-run --json` is machine-readable.
+- Invalid pricing or budget inputs are rejected deterministically; packed CLI smoke and critical mutations cover estimator behavior.
 - Exact payload golden tests, path-escape tests, truncation cases, and secret-path cases pass; critical mutations turn RED.
 
 ## Tasks
@@ -82,12 +89,17 @@ Semantic scoring is only trustworthy when its evidence is minimal, reproducible,
 - [ ] **P3-4 — Integrate application, configuration, and CLI**
   - Add an evidence port to `runAudit`, configuration for budgets and deny paths, evidence totals in the default JSON line, and `--inspect-payloads`; update README (fix the Phase 2 row that claims evidence bundles) and technical design.
   - Verify golden payloads, CLI flags, no network, reporting-only exit behavior, and packed-install smoke.
+- [ ] **P3-5 — Add dry-run cost and call estimator**
+  - Add `audit --dry-run` and `--dry-run --json` as a no-network, no-write aggregate preview over the discovered evidence bundles. Report exact discovered/evaluable/skipped counts, exact serialized evidence bytes, exact initial calls (one per evaluable test), and a possible follow-up call range; report approximate input-token and cost ranges using a versioned local model/pricing/overhead snapshot with model and as-of disclosure.
+  - Keep detailed bundle rendering exclusively under `--inspect-payloads`; do not implement Jev calls, rubric/classification, cache-aware billing, SQLite writes, or exact wire-token claims. Reject invalid pricing/budget inputs deterministically.
+  - Verify deterministic ordering/output, zero network/provider dependency/API-key requirement, no persistent run writes, packed CLI smoke, and critical mutations. Record that Phase 4 refines estimates from exact request state/questions and Phase 5 adds cache-hit/billable-call accuracy.
 
 ## Progress
 
 - Current task: **P3-4**.
 - Completed tasks: **P3-1, P3-2, P3-3**.
 - Running authored count: **3,858**, well above the 1,450 forecast; P3-1, P3-2, and P3-3 each exceed the ~400-line per-task heuristic because contracts/canonicalization and the resolver's containment/deny/cycle rules, and selection/budget rules each form one boundary with exhaustive tests. Each task stays its own chained slice.
+- Scope addition: P3-5 is a provisional ~250–400 authored-line final slice; the historical 1,450 forecast and running count above are intentionally unchanged.
 - Slice ledger:
   - `feat/phase-3-evidence-domain`: `4a91962` — evidence bundle domain contracts and canonical serialization.
   - `feat/phase-3-import-resolution`: `d0505ab` — safe static relative import resolution with one helper hop.
@@ -95,4 +107,4 @@ Semantic scoring is only trustworthy when its evidence is minimal, reproducible,
 
 ## Next step
 
-Branch `feat/phase-3-application-cli` from `feat/phase-3-fragment-selection` and delegate P3-4 to one writer with strict TDD (include a memoizing reader across the run and per-test error handling for evidence failures), then review before the work-unit commit.
+Branch `feat/phase-3-application-cli` from `feat/phase-3-fragment-selection` and delegate P3-4 to one writer with strict TDD (include a memoizing reader across the run and per-test error handling for evidence failures), then implement P3-5 as the final Phase 3 slice after reviewing P3-4.
