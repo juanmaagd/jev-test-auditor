@@ -217,6 +217,297 @@ describe('structural test extraction', () => {
     ]);
   });
 
+  it('expands literal parameter tables with stable per-case identities', () => {
+    const result = extract(`
+      test.each([1, [2, 'two'], { ok: true }])('case', () => {});
+    `, 'vitest');
+
+    expect(result.testCases.map((testCase) => testCase.parameterization)).toEqual([
+      { mode: 'static', cases: [{ identity: expect.any(Object), values: [1], span: expect.any(Object) }] },
+      { mode: 'static', cases: [{ identity: expect.any(Object), values: [2, 'two'], span: expect.any(Object) }] },
+      { mode: 'static', cases: [{ identity: expect.any(Object), values: [{ ok: true }], span: expect.any(Object) }] },
+    ]);
+    expect(new Set(result.testCases.map((testCase) => testCase.id)).size).toBe(3);
+  });
+
+  it('expands safe no-substitution tagged-template tables', () => {
+    const result = extract(`test.each\`
+      value | expected
+      one | 1
+      two | 2
+    \`('templated', () => {});`, 'vitest');
+
+    expect(result.testCases.map((testCase) => testCase.parameterization.mode)).toEqual(['static', 'static']);
+    expect(result.testCases.map((testCase) => testCase.parameterization.mode === 'static'
+      ? testCase.parameterization.cases[0]?.values : [])).toEqual([
+      [{ value: 'one', expected: '1' }],
+      [{ value: 'two', expected: '2' }],
+    ]);
+    expect(result.testCases.map((testCase) => testCase.parameterization.mode === 'static'
+      ? testCase.parameterization.cases[0]?.span.start.line : undefined)).toEqual([3, 4]);
+    expect(result.testCases[0]?.parameterization.mode === 'static' && result.testCases[1]?.parameterization.mode === 'static'
+      ? result.testCases[0].parameterization.cases[0]?.span
+      : undefined).not.toEqual(result.testCases[1]?.parameterization.mode === 'static'
+      ? result.testCases[1].parameterization.cases[0]?.span
+      : undefined);
+  });
+
+  it('accepts tagged-template substitutions only when every interpolation is static', () => {
+    const result = extract("test.each`value | expected\n${'one'} | 1\n${'two'} | 2`('templated', () => {});", 'vitest');
+
+    expect(result.testCases.map((testCase) => testCase.parameterization.mode)).toEqual(['static', 'static']);
+    expect(result.testCases.map((testCase) => testCase.parameterization.mode === 'static'
+      ? testCase.parameterization.cases[0]?.values : [])).toEqual([
+      [{ value: 'one', expected: '1' }],
+      [{ value: 'two', expected: '2' }],
+    ]);
+  });
+
+  it('preserves typed static tagged-template substitutions', () => {
+    const result = extract("test.each`value | expected\n${1} | ${{ answer: true }}\n${-0} | ${false}`('typed', () => {});", 'vitest');
+
+    expect(result.testCases.map((testCase) => testCase.parameterization.mode === 'static'
+      ? testCase.parameterization.cases[0]?.values : [])).toEqual([
+      [{ value: 1, expected: { answer: true } }],
+      [{ value: -0, expected: false }],
+    ]);
+    const first = result.testCases[0]?.parameterization;
+    const second = result.testCases[1]?.parameterization;
+    const secondValue = second?.mode === 'static' ? second.cases[0]?.values[0] : undefined;
+    expect(secondValue && Object.is((secondValue as { readonly value?: unknown }).value, -0)).toBe(true);
+    expect(first?.mode === 'static' && second?.mode === 'static'
+      ? first.cases[0]?.identity.valueHash
+      : undefined).not.toBe(second?.mode === 'static' ? second.cases[0]?.identity.valueHash : undefined);
+  });
+
+  it('rejects multiline tagged substitutions conservatively', () => {
+    const result = extract("test.each`value | expected\n${{\n  answer: true\n}} | ok`('dynamic', () => {});", 'vitest');
+
+    expect(result.testCases).toEqual([]);
+    expect(result.dynamicMetadata.map((metadata) => metadata.reason)).toEqual(['dynamic-parameter-table']);
+  });
+
+  it('gates Vitest .for tables by verified framework attribution', () => {
+    const vitest = extract("test.for([[1], [2]])('works', () => {});", 'vitest');
+    const jest = extract("test.for([[1], [2]])('works', () => {});", 'jest');
+    const unknown = extract("test.for([[1], [2]])('works', () => {});");
+
+    expect(vitest.testCases).toHaveLength(2);
+    expect(jest.testCases).toEqual([]);
+    expect(unknown.testCases).toEqual([]);
+    expect(jest.dynamicMetadata[0]?.reason).toBe('unsupported-syntax');
+    expect(unknown.dynamicMetadata[0]?.reason).toBe('unsupported-syntax');
+  });
+
+  it('preserves Vitest .for rows as single array arguments', () => {
+    const result = extract("test.for([[1, 2]])('works', () => {});", 'vitest');
+
+    expect(result.testCases[0]?.parameterization.mode === 'static'
+      ? result.testCases[0].parameterization.cases[0]?.values : []).toEqual([[1, 2]]);
+  });
+
+  it('supports tagged-template Vitest .for rows as typed objects', () => {
+    const result = extract("test.for`value | expected\n${1} | ${false}`('works', () => {});", 'vitest');
+
+    expect(result.testCases[0]?.parameterization.mode === 'static'
+      ? result.testCases[0].parameterization.cases[0]?.values : []).toEqual([{ value: 1, expected: false }]);
+    expect(result.testCases[0]?.parameterization.mode === 'static'
+      ? result.testCases[0].parameterization.cases[0]?.span.start.line : undefined).toBe(2);
+  });
+
+  it('rejects duplicate or empty tagged-template headers', () => {
+    const duplicate = extract("test.each`value | value\none | 1`('duplicate', () => {});", 'vitest');
+    const empty = extract("test.each`value | | expected\none | x | 1`('empty', () => {});", 'vitest');
+
+    expect(duplicate.testCases).toEqual([]);
+    expect(duplicate.dynamicMetadata.map((metadata) => metadata.reason)).toEqual(['dynamic-parameter-table']);
+    expect(empty.testCases).toEqual([]);
+    expect(empty.dynamicMetadata.map((metadata) => metadata.reason)).toEqual(['dynamic-parameter-table']);
+  });
+
+  it('preserves __proto__ tagged headers as own properties', () => {
+    const result = extract("test.each`__proto__ | value\n${{ answer: true }} | ok`('prototype', () => {});", 'vitest');
+    const row = result.testCases[0]?.parameterization.mode === 'static'
+      ? result.testCases[0].parameterization.cases[0]?.values[0] : undefined;
+
+    expect(row && Object.prototype.hasOwnProperty.call(row, '__proto__')).toBe(true);
+    expect(row && (row as { readonly __proto__: unknown }).__proto__).toEqual({ answer: true });
+  });
+
+  it('combines nested parameterized suites and tests without line-based identity', () => {
+    const source = "describe.each([['outer-a'], ['outer-b']])('outer', () => test.each([[1], [2]])('inner', () => {}));";
+    const result = extract(source, 'vitest');
+    const moved = extract(`\n\n${source}`, 'vitest');
+
+    expect(result.testCases).toHaveLength(4);
+    expect(new Set(result.testCases.map((testCase) => testCase.id)).size).toBe(4);
+    expect(result.testCases.map((testCase) => testCase.parameterization.mode === 'static'
+      ? testCase.parameterization.cases[0]?.identity.index : undefined)).toEqual([0, 1, 2, 3]);
+    expect(result.testCases.map((testCase) => testCase.parameterization.mode === 'static'
+      ? testCase.parameterization.cases[0]?.values : [])).toEqual([
+      ['outer-a', 1],
+      ['outer-a', 2],
+      ['outer-b', 1],
+      ['outer-b', 2],
+    ]);
+    expect(moved.testCases.map((testCase) => testCase.id)).toEqual(result.testCases.map((testCase) => testCase.id));
+  });
+
+  it.each([
+    ['identifier', 'test.each(rows)(\'dynamic\', () => {})'],
+    ['call', 'test.each(getRows())(\'dynamic\', () => {})'],
+    ['spread', 'test.each([[...rows]])(\'dynamic\', () => {})'],
+    ['getter', "test.each([[{ get value() { return 1; } }]])('dynamic', () => {})"],
+    ['computed', "test.each([[{ [key]: 1 }]])('dynamic', () => {})"],
+    ['template substitution', "test.each(`[[${value}]]`)('dynamic', () => {})"],
+  ])('marks %s parameter tables dynamic without inventing cases', (_label, sourceText) => {
+    const result = extract(sourceText, 'vitest');
+
+    expect(result.testCases).toEqual([]);
+    expect(result.dynamicMetadata.map((metadata) => metadata.reason)).toEqual(['dynamic-parameter-table']);
+  });
+
+  it('preserves parameter boundaries and rejects non-finite/object-prototype values', () => {
+    const collisionA = extract("describe.each([[1]])('outer', () => test.each([[2]])('inner', () => {}));", 'vitest');
+    const collisionB = extract("describe.each([[1, 2]])('outer', () => test.each([[]])('inner', () => {}));", 'vitest');
+    const invalid = extract("test.each([1e999])('invalid', () => {});", 'vitest');
+    const values = extract("test.each([-0, 0, { __proto__: 1 }])('values', () => {});", 'vitest');
+
+    expect(collisionA.testCases[0]?.id).not.toBe(collisionB.testCases[0]?.id);
+    const collisionAHash = collisionA.testCases[0]?.parameterization.mode === 'static'
+      ? collisionA.testCases[0].parameterization.cases[0]?.identity.valueHash : undefined;
+    const collisionBHash = collisionB.testCases[0]?.parameterization.mode === 'static'
+      ? collisionB.testCases[0].parameterization.cases[0]?.identity.valueHash : undefined;
+    expect(collisionAHash).not.toBe(collisionBHash);
+    expect(invalid.testCases).toEqual([]);
+    expect(invalid.dynamicMetadata[0]?.reason).toBe('dynamic-parameter-table');
+    expect(values.testCases).toHaveLength(3);
+    expect(values.testCases[0]?.parameterization.mode === 'static'
+      ? Object.is(values.testCases[0].parameterization.cases[0]?.values[0], -0) : false).toBe(true);
+    expect(values.testCases[1]?.parameterization.mode === 'static'
+      ? Object.is(values.testCases[1].parameterization.cases[0]?.values[0], 0) : false).toBe(true);
+    expect(values.testCases[0]?.parameterization.mode === 'static' && values.testCases[1]?.parameterization.mode === 'static'
+      ? values.testCases[0].parameterization.cases[0]?.identity.valueHash
+      : undefined).not.toBe(values.testCases[1]?.parameterization.mode === 'static'
+      ? values.testCases[1].parameterization.cases[0]?.identity.valueHash
+      : undefined);
+    const objectValue = values.testCases[2]?.parameterization.mode === 'static'
+      ? values.testCases[2].parameterization.cases[0]?.values[0] : undefined;
+    expect(objectValue && Object.prototype.hasOwnProperty.call(objectValue, '__proto__')).toBe(true);
+  });
+
+  it('collects imports, mocks, assertions, hook evidence, and isolates siblings', () => {
+    const result = extract(`
+      import { vi } from 'vitest';
+      import { expect, assert } from 'vitest';
+      export { helper } from './helper';
+      import('./lazy');
+      import(dynamicModule);
+      require('./required');
+      require(dynamicModule);
+      beforeEach(() => { vi.mock('./hook'); });
+      vi.mock('./module');
+      vi.mock(moduleName);
+      test('first', () => {
+        vi.fn();
+        expect(value).not.toBe(false);
+        assert.equal(value, true);
+      });
+      test('second', () => { expect(value).toBe(true); });
+    `, 'vitest');
+    const first = result.testCases[0];
+    const second = result.testCases[1];
+
+    expect(result.testCases).toHaveLength(2);
+    expect(first?.imports.map((record) => ({ kind: record.kind, specifier: record.specifier }))).toEqual([
+      { kind: 'import', specifier: 'vitest' },
+      { kind: 'import', specifier: 'vitest' },
+      { kind: 'export-from', specifier: './helper' },
+      { kind: 'dynamic-import', specifier: './lazy' },
+      { kind: 'dynamic-import', specifier: undefined },
+      { kind: 'require', specifier: './required' },
+      { kind: 'require', specifier: undefined },
+    ]);
+    expect(first?.mocks.map((mock) => ({ api: mock.api, moduleSpecifier: mock.moduleSpecifier, static: mock.static }))).toEqual([
+      { api: 'vi.mock', moduleSpecifier: './module', static: true },
+      { api: 'vi.mock', moduleSpecifier: undefined, static: false },
+      { api: 'vi.mock', moduleSpecifier: './hook', static: true },
+      { api: 'vi.fn', moduleSpecifier: undefined, static: true },
+    ]);
+    expect(first?.assertions.map((assertion) => ({ api: assertion.api, matcher: assertion.matcher, negated: assertion.negated }))).toEqual([
+      { api: 'expect', matcher: 'toBe', negated: true },
+      { api: 'assert', matcher: 'equal', negated: false },
+    ]);
+    expect(second?.assertions.map((assertion) => assertion.matcher)).toEqual(['toBe']);
+    expect(second?.assertions).not.toEqual(first?.assertions);
+  });
+
+  it('supports verified framework globals, assertion aliases, and matcher chains', () => {
+    const jest = extract(`
+      test('jest', () => {
+        jest.mock('./module');
+        assert(value);
+        expect(promise).resolves.not.toBe(false);
+        expect(other).rejects.toEqual(error);
+      });
+    `, 'jest');
+    const ambiguous = extract(`
+      import { assert as check } from 'vitest';
+      test('ambiguous', () => { check(value); });
+    `);
+    const unknownGlobal = extract("test('unknown', () => { jest.mock('./module'); });");
+
+    expect(jest.testCases[0]?.mocks.map((mock) => mock.api)).toEqual(['jest.mock']);
+    expect(jest.testCases[0]?.assertions.map((assertion) => ({ api: assertion.api, matcher: assertion.matcher, negated: assertion.negated }))).toEqual([
+      { api: 'assert', matcher: undefined, negated: false },
+      { api: 'expect', matcher: 'toBe', negated: true },
+      { api: 'expect', matcher: 'toEqual', negated: false },
+    ]);
+    expect(ambiguous.testCases[0]?.assertions).toHaveLength(1);
+    expect(ambiguous.testCases[0]?.assertions[0]?.api).toBe('assert');
+    expect(unknownGlobal.testCases[0]?.mocks).toEqual([]);
+  });
+
+  it('does not leak scope mocks from helper callbacks and respects hook shadows', () => {
+    const result = extract(`
+      import { vi } from 'vitest';
+      function helper() { vi.mock('./helper'); }
+      setup(() => vi.mock('./setup'));
+      beforeEach((vi) => { vi.mock('./shadowed'); });
+      test('works', () => {});
+    `, 'vitest');
+
+    expect(result.testCases[0]?.mocks).toEqual([]);
+  });
+
+  it('shadows test callback parameters while collecting evidence', () => {
+    const result = extract(`
+      import { vi, expect } from 'vitest';
+      test('works', (vi, expect) => {
+        vi.mock('./shadowed');
+        expect(value).toBe(true);
+      });
+    `, 'vitest');
+
+    expect(result.testCases[0]?.mocks).toEqual([]);
+    expect(result.testCases[0]?.assertions).toEqual([]);
+  });
+
+  it('does not report shadowed mocks or assertions', () => {
+    const result = extract(`
+      import { vi } from 'vitest';
+      const expect = localExpect;
+      test('shadowed', () => {
+        const vi = localVi;
+        vi.mock('./module');
+        expect(value).toBe(true);
+      });
+    `, 'vitest');
+
+    expect(result.testCases[0]?.mocks).toEqual([]);
+    expect(result.testCases[0]?.assertions).toEqual([]);
+  });
+
   it('suppresses global fallback for shadowed names while preserving nested scope resolution', () => {
     const result = extract(`
       import { helper as test } from 'other';
@@ -314,6 +605,7 @@ describe('structural test extraction', () => {
     const shadowed = extract(`
       import { helper as registerTest } from 'other';
       registerTest('import-shadowed', () => {});
+      if (enabled) registerTest('conditional-shadowed', () => {});
       function helper(registerTest) {
         registerTest('parameter-shadowed', () => {});
       }
