@@ -86,7 +86,7 @@ Semantic scoring is only trustworthy when its evidence is minimal, reproducible,
 
 - Current task: **P3-3**.
 - Completed tasks: **P3-1, P3-2**.
-- Running authored count: **1,810** (over the ~400-line per-task heuristic because contracts, canonicalization, and their exhaustive tests form one boundary).
+- Running authored count: **1,810**, above the 1,450 forecast; P3-1 and P3-2 each exceed the ~400-line per-task heuristic because contracts/canonicalization and the resolver's containment/deny/cycle rules each form one boundary with exhaustive tests. Each task stays its own chained slice.
 - Slice ledger:
   - `feat/phase-3-evidence-domain`: `4a91962` — evidence bundle domain contracts and canonical serialization.
   - `feat/phase-3-import-resolution`: `d0505ab` — safe static relative import resolution with one helper hop.
