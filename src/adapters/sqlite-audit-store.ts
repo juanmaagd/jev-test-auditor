@@ -164,6 +164,17 @@ async function loadSqliteModule(): Promise<typeof import('node:sqlite')> {
 
 const SCHEMA_VERSION = 3;
 
+/**
+ * The schema version this build's persistence layer targets (Phase 6, task P6-2) — exported
+ * purely for reporting: the canonical JSON report's `versions.storeSchema` field names it
+ * regardless of whether a store actually opened for this run (it is a compile-time constant, not
+ * a fact read from an open connection), so a reader can tell which migration generation produced
+ * — or would produce, for an ordinary audit with no `--evaluate` — the persisted rows this build
+ * writes. Never mutated at runtime; kept as a re-export of {@link SCHEMA_VERSION} rather than a
+ * second constant so the two can never drift.
+ */
+export const AUDIT_STORE_SCHEMA_VERSION = SCHEMA_VERSION;
+
 type Migration = (db: DatabaseSync) => void;
 
 /**

@@ -453,7 +453,7 @@ function classificationFor(
  */
 function stubEvaluationPort(
   handler: (request: AuditEvaluationRequest) => Promise<ClassificationResult>,
-  evaluationOverrides: Partial<Pick<JevEvaluation, 'requestedModel' | 'respondedModel' | 'modelMatchesPin' | 'attempts' | 'answers'>> = {},
+  evaluationOverrides: Partial<Pick<JevEvaluation, 'requestedModel' | 'respondedModel' | 'modelMatchesPin' | 'attempts' | 'answers' | 'latencyMs' | 'attemptLatenciesMs'>> = {},
 ): AuditEvaluationPort {
   return {
     async evaluate(request) {
@@ -465,6 +465,8 @@ function stubEvaluationPort(
         answers: evaluationOverrides.answers ?? {},
         usage: classification.usage,
         attempts: evaluationOverrides.attempts ?? 1,
+        ...(evaluationOverrides.latencyMs === undefined ? {} : { latencyMs: evaluationOverrides.latencyMs }),
+        ...(evaluationOverrides.attemptLatenciesMs === undefined ? {} : { attemptLatenciesMs: evaluationOverrides.attemptLatenciesMs }),
       };
       return { classification, evaluation };
     },
@@ -1484,6 +1486,76 @@ describe('content-addressed caching (Phase 5, task P5-2)', () => {
     expect(third.evaluation?.classifications[0]?.status).toBe('weak');
     expect(third.evaluation?.totals).toMatchObject({ evaluated: 0, cached: 1 });
   });
+});
+
+describe('per-test-case cache status and latency (Phase 6, task P6-2)', () => {
+  it(
+    'records exactly cached/fresh/not-evaluated per evaluable test case in cacheStatusByTestCaseId, and only the fresh '
+    + 'item\'s measured latency in latencyByTestCaseId — never fabricating latency for a cache hit or a failure',
+    async () => {
+      const store = fakeStore();
+      const cacheKeyPort = createAuditCacheKeyPort();
+      const cachedCase = testCaseWithModifiers('tc:v1:pc-cached', [], 'pc.test.ts');
+      const freshCase = testCaseWithModifiers('tc:v1:pc-fresh', [], 'pc.test.ts');
+      const failedCase = testCaseWithModifiers('tc:v1:pc-failed', [], 'pc.test.ts');
+      const discovery: DiscoveryResult = { files: [discovered('pc.test.ts')], excluded: [], diagnostics: [] };
+      const sourceText = 'source';
+      const bundleFor = (testCase: TestCase): EvidenceBundle => emptyBundle(testCase.id);
+      const cachedKey = cacheKeyPort.computeKey({ testCase: cachedCase, bundle: bundleFor(cachedCase) }, sourceText);
+
+      // Pre-seed a completed judgment under the cached case's exact key, so the real dispatch path
+      // finds a hit and never calls the provider for it.
+      await store.recordWorkItem('seed-run', {
+        state: 'completed',
+        identity: { testCaseId: cachedCase.id, repositoryRelativePath: cachedCase.repositoryRelativePath, name: cachedCase.name },
+        cacheKey: cachedKey,
+        evaluation: {
+          requestedModel: 'jev-1.13.0', respondedModel: 'jev-1.13.0', modelMatchesPin: true,
+          answers: {}, usage: { inputTokens: 5, outputTokens: 0 }, attempts: 1,
+        },
+        classification: classificationFor(cachedCase.id, { status: 'healthy' }),
+      });
+
+      // Distinct from every token count, attempt count, and other latency value in this fixture
+      // (Phase 6 Warning: latency sits next to token counts, the exact adjacency that already
+      // produced one defect in this project) — a swap between `latencyMs` and any nearby number
+      // must be individually detectable.
+      const freshLatencyMs = 4321;
+      const freshAttemptLatenciesMs = [777, 4321 - 777];
+
+      const evaluation = stubEvaluationPort(
+        async (request) => {
+          if (request.testCase.id === failedCase.id) throw new Error('boom');
+          return classificationFor(request.testCase.id, { status: 'healthy', inputTokens: 42, outputTokens: 9 });
+        },
+        { latencyMs: freshLatencyMs, attemptLatenciesMs: freshAttemptLatenciesMs },
+      );
+
+      const result = await runAudit(configuration, {
+        discovery: { discover: async () => discovery },
+        sourceReader: { read: async () => sourceText },
+        extractor: { extract: () => ({ testCases: [cachedCase, freshCase, failedCase], dynamicMetadata: [], diagnostics: [] }) },
+        evidence: { build: async (request) => ({ bundles: request.testCases.map((testCase) => bundleFor(testCase)), diagnostics: [] }) },
+        evaluation,
+        store,
+        cacheKey: cacheKeyPort,
+      });
+
+      expect(result.evaluation?.totals).toMatchObject({ evaluated: 1, cached: 1, failed: 1 });
+
+      const cacheStatuses = result.evaluation?.cacheStatusByTestCaseId;
+      expect(cacheStatuses?.get(cachedCase.id)).toBe('cached');
+      expect(cacheStatuses?.get(freshCase.id)).toBe('fresh');
+      expect(cacheStatuses?.get(failedCase.id)).toBe('not-evaluated');
+
+      const latencies = result.evaluation?.latencyByTestCaseId;
+      expect(latencies?.get(freshCase.id)).toEqual({ latencyMs: freshLatencyMs, attemptLatenciesMs: freshAttemptLatenciesMs });
+      // A cache hit made no provider request this run: never a fabricated latency.
+      expect(latencies?.has(cachedCase.id)).toBe(false);
+      // A failed dispatch produced no successful evaluation to measure: never a fabricated latency.
+      expect(latencies?.has(failedCase.id)).toBe(false);
+    },
+  );
 });
 
 describe('sourceTextByPath exposure (Phase 5, task P5-5)', () => {

@@ -695,9 +695,46 @@ export interface AuditEvaluationTotals {
  * reordered afterward, and never containing an entry for a failed or
  * skipped test case.
  */
+/**
+ * Per-evaluable-test-case cache provenance (Phase 6, task P6-2): distinguishes a judgment served
+ * from the content-addressed cache (`cached`) from one obtained by a fresh provider request this
+ * run (`fresh`) from an evaluable test case that was dispatched but never produced a judgment at
+ * all (`not-evaluated` — its evaluation call threw; see the `failed` `EvaluationOutcome` in
+ * `src/application/audit.ts`'s `runEvaluation`). Never populated for a SKIPPED test case (`skip`/
+ * `todo`/`evidence-unavailable`): those never reach `collectEvaluableItems`'s evaluable set at
+ * all, so caching is not a meaningful question for them — see `AuditEvaluationTotals.skipped` for
+ * that count instead. Run-level `AuditEvaluationTotals.cached` is the aggregate this map's
+ * `'cached'` entries sum to; this map is what makes that count attributable to a specific test
+ * case, which the run-level count alone cannot do.
+ */
+export type TestCaseCacheStatus = 'cached' | 'fresh' | 'not-evaluated';
+
+/**
+ * One test case's measured latency for a FRESH dispatch this run (Phase 6, task P6-2) — never
+ * populated for a cache hit (no provider request was made to measure) or a failed dispatch (no
+ * evaluation ever completed to measure). Mirrors `JevEvaluation.latencyMs`/`attemptLatenciesMs`
+ * (`src/domain/jev-gateway.ts`) exactly; `attemptLatenciesMs` is optional for the identical reason
+ * that field is optional there (a resumed/reused `completed` item reconstructed from a pre-P6-1
+ * store row never captured it — see `AuditStoreWorkItemOutcome`'s own doc).
+ */
+export interface TestCaseLatency {
+  readonly latencyMs: number;
+  readonly attemptLatenciesMs?: readonly number[];
+}
+
 export interface AuditEvaluationResult {
   readonly classifications: readonly ClassificationResult[];
   readonly totals: AuditEvaluationTotals;
+  /**
+   * One entry per evaluable test case this run considered (dispatched fresh, served from cache,
+   * or attempted and failed) — see {@link TestCaseCacheStatus}'s own doc. Always present (an empty
+   * map when evaluation ran but nothing was evaluable, e.g. every test case was skipped) so a
+   * report builder never has to guess whether the absence of an entry means "not evaluable" or
+   * "this run predates P6-2" — it always means the former.
+   */
+  readonly cacheStatusByTestCaseId: ReadonlyMap<TestCaseId, TestCaseCacheStatus>;
+  /** One entry per test case whose judgment came from a genuinely fresh, successfully measured provider call this run — see {@link TestCaseLatency}'s own doc. */
+  readonly latencyByTestCaseId: ReadonlyMap<TestCaseId, TestCaseLatency>;
 }
 
 export interface AuditResult {
@@ -727,3 +764,21 @@ export interface AuditResult {
 }
 
 export type AuditConfigurationOverrides = ConfigurationOverrides;
+
+/**
+ * The honest, all-zero {@link AuditEvaluationTotals} for a `--evaluate` invocation that has no
+ * real evaluation outcome to report — never a placeholder object literal hand-duplicated at each
+ * call site (the CLI's own `evaluateTextReport` and the canonical report builder,
+ * `src/domain/report.ts`'s `buildAuditReport`, both fall back to this exact constant, so the two
+ * can never silently drift on what "zero" looks like).
+ */
+export const EMPTY_AUDIT_EVALUATION_TOTALS: AuditEvaluationTotals = {
+  evaluated: 0,
+  cached: 0,
+  failed: 0,
+  skipped: { total: 0, byReason: { skip: 0, todo: 0, 'evidence-unavailable': 0 } },
+  usage: { inputTokens: 0, outputTokens: 0 },
+  statusCounts: { healthy: 0, weak: 0, misleading: 0, 'needs-review': 0 },
+  respondedModel: undefined,
+  modelMismatches: 0,
+};

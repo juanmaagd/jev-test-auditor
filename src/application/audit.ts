@@ -449,6 +449,13 @@ async function runEvaluation(
     healthy: 0, weak: 0, misleading: 0, 'needs-review': 0,
   };
   let respondedModel: string | undefined;
+  // Phase 6, task P6-2: per-evaluable-test-case cache provenance and fresh-dispatch latency — see
+  // `TestCaseCacheStatus`/`TestCaseLatency`'s own docs (`src/domain/audit.ts`). Built in this same
+  // pass over `outcomes` (already the run's one deterministic, fully-merged — dispatched and
+  // resume-reused alike — outcome list) rather than a second traversal, so it can never disagree
+  // with `classifications`/`totals` about which items were cached/fresh/failed.
+  const cacheStatusByTestCaseId = new Map<TestCaseId, 'cached' | 'fresh' | 'not-evaluated'>();
+  const latencyByTestCaseId = new Map<TestCaseId, { readonly latencyMs: number; readonly attemptLatenciesMs?: readonly number[] }>();
 
   for (const outcome of outcomes) {
     if (outcome.kind === 'success' || outcome.kind === 'cached') {
@@ -458,6 +465,16 @@ async function runEvaluation(
       if (respondedModel === undefined) respondedModel = outcome.classification.model.responded;
       if (outcome.kind === 'success') {
         evaluated += 1;
+        cacheStatusByTestCaseId.set(outcome.testCase.id, 'fresh');
+        // Never fabricated: absent from `outcome.evaluation` (a resumed item reconstructed from a
+        // pre-P6-1 store row) means genuinely never measured, not zero — see `TestCaseLatency`'s
+        // own doc.
+        if (outcome.evaluation.latencyMs !== undefined) {
+          latencyByTestCaseId.set(outcome.testCase.id, {
+            latencyMs: outcome.evaluation.latencyMs,
+            ...(outcome.evaluation.attemptLatenciesMs === undefined ? {} : { attemptLatenciesMs: outcome.evaluation.attemptLatenciesMs }),
+          });
+        }
         // A cache hit spends zero tokens THIS run — its classification's `usage` reflects the
         // ORIGINAL evaluation's cost, recorded when that judgment was first computed, never a
         // fresh spend. Folding it into this run's totals would overstate what this run actually
@@ -466,11 +483,13 @@ async function runEvaluation(
         outputTokens += outcome.classification.usage.outputTokens;
       } else {
         cached += 1;
+        cacheStatusByTestCaseId.set(outcome.testCase.id, 'cached');
       }
       continue;
     }
 
     failed += 1;
+    cacheStatusByTestCaseId.set(outcome.testCase.id, 'not-evaluated');
     const plainDiagnostic: Diagnostic = {
       code: 'evaluation-failed',
       message: `Unable to evaluate test case ${outcome.testCase.id} ("${outcome.testCase.name}"): `
@@ -495,7 +514,7 @@ async function runEvaluation(
   };
 
   return {
-    evaluation: { classifications, totals },
+    evaluation: { classifications, totals, cacheStatusByTestCaseId, latencyByTestCaseId },
     diagnostics,
     fileDiagnosticsByPath,
     ...(resume === undefined ? {} : { resumeCounts: { outstanding: outstandingItems.length, reused: items.length - outstandingItems.length } }),

@@ -11,6 +11,7 @@ import { createAuditEvidencePort } from '../adapters/evidence-audit-port.js';
 import { createJevEvaluationPort } from '../adapters/jev-evaluation-port.js';
 import { createJevHttpGateway } from '../adapters/jev-http-gateway.js';
 import {
+  AUDIT_STORE_SCHEMA_VERSION,
   createSqliteAuditStore,
   openSqliteAuditStoreForLookup,
   resolveAuditStorePaths,
@@ -31,7 +32,7 @@ import {
   resolveApiKey,
   type StoredCredentials,
 } from '../domain/auth.js';
-import { canonicalizeEvidenceBundle, type EvidenceBundle } from '../domain/evidence.js';
+import { canonicalizeEvidenceBundle } from '../domain/evidence.js';
 import { estimateDryRun, JEV_ESTIMATE_SNAPSHOT, type DryRunCacheNotConsultedReason, type DryRunEstimate } from '../domain/estimate.js';
 import { JevConfigurationError } from '../domain/jev-gateway.js';
 import { JEV_MODEL_ID, RUBRIC_V2 } from '../domain/rubric.js';
@@ -42,6 +43,7 @@ import {
   AuditResumeUnavailableError,
   AuditStoreCorruptError,
   AuditStoreSchemaVersionError,
+  EMPTY_AUDIT_EVALUATION_TOTALS,
   type AuditCacheKeyPort,
   type AuditDiagnostic,
   type AuditEvaluationPort,
@@ -50,9 +52,9 @@ import {
   type AuditResult,
   type AuditStorePort,
 } from '../domain/audit.js';
-import type { ClassificationResult } from '../domain/classification.js';
+import { CLASSIFICATION_POLICY_V2 } from '../domain/classification.js';
 import type { ConfigurationOverrides } from '../domain/config.js';
-import type { TestCaseId } from '../domain/test-understanding.js';
+import { buildAuditReport, type AuditReportContext } from '../domain/report.js';
 
 export interface CliIo {
   writeLine(message: string): void;
@@ -367,72 +369,33 @@ function dryRunTextReport(rootDir: string, estimate: DryRunEstimate): string {
   ].join('\n');
 }
 
-const ZERO_EVALUATION_TOTALS: NonNullable<AuditResult['evaluation']>['totals'] = {
-  evaluated: 0,
-  cached: 0,
-  failed: 0,
-  skipped: { total: 0, byReason: { skip: 0, todo: 0, 'evidence-unavailable': 0 } },
-  usage: { inputTokens: 0, outputTokens: 0 },
-  statusCounts: { healthy: 0, weak: 0, misleading: 0, 'needs-review': 0 },
-  respondedModel: undefined,
-  modelMismatches: 0,
-};
-
-/** Every evidence bundle across `result.files`, indexed by test case id, for attaching per-test provenance counts to a classification entry in the `--evaluate --json` report. */
-function bundlesByTestCaseId(result: AuditResult): ReadonlyMap<TestCaseId, EvidenceBundle> {
-  const map = new Map<TestCaseId, EvidenceBundle>();
-  for (const file of result.files) {
-    for (const bundle of file.evidence) map.set(bundle.testCaseId, bundle);
-  }
-  return map;
-}
-
-function evidenceProvenance(bundle: EvidenceBundle | undefined): {
-  readonly fragments: number;
-  readonly truncatedFragments: number;
-  readonly denied: number;
-  readonly unresolved: number;
-  readonly omitted: number;
-} {
-  if (bundle === undefined) return { fragments: 0, truncatedFragments: 0, denied: 0, unresolved: 0, omitted: 0 };
-  return {
-    fragments: bundle.totals.fragments,
-    truncatedFragments: bundle.totals.truncatedFragments,
-    denied: bundle.denied.length,
-    unresolved: bundle.unresolved.length,
-    omitted: bundle.omitted.length,
-  };
-}
+const ZERO_EVALUATION_TOTALS = EMPTY_AUDIT_EVALUATION_TOTALS;
 
 /**
- * One deterministic `--evaluate --json` line: field order is fixed (object
- * literal insertion order), and every per-test `ClassificationResult` is
- * embedded as-is (its own field order comes from `classifyEvaluation`) with
- * one added `evidence` provenance-counts field. `result.evaluation` is only
- * ever `undefined` here if a test harness injects `--evaluate` without also
- * providing an evaluation outcome — an honest, valid, all-zero report is
- * still produced rather than throwing.
+ * The canonical JSON report's build-time context (Phase 6, task P6-2): the model/rubric/policy
+ * this build actively evaluates with (matching `src/adapters/jev-evaluation-port.ts`'s own
+ * `RUBRIC_V2`/`CLASSIFICATION_POLICY_V2` wiring) and this build's persistence schema version —
+ * see `AuditReportContext`'s own doc (`src/domain/report.ts`) for why these are compile-time
+ * constants passed in, never derived from `AuditResult` itself.
+ */
+const REPORT_CONTEXT: AuditReportContext = {
+  modelRequested: JEV_MODEL_ID,
+  rubricVersion: RUBRIC_V2.version,
+  policyVersion: CLASSIFICATION_POLICY_V2.version,
+  storeSchemaVersion: AUDIT_STORE_SCHEMA_VERSION,
+};
+
+/**
+ * `--evaluate --json`'s canonical machine shape (Phase 6, task P6-2): one versioned, self-describing
+ * report built by the pure domain function `buildAuditReport` (`src/domain/report.ts`) — this
+ * function's own job is only to supply the build-time context and serialize the result.
+ * Evolves the pre-P6-2 ad-hoc envelope (which carried no version, no discovery block, no
+ * incomplete-run visibility, no per-test cache status, and no latency) into that one canonical
+ * shape, deliberately, as documented in this task's own report — see `docs/technical-design.md`'s
+ * "Reports" section and `README.md`'s `audit --evaluate --json` entry for the delivered contract.
  */
 function evaluateJsonLine(result: AuditResult): string {
-  const evaluation = result.evaluation;
-  const bundles = bundlesByTestCaseId(result);
-  const classifications = (evaluation?.classifications ?? []).map((classification: ClassificationResult) => ({
-    ...classification,
-    evidence: evidenceProvenance(bundles.get(classification.testCaseId)),
-  }));
-  return JSON.stringify({
-    evaluate: true,
-    reportingOnly: true,
-    rootDir: result.rootDir,
-    modelRequested: JEV_MODEL_ID,
-    totals: evaluation?.totals ?? ZERO_EVALUATION_TOTALS,
-    classifications,
-    diagnostics: diagnosticsJson(result.diagnostics),
-    // Phase 5, task P5-4: present only for `--resume <runId>` (never for an ordinary --evaluate
-    // run), and only reaches here at all when there WAS outstanding work — the nothing-outstanding
-    // case is reported separately by `runCli`, before this function is ever called.
-    ...(result.resume === undefined ? {} : { resume: { runId: result.resume.runId, outstanding: result.resume.outstanding, reused: result.resume.reused } }),
-  });
+  return JSON.stringify(buildAuditReport(result, REPORT_CONTEXT));
 }
 
 /** Concise human-readable `--evaluate` text report, one `writeLine` call (embedded newlines), mirroring `evaluateJsonLine`'s data. Includes a `Diagnostics` block (never just a bare failed count) so an `evaluation-failed` diagnostic stays visible without needing `--json`. */

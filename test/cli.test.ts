@@ -726,6 +726,8 @@ describe('--evaluate', () => {
           respondedModel: undefined,
           modelMismatches: 0,
         },
+        cacheStatusByTestCaseId: new Map(),
+        latencyByTestCaseId: new Map(),
       },
     };
 
@@ -964,23 +966,27 @@ describe('--evaluate', () => {
         expect(exitCode).toBe(0);
         expect(output.lines).toHaveLength(1);
         expect(output.lines[0]).toBe(
-          '{"evaluate":true,"reportingOnly":true,"rootDir":"/workspace","modelRequested":"jev-1.13.0",'
-          + '"totals":{"evaluated":1,"cached":0,"failed":0,"skipped":{"total":0,"byReason":{"skip":0,"todo":0,"evidence-unavailable":0}},'
-          + '"usage":{"inputTokens":100,"outputTokens":0},"statusCounts":{"healthy":0,"weak":0,"misleading":0,"needs-review":1},'
-          + '"respondedModel":"jev-1.13.0","modelMismatches":0},'
+          '{"reportVersion":1,"rootDir":"/workspace","reportingOnly":true,"complete":true,"versions":{"storeSchema":3,"rubric":2,"policy":2},'
+          + '"modelRequested":"jev-1.13.0","discovery":{"files":[{"path":"abc.test.ts","framework":"vitest","testCaseCount":1,"dynamicMetadataCount":0,'
+          + '"evidenceBundleCount":1}],"excluded":[],"totals":{"files":1,"excluded":0,"testCases":1,"dynamicMetadata":0,"diagnostics":0,'
+          + '"unsupportedFrameworkFiles":0,"evidenceBundles":1,"evidenceFragments":0,"evidenceTruncatedFragments":0,"evidenceOmitted":0,'
+          + '"evidenceDenied":0,"evidenceUnresolved":0}},"totals":{"evaluated":1,"cached":0,"failed":0,"skipped":{"total":0,"byReason":{"skip":0,"todo":0,'
+          + '"evidence-unavailable":0}},"usage":{"inputTokens":100,"outputTokens":0},"statusCounts":{"healthy":0,"weak":0,"misleading":0,'
+          + '"needs-review":1},"respondedModel":"jev-1.13.0","modelMismatches":0},"latency":{"measuredTestCases":0},'
+          + '"cacheStatus":[{"testCaseId":"tc:v1:abc","repositoryRelativePath":"abc.test.ts","name":"abc","status":"fresh"}],'
           + '"classifications":[{"testCaseId":"tc:v1:abc","repositoryRelativePath":"abc.test.ts","name":"abc","status":"needs-review",'
-          + '"dimensions":[{"dimensionId":"assertion-strength","dimensionLabel":"Assertion strength","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
-          + '{"dimensionId":"behavioral-focus","dimensionLabel":"Behavioral focus","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
-          + '{"dimensionId":"determinism-isolation","dimensionLabel":"Determinism and isolation","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
-          + '{"dimensionId":"diagnostic-quality","dimensionLabel":"Diagnostic quality","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
-          + '{"dimensionId":"falsifiability","dimensionLabel":"Falsifiability","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
-          + '{"dimensionId":"refactor-resistance","dimensionLabel":"Refactor resistance","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
-          + '{"dimensionId":"test-double-quality","dimensionLabel":"Test-double quality","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"}],'
-          + '"findings":[],"policyVersion":2,"rubricVersion":2,'
-          + '"model":{"requested":"jev-1.13.0","responded":"jev-1.13.0","matchesPin":true},'
-          + '"usage":{"inputTokens":100,"outputTokens":0},'
-          + '"evidence":{"fragments":0,"truncatedFragments":0,"denied":0,"unresolved":0,"omitted":0}}],'
-          + '"diagnostics":[]}',
+          + '"dimensions":[{"dimensionId":"assertion-strength","dimensionLabel":"Assertion strength","applicable":false,"applicabilityProbability":0.1,'
+          + '"status":"not-applicable"},{"dimensionId":"behavioral-focus","dimensionLabel":"Behavioral focus","applicable":false,'
+          + '"applicabilityProbability":0.1,"status":"not-applicable"},{"dimensionId":"determinism-isolation",'
+          + '"dimensionLabel":"Determinism and isolation","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
+          + '{"dimensionId":"diagnostic-quality","dimensionLabel":"Diagnostic quality","applicable":false,"applicabilityProbability":0.1,'
+          + '"status":"not-applicable"},{"dimensionId":"falsifiability","dimensionLabel":"Falsifiability","applicable":false,'
+          + '"applicabilityProbability":0.1,"status":"not-applicable"},{"dimensionId":"refactor-resistance","dimensionLabel":"Refactor resistance",'
+          + '"applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},{"dimensionId":"test-double-quality",'
+          + '"dimensionLabel":"Test-double quality","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"}],"findings":[],'
+          + '"policyVersion":2,"rubricVersion":2,"model":{"requested":"jev-1.13.0","responded":"jev-1.13.0","matchesPin":true},"usage":{"inputTokens":100,'
+          + '"outputTokens":0},"cache":"fresh","evidence":{"fragments":0,"truncatedFragments":0,"denied":[],"unresolved":[],"omitted":[]}}],'
+          + '"diagnostics":[]}'
         );
       },
     );
@@ -1232,42 +1238,123 @@ describe('--evaluate', () => {
         expect(exitCode).toBe(0);
         expect(output.lines).toHaveLength(1);
         expect(output.lines[0]).toBe(
-          '{"evaluate":true,"reportingOnly":true,"rootDir":"/workspace","modelRequested":"jev-1.13.0",'
-          + '"totals":{"evaluated":2,"cached":0,"failed":0,"skipped":{"total":0,"byReason":{"skip":0,"todo":0,"evidence-unavailable":0}},'
-          + '"usage":{"inputTokens":240,"outputTokens":3},"statusCounts":{"healthy":1,"weak":0,"misleading":1,"needs-review":0},'
-          + '"respondedModel":"jev-1.13.0","modelMismatches":0},'
-          + '"classifications":[{"testCaseId":"tc:v1:misleading-case","repositoryRelativePath":"mixed.test.ts","name":"misleading case","status":"misleading",'
-          + '"dimensions":[{"dimensionId":"assertion-strength","dimensionLabel":"Assertion strength","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
-          + '{"dimensionId":"behavioral-focus","dimensionLabel":"Behavioral focus","applicable":true,"applicabilityProbability":0.9,"level":"strong","score":3,"confidence":0.9,"status":"judged",'
-          + '"probabilities":{"0":0.01,"1":0.01,"2":0.08,"3":0.9},"deficientMass":0.02,"acceptableMass":0.98,"criticalMass":0.01},'
-          + '{"dimensionId":"determinism-isolation","dimensionLabel":"Determinism and isolation","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
-          + '{"dimensionId":"diagnostic-quality","dimensionLabel":"Diagnostic quality","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
-          + '{"dimensionId":"falsifiability","dimensionLabel":"Falsifiability","applicable":true,"applicabilityProbability":0.9,"level":"misleading","score":0,"confidence":0.9,"status":"judged",'
-          + '"probabilities":{"0":0.85,"1":0.1,"2":0.03,"3":0.02},"deficientMass":0.95,"acceptableMass":0.05,"criticalMass":0.85},'
-          + '{"dimensionId":"refactor-resistance","dimensionLabel":"Refactor resistance","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
-          + '{"dimensionId":"test-double-quality","dimensionLabel":"Test-double quality","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"}],'
-          + '"findings":[{"testCaseId":"tc:v1:misleading-case","repositoryRelativePath":"mixed.test.ts","name":"misleading case","dimensionId":"falsifiability","dimensionLabel":"Falsifiability","level":"misleading","score":0,"confidence":0.9,"applicabilityProbability":0.9,"status":"judged",'
-          + '"probabilities":{"0":0.85,"1":0.1,"2":0.03,"3":0.02},"deficientMass":0.95,"acceptableMass":0.05,"criticalMass":0.85}],'
-          + '"policyVersion":2,"rubricVersion":2,'
-          + '"model":{"requested":"jev-1.13.0","responded":"jev-1.13.0","matchesPin":true},'
-          + '"usage":{"inputTokens":150,"outputTokens":2},'
-          + '"evidence":{"fragments":1,"truncatedFragments":0,"denied":0,"unresolved":0,"omitted":0}},'
-          + '{"testCaseId":"tc:v1:healthy-case","repositoryRelativePath":"mixed.test.ts","name":"healthy case","status":"healthy",'
-          + '"dimensions":[{"dimensionId":"assertion-strength","dimensionLabel":"Assertion strength","applicable":true,"applicabilityProbability":0.8,"level":"acceptable","score":2,"confidence":0.8,"status":"judged",'
-          + '"probabilities":{"0":0.02,"1":0.03,"2":0.75,"3":0.2},"deficientMass":0.05,"acceptableMass":0.95,"criticalMass":0.02},'
-          + '{"dimensionId":"behavioral-focus","dimensionLabel":"Behavioral focus","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
-          + '{"dimensionId":"determinism-isolation","dimensionLabel":"Determinism and isolation","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
-          + '{"dimensionId":"diagnostic-quality","dimensionLabel":"Diagnostic quality","applicable":true,"applicabilityProbability":0.95,"level":"strong","score":3,"confidence":0.95,"status":"judged",'
-          + '"probabilities":{"0":0.01,"1":0.01,"2":0.08,"3":0.9},"deficientMass":0.02,"acceptableMass":0.98,"criticalMass":0.01},'
-          + '{"dimensionId":"falsifiability","dimensionLabel":"Falsifiability","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
-          + '{"dimensionId":"refactor-resistance","dimensionLabel":"Refactor resistance","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
-          + '{"dimensionId":"test-double-quality","dimensionLabel":"Test-double quality","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"}],'
-          + '"findings":[],"policyVersion":2,"rubricVersion":2,'
-          + '"model":{"requested":"jev-1.13.0","responded":"jev-1.13.0","matchesPin":true},'
-          + '"usage":{"inputTokens":90,"outputTokens":1},'
-          + '"evidence":{"fragments":2,"truncatedFragments":1,"denied":1,"unresolved":1,"omitted":1}}],'
-          + '"diagnostics":[]}',
+          '{"reportVersion":1,"rootDir":"/workspace","reportingOnly":true,"complete":true,"versions":{"storeSchema":3,"rubric":2,"policy":2},'
+          + '"modelRequested":"jev-1.13.0","discovery":{"files":[{"path":"mixed.test.ts","framework":"vitest","testCaseCount":2,"dynamicMetadataCount":0,'
+          + '"evidenceBundleCount":2}],"excluded":[],"totals":{"files":1,"excluded":0,"testCases":2,"dynamicMetadata":0,"diagnostics":0,'
+          + '"unsupportedFrameworkFiles":0,"evidenceBundles":2,"evidenceFragments":3,"evidenceTruncatedFragments":1,"evidenceOmitted":1,'
+          + '"evidenceDenied":1,"evidenceUnresolved":1}},"totals":{"evaluated":2,"cached":0,"failed":0,"skipped":{"total":0,"byReason":{"skip":0,"todo":0,'
+          + '"evidence-unavailable":0}},"usage":{"inputTokens":240,"outputTokens":3},"statusCounts":{"healthy":1,"weak":0,"misleading":1,'
+          + '"needs-review":0},"respondedModel":"jev-1.13.0","modelMismatches":0},"latency":{"measuredTestCases":0},'
+          + '"cacheStatus":[{"testCaseId":"tc:v1:misleading-case","repositoryRelativePath":"mixed.test.ts","name":"misleading case","status":"fresh"},'
+          + '{"testCaseId":"tc:v1:healthy-case","repositoryRelativePath":"mixed.test.ts","name":"healthy case","status":"fresh"}],'
+          + '"classifications":[{"testCaseId":"tc:v1:misleading-case","repositoryRelativePath":"mixed.test.ts","name":"misleading case",'
+          + '"status":"misleading","dimensions":[{"dimensionId":"assertion-strength","dimensionLabel":"Assertion strength","applicable":false,'
+          + '"applicabilityProbability":0.1,"status":"not-applicable"},{"dimensionId":"behavioral-focus","dimensionLabel":"Behavioral focus",'
+          + '"applicable":true,"applicabilityProbability":0.9,"level":"strong","score":3,"confidence":0.9,"status":"judged","probabilities":{"0":0.01,'
+          + '"1":0.01,"2":0.08,"3":0.9},"deficientMass":0.02,"acceptableMass":0.98,"criticalMass":0.01},{"dimensionId":"determinism-isolation",'
+          + '"dimensionLabel":"Determinism and isolation","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
+          + '{"dimensionId":"diagnostic-quality","dimensionLabel":"Diagnostic quality","applicable":false,"applicabilityProbability":0.1,'
+          + '"status":"not-applicable"},{"dimensionId":"falsifiability","dimensionLabel":"Falsifiability","applicable":true,'
+          + '"applicabilityProbability":0.9,"level":"misleading","score":0,"confidence":0.9,"status":"judged","probabilities":{"0":0.85,"1":0.1,"2":0.03,'
+          + '"3":0.02},"deficientMass":0.95,"acceptableMass":0.05,"criticalMass":0.85},{"dimensionId":"refactor-resistance",'
+          + '"dimensionLabel":"Refactor resistance","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
+          + '{"dimensionId":"test-double-quality","dimensionLabel":"Test-double quality","applicable":false,"applicabilityProbability":0.1,'
+          + '"status":"not-applicable"}],"findings":[{"testCaseId":"tc:v1:misleading-case","repositoryRelativePath":"mixed.test.ts",'
+          + '"name":"misleading case","dimensionId":"falsifiability","dimensionLabel":"Falsifiability","level":"misleading","score":0,"confidence":0.9,'
+          + '"applicabilityProbability":0.9,"status":"judged","probabilities":{"0":0.85,"1":0.1,"2":0.03,"3":0.02},"deficientMass":0.95,'
+          + '"acceptableMass":0.05,"criticalMass":0.85}],"policyVersion":2,"rubricVersion":2,"model":{"requested":"jev-1.13.0","responded":"jev-1.13.0",'
+          + '"matchesPin":true},"usage":{"inputTokens":150,"outputTokens":2},"cache":"fresh","evidence":{"fragments":1,"truncatedFragments":0,"denied":[],'
+          + '"unresolved":[],"omitted":[]}},{"testCaseId":"tc:v1:healthy-case","repositoryRelativePath":"mixed.test.ts","name":"healthy case",'
+          + '"status":"healthy","dimensions":[{"dimensionId":"assertion-strength","dimensionLabel":"Assertion strength","applicable":true,'
+          + '"applicabilityProbability":0.8,"level":"acceptable","score":2,"confidence":0.8,"status":"judged","probabilities":{"0":0.02,"1":0.03,"2":0.75,'
+          + '"3":0.2},"deficientMass":0.05,"acceptableMass":0.95,"criticalMass":0.02},{"dimensionId":"behavioral-focus",'
+          + '"dimensionLabel":"Behavioral focus","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
+          + '{"dimensionId":"determinism-isolation","dimensionLabel":"Determinism and isolation","applicable":false,"applicabilityProbability":0.1,'
+          + '"status":"not-applicable"},{"dimensionId":"diagnostic-quality","dimensionLabel":"Diagnostic quality","applicable":true,'
+          + '"applicabilityProbability":0.95,"level":"strong","score":3,"confidence":0.95,"status":"judged","probabilities":{"0":0.01,"1":0.01,"2":0.08,'
+          + '"3":0.9},"deficientMass":0.02,"acceptableMass":0.98,"criticalMass":0.01},{"dimensionId":"falsifiability","dimensionLabel":"Falsifiability",'
+          + '"applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},{"dimensionId":"refactor-resistance",'
+          + '"dimensionLabel":"Refactor resistance","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
+          + '{"dimensionId":"test-double-quality","dimensionLabel":"Test-double quality","applicable":false,"applicabilityProbability":0.1,'
+          + '"status":"not-applicable"}],"findings":[],"policyVersion":2,"rubricVersion":2,"model":{"requested":"jev-1.13.0","responded":"jev-1.13.0",'
+          + '"matchesPin":true},"usage":{"inputTokens":90,"outputTokens":1},"cache":"fresh","evidence":{"fragments":2,"truncatedFragments":1,'
+          + '"denied":[{"repositoryRelativePath":"secret.env","rule":"deny-list:.env*"}],"unresolved":[{"specifier":"left-pad",'
+          + '"reason":"bare-specifier"}],"omitted":[{"repositoryRelativePath":"big.ts","reason":"bundle-budget-exhausted"}]}}],"diagnostics":[]}'
         );
+      },
+    );
+
+    it(
+      'threads a measured latency end to end through the real gateway, runEvaluation, and the canonical report — a distinct '
+      + 'latencyMs/attemptLatenciesMs pair that could never be confused with this fixture\'s own usage tokens or attempt count',
+      async () => {
+        const output = captureOutput();
+        // Deliberately non-symmetric and distinct from every other number in this fixture (usage
+        // tokens 100/0, attempts 1): Phase 6 Warning — latency next to token counts is exactly the
+        // adjacency that already produced one defect in this project.
+        const measuredLatencyMs = 6789;
+        const measuredAttemptLatenciesMs = [6789];
+        const gatewayWithLatency: JevGatewayPort = {
+          async evaluate(request: JevRequest): Promise<JevEvaluation> {
+            const answers: Record<string, JevAnswer> = {};
+            for (const questionId of Object.keys(request.questions)) {
+              answers[questionId] = { type: 'noul', probability: 0.1, raw: { type: 'noul', noul: 0.1 } };
+            }
+            return {
+              requestedModel: request.model,
+              respondedModel: request.model,
+              modelMatchesPin: true,
+              answers,
+              usage: { inputTokens: 100, outputTokens: 0 },
+              attempts: 1,
+              latencyMs: measuredLatencyMs,
+              attemptLatenciesMs: measuredAttemptLatenciesMs,
+            };
+          },
+        };
+        const evaluation = createJevEvaluationPort(gatewayWithLatency);
+
+        const exitCode = await runCli(['audit', '--rootDir', '/workspace', '--evaluate', '--json'], output.io, {
+          audit: async (request) => runAudit(request, realPorts(evaluation)),
+        });
+
+        expect(exitCode).toBe(0);
+        expect(output.lines).toHaveLength(1);
+        const parsed = JSON.parse(output.lines[0] ?? '') as {
+          readonly latency: { readonly measuredTestCases: number; readonly totalMs: number; readonly meanMs: number; readonly minMs: number; readonly maxMs: number };
+          readonly classifications: readonly { readonly cache: string; readonly latency?: { readonly latencyMs: number; readonly attemptLatenciesMs: readonly number[] } }[];
+        };
+
+        expect(parsed.latency).toEqual({ measuredTestCases: 1, totalMs: measuredLatencyMs, meanMs: measuredLatencyMs, minMs: measuredLatencyMs, maxMs: measuredLatencyMs });
+        expect(parsed.classifications[0]?.cache).toBe('fresh');
+        expect(parsed.classifications[0]?.latency).toEqual({ latencyMs: measuredLatencyMs, attemptLatenciesMs: measuredAttemptLatenciesMs });
+      },
+    );
+
+    it(
+      'an incomplete run (discovery failed before evaluation ever started, through the real runAudit pipeline — not just a '
+      + 'hand-built AuditResult) still exits 0 and is marked complete: false in the canonical report, never silently presented as finished',
+      async () => {
+        const output = captureOutput();
+        const evaluation = createJevEvaluationPort(fixedAnswersGateway());
+        const throwingDiscoveryPorts: AuditPorts = {
+          ...realPorts(evaluation),
+          discovery: { discover: async () => { throw new Error('EACCES: permission denied'); } },
+        };
+
+        const exitCode = await runCli(['audit', '--rootDir', '/workspace', '--evaluate', '--json'], output.io, {
+          audit: async (request) => runAudit(request, throwingDiscoveryPorts),
+        });
+
+        // The hard constraint this task must not break: no infrastructure failure changes the exit
+        // status — reporting-only stays reporting-only even for a run that never got off the ground.
+        expect(exitCode).toBe(0);
+        expect(output.lines).toHaveLength(1);
+        const parsed = JSON.parse(output.lines[0] ?? '') as { readonly complete: boolean; readonly incompleteReason: string; readonly classifications: readonly unknown[] };
+        expect(parsed.complete).toBe(false);
+        expect(parsed.incompleteReason).toContain('discovery failed before evaluation could run');
+        expect(parsed.incompleteReason).toContain('EACCES');
+        expect(parsed.classifications).toEqual([]);
       },
     );
 
@@ -1322,6 +1409,8 @@ describe('--evaluate', () => {
             respondedModel: undefined,
             modelMismatches: 0,
           },
+          cacheStatusByTestCaseId: new Map(),
+          latencyByTestCaseId: new Map(),
         },
       };
 
