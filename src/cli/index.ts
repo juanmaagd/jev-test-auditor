@@ -56,7 +56,10 @@ import {
 import { CLASSIFICATION_POLICY_V2 } from '../domain/classification.js';
 import type { ConfigurationOverrides } from '../domain/config.js';
 import { buildAuditReport, type AuditReportContext } from '../domain/report.js';
+import { renderAuditReportHtml } from '../domain/html-report.js';
 import { createTerminalProgressReporter } from '../adapters/terminal-progress-reporter.js';
+import { checkHtmlReportPath, writeHtmlReport } from '../adapters/html-report-writer.js';
+import { openHtmlReportWithViewer, type OpenHtmlReportResult } from '../adapters/html-report-opener.js';
 
 export interface CliIo {
   writeLine(message: string): void;
@@ -101,6 +104,15 @@ export interface CliDependencies {
    * keeps a piped `--evaluate --json` consumer's stdout byte-clean without anything to disable.
    */
   readonly createProgressPort?: () => AuditProgressPort;
+  /**
+   * Test seam only (Phase 6, task P6-4): overrides how `--html <path> --open` launches the platform
+   * viewer. Only consulted when `parsed.open` is `true` and the HTML report was just written
+   * successfully. Production default is `openHtmlReportWithViewer` (`src/adapters/html-report-opener.ts`),
+   * bound to the real `process.platform` and the real `node:child_process.spawn`. Always injected in
+   * this project's own tests — never letting a real viewer launch mid-suite is the whole point of
+   * this seam (see `test/cli.test.ts`).
+   */
+  readonly openHtmlReport?: (path: string) => Promise<OpenHtmlReportResult>;
   /**
    * Test seam only, consulted by `auth login`: overrides how the API key is
    * read from the terminal. Production default (`readApiKeyFromPrompt`)
@@ -205,6 +217,22 @@ Options:
                       re-dispatches it, since there is no way to know whether the first attempt
                       completed, so a resumed run can cost slightly more than the work it appears to
                       redo. Requires --evaluate.
+  --html <path>      Render the canonical report (the same data --evaluate --json prints) into one
+                      self-contained offline HTML file at <path>: the JSON and every style and
+                      script are embedded, with no CDN, no external stylesheet or font, and no
+                      network access at render or view time. Evidence fragment source content is
+                      never included — only provenance decisions and counts, exactly like the JSON
+                      report. Without this flag, no file is written. An existing regular file at
+                      <path> is overwritten; an existing directory there, or a path whose parent
+                      directory does not exist, is a usage error (exit 1) before any evaluation
+                      work is dispatched. Requires --evaluate. Cannot be combined with --dry-run or
+                      --inspect-payloads. See "Self-contained HTML report" in README.md.
+  --open             Opens the file --html <path> just wrote in the operating system's default
+                      viewer (macOS: open; Linux: xdg-open; Windows: explorer.exe) once it has been
+                      written successfully. Never opens anything else. A failure to launch a viewer
+                      (e.g. no viewer installed, as in most CI environments) is reported on stderr
+                      and never changes the exit status or affects the already-written file.
+                      Requires --html.
   --dry-run --json   Print the same dry-run preview as one machine-readable JSON line instead of
                       the human-readable text report. Requires --dry-run.
   --json             Requires --dry-run or --evaluate; --json alone is a usage error.
@@ -461,6 +489,10 @@ interface ParsedAuditOptions {
   readonly json: boolean;
   /** `--resume <runId>` (Phase 5, task P5-4), parsed like `--rootDir` — consumes the next argument. `undefined` unless given. */
   readonly resume?: string;
+  /** `--html <path>` (Phase 6, task P6-4), parsed like `--rootDir` — consumes the next argument. `undefined` unless given. */
+  readonly html?: string;
+  /** `--open` (Phase 6, task P6-4): requires `html` to be set — enforced below, never independently meaningful. */
+  readonly open: boolean;
 }
 
 function parseAuditOptions(args: readonly string[]): ParsedAuditOptions | { readonly error: string } | { readonly help: true } {
@@ -471,6 +503,8 @@ function parseAuditOptions(args: readonly string[]): ParsedAuditOptions | { read
   let fresh = false;
   let json = false;
   let resume: string | undefined;
+  let html: string | undefined;
+  let open = false;
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
     if (argument === '--help') return { help: true };
@@ -508,6 +542,17 @@ function parseAuditOptions(args: readonly string[]): ParsedAuditOptions | { read
       index += 1;
       continue;
     }
+    if (argument === '--html') {
+      const path = args[index + 1];
+      if (path === undefined || path.startsWith('--')) return { error: '--html requires a path' };
+      html = path;
+      index += 1;
+      continue;
+    }
+    if (argument === '--open') {
+      open = true;
+      continue;
+    }
     return { error: `Unknown option: ${argument ?? ''}` };
   }
   if (json && !dryRun && !evaluate) return { error: '--json requires --dry-run or --evaluate (audit --dry-run --json / audit --evaluate --json)' };
@@ -516,7 +561,21 @@ function parseAuditOptions(args: readonly string[]): ParsedAuditOptions | { read
   if (evaluate && inspectPayloads) return { error: '--evaluate cannot be combined with --inspect-payloads' };
   if (fresh && !evaluate) return { error: '--fresh requires --evaluate (audit --evaluate --fresh)' };
   if (resume !== undefined && !evaluate) return { error: '--resume requires --evaluate (audit --evaluate --resume <runId>)' };
-  return { overrides, inspectPayloads, dryRun, evaluate, fresh, json, ...(resume === undefined ? {} : { resume }) };
+  if (html !== undefined && dryRun) return { error: '--html cannot be combined with --dry-run' };
+  if (html !== undefined && inspectPayloads) return { error: '--html cannot be combined with --inspect-payloads' };
+  if (html !== undefined && !evaluate) return { error: '--html requires --evaluate (audit --evaluate --html <path>)' };
+  if (open && html === undefined) return { error: '--open requires --html (audit --evaluate --html <path> --open)' };
+  return {
+    overrides,
+    inspectPayloads,
+    dryRun,
+    evaluate,
+    fresh,
+    json,
+    ...(resume === undefined ? {} : { resume }),
+    ...(html === undefined ? {} : { html }),
+    open,
+  };
 }
 
 const NO_KEY_USAGE_MESSAGE = 'No TypeSafe API key is configured. Provide one with `jev-test-auditor auth login`, or set the TYPESAFE_API_KEY environment variable.';
@@ -692,6 +751,20 @@ export async function runCli(
     return 1;
   }
 
+  // Phase 6, task P6-4: preflight `--html <path>` BEFORE any (potentially expensive, real-money)
+  // evaluation work is dispatched — a bad path (an existing directory, a missing parent) costs
+  // nothing this way, exactly like the API-key/store checks below fail fast before spending.
+  // `writeHtmlReport` re-checks the same two conditions at write time regardless (the unavoidable
+  // TOCTOU race between this preflight and the real write), so this is a UX improvement, never the
+  // only guarantee — see `src/adapters/html-report-writer.ts`'s own doc.
+  if (parsed.html !== undefined) {
+    const problem = await checkHtmlReportPath(parsed.html);
+    if (problem !== undefined) {
+      io.writeLine(`Unable to write the HTML report: ${problem.message}`);
+      return 1;
+    }
+  }
+
   const configuration = getResolvedConfiguration(parsed.overrides);
 
   let evaluationPort: AuditEvaluationPort | undefined;
@@ -854,6 +927,40 @@ export async function runCli(
 
     if (parsed.evaluate) {
       io.writeLine(parsed.json ? evaluateJsonLine(result) : evaluateTextReport(result));
+
+      // Phase 6, task P6-4. Deliberately unreached when `result.resume?.nothingOutstanding` was
+      // `true` above (no report exists to render in that case — see this task's own decision,
+      // documented in README.md's "Self-contained HTML report" section): nothing is written then,
+      // exactly like `--json` prints no report either. `report`/`html` are computed fresh here
+      // (never reused from `evaluateJsonLine` above) — `buildAuditReport` is pure and cheap, and
+      // keeping this block self-contained is worth the one extra call.
+      if (parsed.html !== undefined) {
+        const report = buildAuditReport(result, REPORT_CONTEXT);
+        const html = renderAuditReportHtml(report);
+        const writeResult = await writeHtmlReport(parsed.html, html);
+        if (!writeResult.written) {
+          io.writeLine(`Unable to write the HTML report: ${writeResult.message}`);
+          return 1;
+        }
+        // Visible, never silent (this task's own scope: "make each visible and named") — but on
+        // stderr, never stdout, exactly like progress (P6-3): `--evaluate --json`'s stdout stays
+        // byte-clean regardless of whether --html was also given.
+        process.stderr.write(
+          `HTML report written to ${parsed.html}${writeResult.overwrote ? ' (overwriting an existing file)' : ''}.\n`,
+        );
+
+        if (parsed.open) {
+          const openReport = dependencies.openHtmlReport ?? ((path: string) => openHtmlReportWithViewer(path));
+          const openResult = await openReport(parsed.html);
+          if (!openResult.opened) {
+            // Never fatal, never changes the exit status, never loses the already-written file —
+            // see `src/adapters/html-report-opener.ts`'s own doc for why a CI environment with no
+            // viewer installed is the expected common case here, not an error.
+            process.stderr.write(`Unable to open the HTML report automatically: ${openResult.reason}. The report remains at ${parsed.html}.\n`);
+          }
+        }
+      }
+
       return 0;
     }
 

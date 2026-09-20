@@ -2705,3 +2705,395 @@ describe('terminal progress during a run (Phase 6, task P6-3)', () => {
     }
   });
 });
+
+/**
+ * `--html <path>` / `--open` (Phase 6, task P6-4): renders the same canonical report
+ * `--evaluate --json` already prints into one self-contained offline HTML file, written only when
+ * explicitly requested — preserving Phase 5's "nothing is written unless explicitly asked for"
+ * guarantee for this new surface, exactly as the Phase 6 feature document requires.
+ */
+describe('--html and --open (Phase 6, task P6-4)', () => {
+  useIsolatedConfigHome();
+
+  const mathFixtureFiles = {
+    'math.test.ts': "import { expect, test } from 'vitest';\ntest('adds', () => { expect(1 + 1).toBe(2); });\n",
+  };
+
+  function fakeEvaluationPort(onCall?: (name: string) => void): AuditEvaluationPort {
+    return {
+      async evaluate(request) {
+        onCall?.(request.testCase.name);
+        return {
+          evaluation: {
+            requestedModel: 'jev-1.13.0', respondedModel: 'jev-1.13.0', modelMatchesPin: true,
+            answers: {}, usage: { inputTokens: 10, outputTokens: 1 }, attempts: 1,
+          },
+          classification: {
+            testCaseId: request.testCase.id,
+            repositoryRelativePath: request.testCase.repositoryRelativePath,
+            name: request.testCase.name,
+            status: 'healthy',
+            dimensions: [],
+            findings: [],
+            policyVersion: 2,
+            rubricVersion: 2,
+            model: { requested: 'jev-1.13.0', responded: 'jev-1.13.0', matchesPin: true },
+            usage: { inputTokens: 10, outputTokens: 1 },
+          },
+        };
+      },
+    };
+  }
+
+  function fakeStorePort(): AuditStorePort {
+    return {
+      beginRun: async () => 'html-run-1',
+      canonicalizeRootDir: async (rootDir) => rootDir,
+      recordWorkItem: async () => undefined,
+      lookup: async () => undefined,
+      finishRun: async () => undefined,
+      loadRunState: async () => undefined,
+      close: async () => undefined,
+    };
+  }
+
+  describe('flag parsing and rejections', () => {
+    it('documents --html and --open in --help', async () => {
+      const output = captureOutput();
+      const exitCode = await runCli(['--help'], output.io);
+      expect(exitCode).toBe(0);
+      expect(output.lines[0]).toContain('--html <path>');
+      expect(output.lines[0]).toContain('--open');
+    });
+
+    it('rejects --html with no evaluation seam ever reached when the path argument is missing', async () => {
+      const output = captureOutput();
+      const exitCode = await runCli(['audit', '--html'], output.io, {
+        createEvaluationPort: () => { throw new Error('must not resolve an evaluation port for a usage error'); },
+      });
+      expect(exitCode).toBe(1);
+      expect(output.lines[0]).toContain('--html requires a path');
+    });
+
+    it('rejects --html without --evaluate', async () => {
+      const output = captureOutput();
+      const exitCode = await runCli(['audit', '--html', 'report.html'], output.io);
+      expect(exitCode).toBe(1);
+      expect(output.lines[0]).toContain('--html requires --evaluate');
+    });
+
+    it('rejects --html combined with --dry-run', async () => {
+      const output = captureOutput();
+      const exitCode = await runCli(['audit', '--dry-run', '--html', 'report.html'], output.io);
+      expect(exitCode).toBe(1);
+      expect(output.lines[0]).toContain('--html cannot be combined with --dry-run');
+    });
+
+    it('rejects --html combined with --inspect-payloads', async () => {
+      const output = captureOutput();
+      const exitCode = await runCli(['audit', '--evaluate', '--inspect-payloads', '--html', 'report.html'], output.io);
+      expect(exitCode).toBe(1);
+      expect(output.lines[0]).toContain('--evaluate cannot be combined with --inspect-payloads');
+    });
+
+    it('rejects --open without --html', async () => {
+      const output = captureOutput();
+      const exitCode = await runCli(['audit', '--evaluate', '--open'], output.io, {
+        createEvaluationPort: () => { throw new Error('must not resolve an evaluation port for a usage error'); },
+      });
+      expect(exitCode).toBe(1);
+      expect(output.lines[0]).toContain('--open requires --html');
+    });
+
+    it(
+      'rejects a directory-shaped --html path as a usage error BEFORE dispatching any evaluation work (no API key resolved, no evaluation port constructed, no network)',
+      async () => {
+        const dir = await mkdtemp(join(tmpdir(), 'jev-html-cli-'));
+        temporaryRoots.push(dir);
+        const output = captureOutput();
+        const exitCode = await runCli(['audit', '--evaluate', '--html', dir], output.io, {
+          createEvaluationPort: () => { throw new Error('must not construct the evaluation port before the --html preflight'); },
+        });
+        expect(exitCode).toBe(1);
+        expect(output.lines[0]).toContain('Unable to write the HTML report');
+        expect(output.lines[0]).toContain(dir);
+      },
+    );
+
+    it(
+      'rejects an --html path whose parent directory does not exist, as a usage error, before dispatching any evaluation work',
+      async () => {
+        const dir = await mkdtemp(join(tmpdir(), 'jev-html-cli-'));
+        temporaryRoots.push(dir);
+        const target = join(dir, 'no-such-subdir', 'report.html');
+        const output = captureOutput();
+        const exitCode = await runCli(['audit', '--evaluate', '--html', target], output.io, {
+          createEvaluationPort: () => { throw new Error('must not construct the evaluation port before the --html preflight'); },
+        });
+        expect(exitCode).toBe(1);
+        expect(output.lines[0]).toContain('Unable to write the HTML report');
+      },
+    );
+  });
+
+  describe('no file without --html (Phase 5\'s guarantee, extended to this new surface)', () => {
+    it('an --evaluate run with no --html writes nothing at all to an otherwise-empty output directory', async () => {
+      const root = await fixture(mathFixtureFiles);
+      const outputDir = await mkdtemp(join(tmpdir(), 'jev-html-no-write-'));
+      temporaryRoots.push(outputDir);
+      const before = await readdirSorted(outputDir);
+
+      const output = captureOutput();
+      const exitCode = await runCli(['audit', '--rootDir', root, '--evaluate'], output.io, {
+        createEvaluationPort: () => fakeEvaluationPort(),
+        createStorePort: () => fakeStorePort(),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(await readdirSorted(outputDir)).toEqual(before);
+    });
+
+    it('an --evaluate --resume run that finds nothing outstanding writes no HTML file either (no report exists to render)', async () => {
+      const root = await fixture(mathFixtureFiles);
+      const dir = await mkdtemp(join(tmpdir(), 'jev-html-nothing-outstanding-'));
+      temporaryRoots.push(dir);
+      const target = join(dir, 'report.html');
+      const finishedResult: AuditResult = {
+        rootDir: root,
+        files: [],
+        excluded: [],
+        diagnostics: [],
+        totals: { files: 0, excluded: 0, testCases: 0, dynamicMetadata: 0, diagnostics: 0, ...zeroEvidenceTotals },
+        reportingOnly: true,
+        evaluation: {
+          classifications: [],
+          totals: {
+            evaluated: 0, cached: 0, failed: 0,
+            skipped: { total: 0, byReason: { skip: 0, todo: 0, 'evidence-unavailable': 0 } },
+            usage: { inputTokens: 0, outputTokens: 0 },
+            statusCounts: { healthy: 0, weak: 0, misleading: 0, 'needs-review': 0 },
+            respondedModel: undefined,
+            modelMismatches: 0,
+          },
+          cacheStatusByTestCaseId: new Map(),
+          latencyByTestCaseId: new Map(),
+        },
+        resume: { runId: 'run:v1:already-finished', outstanding: 0, reused: 0, nothingOutstanding: true },
+      };
+
+      const output = captureOutput();
+      const exitCode = await runCli(['audit', '--evaluate', '--resume', 'run:v1:already-finished', '--html', target], output.io, {
+        audit: async () => finishedResult,
+      });
+
+      expect(exitCode).toBe(0);
+      expect(output.lines[0]).toContain('Nothing to resume');
+      await expect(access(target)).rejects.toThrow();
+    });
+  });
+
+  describe('writes one genuinely self-contained file', () => {
+    it('writes exactly one HTML file at the given path, embedding the JSON and containing no external reference', async () => {
+      const root = await fixture(mathFixtureFiles);
+      const dir = await mkdtemp(join(tmpdir(), 'jev-html-write-'));
+      temporaryRoots.push(dir);
+      const target = join(dir, 'report.html');
+
+      const output = captureOutput();
+      const exitCode = await runCli(['audit', '--rootDir', root, '--evaluate', '--html', target], output.io, {
+        createEvaluationPort: () => fakeEvaluationPort(),
+        createStorePort: () => fakeStorePort(),
+      });
+
+      expect(exitCode).toBe(0);
+      // stdout carries only the ordinary terminal report — the file lives on disk, never on stdout.
+      expect(output.lines).toHaveLength(1);
+      expect(output.lines[0]).toContain('Jev evaluation summary');
+
+      const html = await readFile(target, 'utf8');
+      expect(html.trimStart().toLowerCase()).toMatch(/^<!doctype html>/);
+      expect(html).toContain('id="jev-report-data"');
+      expect(html).not.toMatch(/<link\b/i);
+      expect(html).not.toMatch(/\bsrc\s*=\s*"https?:\/\//i);
+      const match = /<script type="application\/json" id="jev-report-data">([\s\S]*?)<\/script>/.exec(html);
+      expect(match).not.toBeNull();
+      const parsed = JSON.parse(match![1]!) as { reportVersion: number; rootDir: string };
+      expect(parsed.reportVersion).toBe(1);
+      expect(parsed.rootDir).toBe(root);
+
+      expect(await readdirSorted(dir)).toEqual(['report.html']);
+    });
+
+    it('--evaluate --json --html stays byte-clean on stdout (exactly one parseable canonical JSON line) even though --html also wrote a file', async () => {
+      const root = await fixture(mathFixtureFiles);
+      const dir = await mkdtemp(join(tmpdir(), 'jev-html-write-json-'));
+      temporaryRoots.push(dir);
+      const target = join(dir, 'report.html');
+
+      const output = captureOutput();
+      const exitCode = await runCli(['audit', '--rootDir', root, '--evaluate', '--json', '--html', target], output.io, {
+        createEvaluationPort: () => fakeEvaluationPort(),
+        createStorePort: () => fakeStorePort(),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(output.lines).toHaveLength(1);
+      expect(() => JSON.parse(output.lines[0]!)).not.toThrow();
+      await expect(access(target)).resolves.toBeUndefined();
+    });
+
+    it('overwrites an existing file at the same --html path, replacing its content entirely (never appending)', async () => {
+      const root = await fixture(mathFixtureFiles);
+      const dir = await mkdtemp(join(tmpdir(), 'jev-html-overwrite-'));
+      temporaryRoots.push(dir);
+      const target = join(dir, 'report.html');
+      await writeFile(target, 'stale content that must not survive');
+
+      const output = captureOutput();
+      const exitCode = await runCli(['audit', '--rootDir', root, '--evaluate', '--html', target], output.io, {
+        createEvaluationPort: () => fakeEvaluationPort(),
+        createStorePort: () => fakeStorePort(),
+      });
+
+      expect(exitCode).toBe(0);
+      const html = await readFile(target, 'utf8');
+      expect(html).not.toContain('stale content');
+      expect(html.trimStart().toLowerCase()).toMatch(/^<!doctype html>/);
+    });
+
+    it('names the write, including the overwrite, on stderr — never on stdout', async () => {
+      const root = await fixture(mathFixtureFiles);
+      const dir = await mkdtemp(join(tmpdir(), 'jev-html-stderr-note-'));
+      temporaryRoots.push(dir);
+      const target = join(dir, 'report.html');
+      await writeFile(target, 'stale');
+      const stderrChunks: string[] = [];
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
+        stderrChunks.push(String(chunk));
+        return true;
+      });
+
+      try {
+        const output = captureOutput();
+        const exitCode = await runCli(['audit', '--rootDir', root, '--evaluate', '--json', '--html', target], output.io, {
+          createEvaluationPort: () => fakeEvaluationPort(),
+          createStorePort: () => fakeStorePort(),
+        });
+
+        expect(exitCode).toBe(0);
+        expect(output.lines).toHaveLength(1);
+        expect(output.lines[0]).not.toContain('overwrit');
+        expect(stderrChunks.join('')).toContain(target);
+        expect(stderrChunks.join('').toLowerCase()).toContain('overwrit');
+      } finally {
+        stderrSpy.mockRestore();
+      }
+    });
+  });
+
+  describe('renders from the same JSON --evaluate --json prints, with no repository content beyond what the JSON report already discloses', () => {
+    it('the API key never reaches the written HTML file (mirrors the existing JSON/database canaries)', async () => {
+      const root = await fixture(mathFixtureFiles);
+      const dir = await mkdtemp(join(tmpdir(), 'jev-html-canary-'));
+      temporaryRoots.push(dir);
+      const target = join(dir, 'report.html');
+      const canaryKey = 'sk-html-key-never-leaked-canary';
+      const savedKey = process.env['TYPESAFE_API_KEY'];
+      const originalFetch = globalThis.fetch;
+      process.env['TYPESAFE_API_KEY'] = canaryKey;
+      const fetchSpy = vi.fn(async () => new Response(JSON.stringify({
+        model: 'jev-1.13.0', answers: {}, usage: { input_tokens: 0, output_tokens: 0 },
+      }), { status: 200 }));
+      globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+      try {
+        const output = captureOutput();
+        const exitCode = await runCli(['audit', '--rootDir', root, '--evaluate', '--html', target], output.io, {
+          createStorePort: () => fakeStorePort(),
+        });
+
+        expect(exitCode).toBe(0);
+        // Proves the canary key genuinely entered the process's data flow, so the assertion below
+        // is not vacuous (the same discipline this phase's own history keeps re-learning).
+        expect(fetchSpy).toHaveBeenCalled();
+        const [, requestInit] = fetchSpy.mock.calls[0] as unknown as [string, RequestInit];
+        expect((requestInit.headers as Record<string, string>)['Authorization']).toBe(`Bearer ${canaryKey}`);
+
+        const html = await readFile(target, 'utf8');
+        expect(html).not.toContain(canaryKey);
+      } finally {
+        globalThis.fetch = originalFetch;
+        if (savedKey === undefined) delete process.env['TYPESAFE_API_KEY']; else process.env['TYPESAFE_API_KEY'] = savedKey;
+      }
+    });
+  });
+
+  describe('--open', () => {
+    it('opens the file through the injected seam, with the exact path just written, only after a successful write', async () => {
+      const root = await fixture(mathFixtureFiles);
+      const dir = await mkdtemp(join(tmpdir(), 'jev-html-open-'));
+      temporaryRoots.push(dir);
+      const target = join(dir, 'report.html');
+      const openCalls: string[] = [];
+
+      const output = captureOutput();
+      const exitCode = await runCli(['audit', '--rootDir', root, '--evaluate', '--html', target, '--open'], output.io, {
+        createEvaluationPort: () => fakeEvaluationPort(),
+        createStorePort: () => fakeStorePort(),
+        openHtmlReport: async (path) => { openCalls.push(path); return { opened: true }; },
+      });
+
+      expect(exitCode).toBe(0);
+      expect(openCalls).toEqual([target]);
+    });
+
+    it('never opens anything without --open', async () => {
+      const root = await fixture(mathFixtureFiles);
+      const dir = await mkdtemp(join(tmpdir(), 'jev-html-no-open-'));
+      temporaryRoots.push(dir);
+      const target = join(dir, 'report.html');
+
+      const output = captureOutput();
+      const exitCode = await runCli(['audit', '--rootDir', root, '--evaluate', '--html', target], output.io, {
+        createEvaluationPort: () => fakeEvaluationPort(),
+        createStorePort: () => fakeStorePort(),
+        openHtmlReport: async () => { throw new Error('must not be called without --open'); },
+      });
+
+      expect(exitCode).toBe(0);
+    });
+
+    it(
+      'a failed open (no viewer installed — the common CI case) never changes the exit status, never removes the written file, and is reported on stderr only',
+      async () => {
+        const root = await fixture(mathFixtureFiles);
+        const dir = await mkdtemp(join(tmpdir(), 'jev-html-open-fail-'));
+        temporaryRoots.push(dir);
+        const target = join(dir, 'report.html');
+        const stderrChunks: string[] = [];
+        const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
+          stderrChunks.push(String(chunk));
+          return true;
+        });
+
+        try {
+          const output = captureOutput();
+          const exitCode = await runCli(['audit', '--rootDir', root, '--evaluate', '--json', '--html', target, '--open'], output.io, {
+            createEvaluationPort: () => fakeEvaluationPort(),
+            createStorePort: () => fakeStorePort(),
+            openHtmlReport: async () => ({ opened: false, reason: 'spawn xdg-open ENOENT' }),
+          });
+
+          expect(exitCode).toBe(0);
+          expect(output.lines).toHaveLength(1);
+          expect(() => JSON.parse(output.lines[0]!)).not.toThrow();
+          await expect(access(target)).resolves.toBeUndefined();
+          expect(stderrChunks.join('')).toContain('Unable to open the HTML report automatically');
+          expect(stderrChunks.join('')).toContain('spawn xdg-open ENOENT');
+        } finally {
+          stderrSpy.mockRestore();
+        }
+      },
+    );
+  });
+});
