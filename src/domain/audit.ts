@@ -283,6 +283,40 @@ export interface AuditStoreCachedJudgment {
 export interface AuditStorePort {
   /** Starts a new run record for `rootDir` and returns its generated run id. */
   beginRun(rootDir: string): Promise<string>;
+  /**
+   * Canonicalizes `rootDir` into the absolute, symlink-resolved identity
+   * this port uses to recognize "the same repository" (defect fix, Phase 5,
+   * 2026-09-20): resolves `rootDir` against the current working directory
+   * when it is relative, then follows symlinks — the identical convention
+   * `discoverTestFiles`/`readSourceFile` already apply to the audited root
+   * (`src/adapters/repository-discovery.ts`, `src/adapters/source-reader.ts`),
+   * needed here for the same reason: a repository is routinely reached
+   * through a symlinked ancestor (this project's own dev machine confirmed
+   * macOS's `/var` is one), so two different-looking paths to the same
+   * directory must canonicalize identically.
+   *
+   * The application layer canonicalizes with this method BEFORE calling
+   * {@link beginRun} (never inside it — `beginRun`'s own contract is
+   * unchanged: it stores exactly the string it is given), and again before
+   * comparing a `--resume` request's `rootDir` against a previously
+   * recorded {@link AuditStoreRunState.rootDir} — always canonicalizing at
+   * the moment a value is persisted or freshly supplied, never by
+   * re-interpreting an already-stored value later (see
+   * {@link AuditStoreRunState.rootDirCanonical}'s own doc for why that
+   * distinction matters).
+   *
+   * Never throws: a `rootDir` that cannot be realpath'd (does not exist, or
+   * is not yet reachable) falls back to its plain resolved form, so a
+   * `--resume` preflight against a mistyped or since-deleted root still
+   * compares (and fails with a named, visible mismatch) rather than
+   * crashing this check with a raw filesystem error before discovery ever
+   * gets a chance to report the same problem its own, already-established
+   * way.
+   *
+   * Filesystem I/O — reachable only through this port so neither the
+   * domain nor the application layer ever touches the filesystem directly.
+   */
+  canonicalizeRootDir(rootDir: string): Promise<string>;
   /** Persists one work-item outcome for `runId` — terminal or one of the two non-terminal checkpoints (`pending`, `running`; Phase 5, task P5-3) — atomically (all-or-nothing): a failure here leaves no partial record. */
   recordWorkItem(runId: string, outcome: AuditStoreWorkItemOutcome): Promise<void>;
   /**
@@ -349,6 +383,28 @@ export interface AuditStorePort {
 export interface AuditStoreRunState {
   /** The root directory this run was originally started against (`AuditStorePort.beginRun`'s own argument) — compared by the caller against the root being audited now, so a run recorded for one repository is never silently resumed against another. */
   readonly rootDir: string;
+  /**
+   * Whether `rootDir` above is already in the canonical (absolute) form
+   * {@link AuditStorePort.canonicalizeRootDir} produces (defect fix, Phase
+   * 5, 2026-09-20) — `true` for every run started after this fix shipped,
+   * since the application layer now always canonicalizes before calling
+   * `beginRun`. `false` marks a run recorded before this fix (most
+   * commonly the "." default, or any relative `--rootDir`): re-resolving
+   * that raw string now would resolve it against THIS process's current
+   * working directory, not the one the original run actually audited — an
+   * entirely different, silently wrong answer — so `preflightResume`
+   * refuses to compare it at all and reports `AuditResumeLegacyRootDirError`
+   * instead of guessing.
+   *
+   * This is a necessary, not sufficient, test for "genuinely canonical": a
+   * pre-fix run whose `--rootDir` happened to already be an absolute path
+   * reads as canonical here even though `beginRun` never realpath'd it —
+   * that residual case falls through to an ordinary (still honest, still
+   * visible) `AuditResumeRootDirMismatchError` rather than the legacy one
+   * whenever it no longer matches the freshly canonicalized request, never
+   * a silent accept.
+   */
+  readonly rootDirCanonical: boolean;
   /** Whether `finishRun` was ever called for this run. `true` implies (but is not the only way to reach) "nothing is outstanding" — every terminal work item a finished run could have is already reflected in `terminalWorkItems`; see this interface's own doc for why an unfinished run can independently have zero outstanding items too (a crash between the last item's terminal write and `finishRun` itself). */
   readonly finished: boolean;
   readonly terminalWorkItems: readonly AuditStoreWorkItemOutcome[];
@@ -415,7 +471,7 @@ export class AuditStoreCorruptError extends AuditStoreErrorBase {
 
 export type AuditStoreError = AuditStoreSchemaVersionError | AuditStoreCorruptError;
 
-export type AuditResumeErrorCode = 'run-not-found' | 'root-dir-mismatch' | 'store-unavailable';
+export type AuditResumeErrorCode = 'run-not-found' | 'root-dir-mismatch' | 'legacy-root-dir' | 'store-unavailable';
 
 abstract class AuditResumeErrorBase extends Error {
   abstract readonly code: AuditResumeErrorCode;
@@ -466,6 +522,34 @@ export class AuditResumeRootDirMismatchError extends AuditResumeErrorBase {
 }
 
 /**
+ * `--resume <runId>` named a run recorded before this fix started
+ * persisting a canonical (absolute, symlink-resolved) `rootDir` (defect
+ * fix, Phase 5, 2026-09-20) — see {@link AuditStoreRunState.rootDirCanonical}'s
+ * own doc for exactly what marks a run this way (most commonly the "."
+ * default, or any relative `--rootDir`, recorded before this fix). Its
+ * stored `rootDir` is not safely re-interpretable now: resolving it
+ * against THIS process's current working directory would silently compare
+ * against the wrong repository rather than the one the original run
+ * actually audited, so this run cannot be resumed at all — never confused
+ * with {@link AuditResumeRootDirMismatchError}'s genuine cross-repository
+ * mismatch between two runs that are both already canonical.
+ */
+export class AuditResumeLegacyRootDirError extends AuditResumeErrorBase {
+  readonly code = 'legacy-root-dir' as const;
+  readonly recordedRootDir: string;
+
+  constructor(runId: string, recordedRootDir: string) {
+    super(
+      runId,
+      `--resume ${runId}: this run predates canonical root-directory recording (its recorded root `
+      + `"${recordedRootDir}" is not an absolute path) and cannot be safely resumed; re-run the audit `
+      + 'without --resume to start fresh.',
+    );
+    this.recordedRootDir = recordedRootDir;
+  }
+}
+
+/**
  * `--resume <runId>` was requested but no {@link AuditStorePort} is
  * available to resume from at all — defensive: the CLI itself never
  * reaches `runAudit` in this shape (`--resume` requires `--evaluate`, and
@@ -482,7 +566,7 @@ export class AuditResumeUnavailableError extends AuditResumeErrorBase {
   }
 }
 
-export type AuditResumeError = AuditResumeRunNotFoundError | AuditResumeRootDirMismatchError | AuditResumeUnavailableError;
+export type AuditResumeError = AuditResumeRunNotFoundError | AuditResumeRootDirMismatchError | AuditResumeLegacyRootDirError | AuditResumeUnavailableError;
 
 /**
  * `--resume <runId>`'s own summary of one audit run (Phase 5, task P5-4),

@@ -1,4 +1,4 @@
-import { access, chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -1440,6 +1440,7 @@ describe('SQLite audit store (Phase 5, task P5-1)', () => {
     let closed = false;
     const fakeStore: AuditStorePort = {
       beginRun: async () => 'fake-run-1',
+      canonicalizeRootDir: async (rootDir) => rootDir,
       recordWorkItem: async () => { workItems += 1; },
       lookup: async () => undefined,
       finishRun: async () => undefined,
@@ -1589,6 +1590,9 @@ describe('content-addressed caching wiring (Phase 5, task P5-2)', () => {
         rootDirByRunId.set(runId, rootDir);
         return runId;
       },
+      // Identity pass-through: this fake's rootDir-identity behavior is not under test here — see
+      // `test/resume-root-dir-identity.test.ts` for the real-adapter, real-filesystem coverage.
+      canonicalizeRootDir: async (rootDir) => rootDir,
       recordWorkItem: async (runId, outcome) => { workItemCalls.push({ runId, outcome }); },
       lookup: async (cacheKey) => {
         for (let index = workItemCalls.length - 1; index >= 0; index -= 1) {
@@ -1614,7 +1618,7 @@ describe('content-addressed caching wiring (Phase 5, task P5-2)', () => {
         const terminalWorkItems = [...lastByIdentity.values()].filter(
           (outcome) => outcome.state === 'completed' || outcome.state === 'cached' || outcome.state === 'failed' || outcome.state === 'skipped',
         );
-        return { rootDir, finished: finishedRunIds.has(runId), terminalWorkItems };
+        return { rootDir, rootDirCanonical: true, finished: finishedRunIds.has(runId), terminalWorkItems };
       },
       close: async () => undefined,
     };
@@ -1834,8 +1838,17 @@ describe('resume wiring (Phase 5, task P5-4)', () => {
     expect(exitCode).toBe(1);
     expect(output.lines).toHaveLength(1);
     expect(output.lines[0]).toContain(runId);
-    expect(output.lines[0]).toContain(rootA);
-    expect(output.lines[0]).toContain(rootB);
+    // The recorded side is now the CANONICAL (realpath'd) form of rootA — this fixture's own
+    // `mkdtemp` result is not itself realpath'd (this dev machine's own macOS `/var` ->
+    // `/private/var` layout would otherwise make a raw substring check pass by coincidence, not
+    // by a robust guarantee), so compare against the same canonical form the store actually
+    // persisted. The requested side stays the exact, raw string the caller typed (rootB) — see
+    // `AuditResumeRootDirMismatchError`'s own doc for why the message shows what was typed, not a
+    // re-derived form of it. Position-sensitive (`recorded against root "X", not "Y"`), not just
+    // substring presence, so a mixed-up argument order is caught, not just a missing value.
+    expect(output.lines[0]).toBe(
+      `--resume ${runId}: this run was recorded against root "${await realpath(rootA)}", not "${rootB}" being audited now.`,
+    );
   });
 
   it('a run id that was never started is a named usage error, exit code 1, no stack trace', async () => {

@@ -1,4 +1,5 @@
 import {
+  AuditResumeLegacyRootDirError,
   AuditResumeRootDirMismatchError,
   AuditResumeRunNotFoundError,
   AuditResumeUnavailableError,
@@ -578,16 +579,25 @@ const EMPTY_AUDIT_TOTALS = {
  * to do) without paying for a pipeline run whose result would just be
  * discarded.
  *
- * Three named outcomes (Phase 5 Decisions, this task): `runId` does not
- * exist at all (throws {@link AuditResumeRunNotFoundError}); `runId`
- * belongs to a different root directory than `request.rootDir` (throws
- * {@link AuditResumeRootDirMismatchError}); `runId` is already finished
- * (`AuditStoreRunState.finished`) — NOT an error, `runAudit` returns
- * immediately with `resume.nothingOutstanding: true` and an honest
- * all-zero report, exactly like a fresh, empty run would look, never a
- * fabricated evaluation of work that already happened. Every other case
- * returns the loaded {@link AuditStoreRunState} for `runAudit` to continue
- * with (reusing `runId` instead of minting a new one via `beginRun`).
+ * Four named outcomes (Phase 5 Decisions, this task, plus the rootDir-identity
+ * defect fix of 2026-09-20): `runId` does not exist at all (throws
+ * {@link AuditResumeRunNotFoundError}); `runId` was recorded before this fix
+ * started persisting a canonical `rootDir` and cannot be safely
+ * re-interpreted (throws {@link AuditResumeLegacyRootDirError} — checked
+ * BEFORE the mismatch comparison below, since a legacy run's raw stored
+ * string is never a trustworthy input to that comparison at all); `runId`
+ * belongs to a different root directory than `request.rootDir`, once both
+ * sides are canonicalized through {@link AuditStorePort.canonicalizeRootDir}
+ * (throws {@link AuditResumeRootDirMismatchError} — its own message still
+ * names the raw `request.rootDir` the caller typed, never the canonicalized
+ * form, so the error is legible against what was actually passed on the
+ * command line); `runId` is already finished (`AuditStoreRunState.finished`)
+ * — NOT an error, `runAudit` returns immediately with
+ * `resume.nothingOutstanding: true` and an honest all-zero report, exactly
+ * like a fresh, empty run would look, never a fabricated evaluation of work
+ * that already happened. Every other case returns the loaded
+ * {@link AuditStoreRunState} for `runAudit` to continue with (reusing
+ * `runId` instead of minting a new one via `beginRun`).
  */
 async function preflightResume(
   request: AuditRequest,
@@ -597,7 +607,9 @@ async function preflightResume(
   if (ports.store === undefined) throw new AuditResumeUnavailableError(runId);
   const state = await ports.store.loadRunState(runId);
   if (state === undefined) throw new AuditResumeRunNotFoundError(runId);
-  if (state.rootDir !== request.rootDir) throw new AuditResumeRootDirMismatchError(runId, state.rootDir, request.rootDir);
+  if (!state.rootDirCanonical) throw new AuditResumeLegacyRootDirError(runId, state.rootDir);
+  const canonicalRequestRootDir = await ports.store.canonicalizeRootDir(request.rootDir);
+  if (state.rootDir !== canonicalRequestRootDir) throw new AuditResumeRootDirMismatchError(runId, state.rootDir, request.rootDir);
   if (state.finished) {
     return {
       earlyResult: {
@@ -777,9 +789,15 @@ export async function runAudit(
     // via `beginRun` — the preflight above already confirmed it exists, belongs to this rootDir,
     // and is not already finished, so `runs.finished_at` simply gets set (again, harmlessly) by
     // `finishRun` below once this pass completes.
+    // Defect fix (2026-09-20): `beginRun` always receives an already-canonicalized rootDir — never
+    // the raw `request.rootDir` — so what gets PERSISTED is the same absolute, symlink-resolved
+    // identity `preflightResume` compares a later `--resume` request against. Canonicalizing here,
+    // at persist time, rather than only at compare time, is the fix itself: re-resolving a raw
+    // stored value later would resolve it against the WRONG (resume-time) working directory (see
+    // `AuditStorePort.canonicalizeRootDir`'s own doc).
     const runId = resumeState !== undefined
       ? options.resume
-      : ports.store === undefined ? undefined : await ports.store.beginRun(request.rootDir);
+      : ports.store === undefined ? undefined : await ports.store.beginRun(await ports.store.canonicalizeRootDir(request.rootDir));
     // Phase 5, task P5-2: caching is meaningful only alongside persistence (a lookup needs
     // somewhere to look things up in), so `cache` is built only when `ports.cacheKey` is present —
     // never independently of `ports.store`/`runId`, which `runEvaluation` itself also re-checks.

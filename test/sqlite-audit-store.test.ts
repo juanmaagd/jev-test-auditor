@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -1146,5 +1146,90 @@ describe('createSqliteAuditStore loadRunState', () => {
     const state: AuditStoreRunState | undefined = await store.loadRunState(runA);
     expect(state?.terminalWorkItems).toHaveLength(1);
     expect(state?.terminalWorkItems[0]?.identity.testCaseId).toBe('tc:v1:run-a');
+  });
+});
+
+// --- canonicalizeRootDir and rootDirCanonical (defect fix, 2026-09-20) -----------------------
+//
+// A run's persisted `rootDir` must identify a repository, not just record whatever spelling the
+// caller happened to pass. These tests exercise the adapter's own canonicalization in isolation
+// from `runAudit`'s orchestration (covered separately in `test/resume.test.ts` and
+// `test/resume-root-dir-identity.test.ts`).
+
+describe('createSqliteAuditStore canonicalizeRootDir', () => {
+  let store: AuditStorePort;
+
+  afterEach(async () => {
+    await store?.close();
+  });
+
+  it('resolves a relative rootDir to an absolute path', async () => {
+    const databaseFile = await tempDatabaseFile();
+    store = await createSqliteAuditStore({ databaseFile });
+
+    const canonical = await store.canonicalizeRootDir('.');
+
+    expect(canonical).not.toBe('.');
+    expect(canonical.startsWith('/')).toBe(true);
+    expect(canonical).toBe(await store.canonicalizeRootDir(process.cwd()));
+  });
+
+  // The one test that actually discriminates "resolve only" from "resolve then realpath": a
+  // symlinked ANCESTOR (never the leaf itself — `discoverTestFiles`/`readSourceFile` already
+  // reject a symlinked leaf for their own, unrelated reasons, which would fail this test for the
+  // wrong reason). Built explicitly rather than relying on this dev machine's own macOS `/var` ->
+  // `/private/var` layout, so the test is portable to any platform/filesystem.
+  it('two different-looking paths to the same repository, reached through a symlinked ancestor directory, canonicalize identically', async () => {
+    const databaseFile = await tempDatabaseFile();
+    store = await createSqliteAuditStore({ databaseFile });
+    const parent = await mkdtemp(join(tmpdir(), 'jev-audit-store-symlink-'));
+    temporaryRoots.push(parent);
+    const realParent = join(parent, 'real-parent');
+    await mkdir(join(realParent, 'repo'), { recursive: true });
+    const linkParent = join(parent, 'link-parent');
+    await symlink(realParent, linkParent);
+
+    const throughSymlinkedAncestor = await store.canonicalizeRootDir(join(linkParent, 'repo'));
+    const direct = await store.canonicalizeRootDir(join(realParent, 'repo'));
+
+    expect(throughSymlinkedAncestor).toBe(direct);
+  });
+
+  it('a rootDir that does not exist on disk still resolves, without throwing, to its plain absolute form', async () => {
+    const databaseFile = await tempDatabaseFile();
+    store = await createSqliteAuditStore({ databaseFile });
+    const parent = await mkdtemp(join(tmpdir(), 'jev-audit-store-missing-'));
+    temporaryRoots.push(parent);
+    const missing = join(parent, 'never-created');
+
+    await expect(store.canonicalizeRootDir(missing)).resolves.toBe(missing);
+  });
+});
+
+describe('createSqliteAuditStore loadRunState rootDirCanonical', () => {
+  let store: AuditStorePort;
+
+  afterEach(async () => {
+    await store?.close();
+  });
+
+  it('reports rootDirCanonical: true for a run recorded with an absolute rootDir', async () => {
+    const databaseFile = await tempDatabaseFile();
+    store = await createSqliteAuditStore({ databaseFile });
+    const runId = await store.beginRun('/already/absolute/repo');
+
+    const state = await store.loadRunState(runId);
+
+    expect(state?.rootDirCanonical).toBe(true);
+  });
+
+  it('reports rootDirCanonical: false for a run recorded with a relative rootDir (e.g. a pre-fix "." default)', async () => {
+    const databaseFile = await tempDatabaseFile();
+    store = await createSqliteAuditStore({ databaseFile });
+    const runId = await store.beginRun('.');
+
+    const state = await store.loadRunState(runId);
+
+    expect(state?.rootDirCanonical).toBe(false);
   });
 });

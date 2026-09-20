@@ -23,10 +23,10 @@
  * the audited repository and never receives the API key — nothing in
  * {@link AuditStoreWorkItemOutcome} carries one.
  */
-import { mkdir } from 'node:fs/promises';
+import { mkdir, realpath } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import {
   AuditStoreCorruptError,
@@ -548,6 +548,20 @@ export async function createSqliteAuditStore(options: CreateSqliteAuditStoreOpti
       return runId;
     },
 
+    // Defect fix (2026-09-20): resolve against the current working directory, then follow
+    // symlinks (matching `discoverTestFiles`/`readSourceFile`'s own convention for the audited
+    // root) — never throws, falling back to the plain resolved form when `realpath` cannot
+    // resolve the path (it does not exist, or is not yet reachable), so a `--resume` preflight
+    // still compares cleanly instead of crashing on a raw filesystem error.
+    async canonicalizeRootDir(rootDir: string): Promise<string> {
+      const resolved = resolve(rootDir);
+      try {
+        return await realpath(resolved);
+      } catch {
+        return resolved;
+      }
+    },
+
     async recordWorkItem(runId: string, outcome: AuditStoreWorkItemOutcome): Promise<void> {
       db.exec('BEGIN');
       try {
@@ -626,7 +640,16 @@ export async function createSqliteAuditStore(options: CreateSqliteAuditStoreOpti
         // doc for why this port never decides what is "outstanding."
       }
 
-      return { rootDir: runRow.root_dir, finished: runRow.finished_at !== null, terminalWorkItems };
+      return {
+        rootDir: runRow.root_dir,
+        // Defect fix (2026-09-20): a necessary, not sufficient, test for "already canonical" —
+        // see `AuditStoreRunState.rootDirCanonical`'s own doc (`src/domain/audit.ts`) for the one
+        // known residual gap (a pre-fix absolute rootDir that still traversed a symlinked
+        // ancestor `beginRun` never resolved).
+        rootDirCanonical: isAbsolute(runRow.root_dir),
+        finished: runRow.finished_at !== null,
+        terminalWorkItems,
+      };
     },
 
     async close(): Promise<void> {

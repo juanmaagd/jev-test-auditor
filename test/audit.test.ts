@@ -725,7 +725,7 @@ function fakeStore(): FakeStore {
     // (array order is insertion order, so a later `Map.set` for the same key overwrites an
     // earlier one), filtered down to the four terminal states — a `pending`/`running` last row is
     // never included, exactly like the real adapter's own `MAX(id)`-grouped query.
-    async loadRunState(runId: string): Promise<{ readonly rootDir: string; readonly finished: boolean; readonly terminalWorkItems: readonly AuditStoreWorkItemOutcome[] } | undefined> {
+    async loadRunState(runId: string): Promise<{ readonly rootDir: string; readonly rootDirCanonical: boolean; readonly finished: boolean; readonly terminalWorkItems: readonly AuditStoreWorkItemOutcome[] } | undefined> {
       const rootDir = rootDirByRunId.get(runId);
       if (rootDir === undefined) return undefined;
       const lastByIdentity = new Map<string, AuditStoreWorkItemOutcome>();
@@ -736,7 +736,15 @@ function fakeStore(): FakeStore {
       const terminalWorkItems = [...lastByIdentity.values()].filter(
         (outcome) => outcome.state === 'completed' || outcome.state === 'cached' || outcome.state === 'failed' || outcome.state === 'skipped',
       );
-      return { rootDir, finished: finishRunCalls.includes(runId), terminalWorkItems };
+      // Not exercising rootDir-identity behavior (see `test/resume.test.ts` and
+      // `test/resume-root-dir-identity.test.ts` for that) — every run this fake begins is
+      // considered already canonical, matching how `beginRun` is always called in production.
+      return { rootDir, rootDirCanonical: true, finished: finishRunCalls.includes(runId), terminalWorkItems };
+    },
+    // Identity pass-through: this fake never exercises real filesystem canonicalization (see the
+    // adapter-level tests in `test/sqlite-audit-store.test.ts` for that behavior itself).
+    async canonicalizeRootDir(rootDir: string): Promise<string> {
+      return rootDir;
     },
     async close(): Promise<void> {
       closeCalls += 1;

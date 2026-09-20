@@ -31,6 +31,7 @@ import { estimateDryRun, JEV_ESTIMATE_SNAPSHOT, type DryRunEstimate } from '../d
 import { JevConfigurationError } from '../domain/jev-gateway.js';
 import { JEV_MODEL_ID } from '../domain/rubric.js';
 import {
+  AuditResumeLegacyRootDirError,
   AuditResumeRootDirMismatchError,
   AuditResumeRunNotFoundError,
   AuditResumeUnavailableError,
@@ -153,9 +154,13 @@ Options:
   --resume <runId>   Continues a previously started run instead of starting a new one: reloads that
                       run's outstanding work items (anything that never reached completed/cached/
                       failed/skipped) and completes only those, leaving every already-terminal item
-                      untouched and never re-dispatched. A run id that does not exist, or one
-                      recorded against a different --rootDir than the one being audited now, is a
-                      usage error (exit 1). A run that is already finished with nothing outstanding
+                      untouched and never re-dispatched. --rootDir is compared by repository
+                      identity, not spelling: the same repository reached via a relative path, an
+                      absolute path, a trailing slash, or a symlinked ancestor all resume the same
+                      run. A run id that does not exist, one recorded against a genuinely different
+                      repository, or one recorded before this version started persisting a
+                      canonical --rootDir (cannot be safely resumed at all) is a usage error
+                      (exit 1). A run that is already finished with nothing outstanding
                       is not an error: it is reported honestly as nothing to resume. --resume is
                       orthogonal to --fresh: --resume selects WHICH items run (only the outstanding
                       ones); --fresh selects whether the ones that DO run consult the cache first.
@@ -691,15 +696,18 @@ export async function runCli(
         )
         : await dependencies.audit(configuration);
     } catch (error) {
-      // Phase 5, task P5-4: `--resume <runId>`'s own named, visible preflight failures — a run id
-      // that does not exist, one recorded against a different --rootDir, or (defensively) resume
-      // requested with no store at all — follow the exact same convention as every other `runAudit`
-      // usage error above: a readable message on `io`, exit code 1, no stack trace. "Already
-      // finished, nothing outstanding" is NOT an error and never reaches this catch — `runAudit`
-      // reports it via `result.resume.nothingOutstanding` instead (handled below).
+      // Phase 5, task P5-4 (plus the rootDir-identity defect fix, 2026-09-20): `--resume
+      // <runId>`'s own named, visible preflight failures — a run id that does not exist, one
+      // recorded against a different --rootDir, one recorded before this fix started persisting a
+      // canonical rootDir, or (defensively) resume requested with no store at all — follow the
+      // exact same convention as every other `runAudit` usage error above: a readable message on
+      // `io`, exit code 1, no stack trace. "Already finished, nothing outstanding" is NOT an error
+      // and never reaches this catch — `runAudit` reports it via `result.resume.nothingOutstanding`
+      // instead (handled below).
       if (
         error instanceof AuditResumeRunNotFoundError
         || error instanceof AuditResumeRootDirMismatchError
+        || error instanceof AuditResumeLegacyRootDirError
         || error instanceof AuditResumeUnavailableError
       ) {
         io.writeLine(error.message);

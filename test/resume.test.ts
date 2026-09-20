@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { runAudit } from '../src/application/audit.js';
 import { createAuditCacheKeyPort } from '../src/adapters/cache-key.js';
 import {
+  AuditResumeLegacyRootDirError,
   AuditResumeRootDirMismatchError,
   AuditResumeRunNotFoundError,
   AuditResumeUnavailableError,
@@ -117,7 +118,14 @@ interface CountingStore extends AuditStorePort {
   readonly workItemCalls: { readonly runId: string; readonly outcome: AuditStoreWorkItemOutcome }[];
   readonly lookupCalls: string[];
   readonly finishRunCalls: string[];
-  seedRun(runId: string, rootDir: string, finished: boolean, priorOutcomes: readonly AuditStoreWorkItemOutcome[]): void;
+  /**
+   * `rootDirCanonical` defaults to `true`: every existing test in this file seeds a run as if it
+   * were already recorded post-fix (this fake's `canonicalizeRootDir` is a plain identity
+   * pass-through, so callers here never see a difference between "raw" and "canonical"). Pass
+   * `false` only to construct the one pre-fix-legacy scenario `AuditResumeLegacyRootDirError`
+   * covers — see the "rootDir identity" describe block below.
+   */
+  seedRun(runId: string, rootDir: string, finished: boolean, priorOutcomes: readonly AuditStoreWorkItemOutcome[], rootDirCanonical?: boolean): void;
 }
 
 function identityKey(identity: { readonly testCaseId: TestCaseId; readonly repositoryRelativePath: string; readonly name: string }): string {
@@ -129,21 +137,29 @@ function countingStore(): CountingStore {
   const lookupCalls: string[] = [];
   const finishRunCalls: string[] = [];
   const rootDirByRunId = new Map<string, string>();
+  const rootDirCanonicalByRunId = new Map<string, boolean>();
   const finishedRunIds = new Set<string>();
 
   return {
     workItemCalls,
     lookupCalls,
     finishRunCalls,
-    seedRun(runId, rootDir, finished, priorOutcomes) {
+    seedRun(runId, rootDir, finished, priorOutcomes, rootDirCanonical = true) {
       rootDirByRunId.set(runId, rootDir);
+      rootDirCanonicalByRunId.set(runId, rootDirCanonical);
       if (finished) finishedRunIds.add(runId);
       for (const outcome of priorOutcomes) workItemCalls.push({ runId, outcome });
     },
     async beginRun(rootDir: string): Promise<string> {
       const runId = `run-${rootDirByRunId.size + 1}`;
       rootDirByRunId.set(runId, rootDir);
+      rootDirCanonicalByRunId.set(runId, true);
       return runId;
+    },
+    // Identity pass-through (see `CountingStore.seedRun`'s own doc above): this fake never
+    // exercises real filesystem canonicalization, only `preflightResume`'s orchestration logic.
+    async canonicalizeRootDir(rootDir: string): Promise<string> {
+      return rootDir;
     },
     async recordWorkItem(runId, outcome): Promise<void> {
       workItemCalls.push({ runId, outcome });
@@ -173,7 +189,12 @@ function countingStore(): CountingStore {
       const terminalWorkItems = [...lastByIdentity.values()].filter(
         (outcome) => outcome.state === 'completed' || outcome.state === 'cached' || outcome.state === 'failed' || outcome.state === 'skipped',
       );
-      return { rootDir, finished: finishedRunIds.has(runId), terminalWorkItems };
+      return {
+        rootDir,
+        rootDirCanonical: rootDirCanonicalByRunId.get(runId) ?? true,
+        finished: finishedRunIds.has(runId),
+        terminalWorkItems,
+      };
     },
     async close(): Promise<void> {},
   };
@@ -210,6 +231,92 @@ describe('--resume error cases (Phase 5, task P5-4)', () => {
     await expect(failure).rejects.toBeInstanceOf(AuditResumeRootDirMismatchError);
     await expect(failure).rejects.toThrow('/some/other/repo');
     await expect(failure).rejects.toThrow(configuration.rootDir);
+  });
+});
+
+// --- rootDir identity: a persisted run must identify a repository, not just record whatever
+// spelling the caller passed (defect fix, 2026-09-20). See `test/resume-root-dir-identity.test.ts`
+// for the real-filesystem, real-adapter end-to-end coverage (false-accept, false-reject, and the
+// legacy scenario against a real `node:sqlite` store); these tests cover `preflightResume`'s own
+// orchestration logic against a hand-controlled fake, independent of real canonicalization.
+describe('--resume rootDir identity (defect fix, 2026-09-20)', () => {
+  it('rejects with AuditResumeLegacyRootDirError, naming the recorded root, when the run predates canonical rootDir recording', async () => {
+    const store = countingStore();
+    // `rootDirCanonical: false` is exactly what a pre-fix run recorded (its raw "." default, or
+    // any relative --rootDir, never realpath'd) looks like once read back.
+    store.seedRun('run-legacy', '.', false, [], false);
+    const discovery: DiscoveryResult = { files: [discovered('a.test.ts')], excluded: [], diagnostics: [] };
+    const evaluation = stubEvaluationPort(async () => { throw new Error('must not dispatch'); });
+
+    const failure = runAudit(configuration, portsFor(discovery, [testCase('tc:v1:a')], evaluation, store), { resume: 'run-legacy' });
+
+    await expect(failure).rejects.toBeInstanceOf(AuditResumeLegacyRootDirError);
+    await expect(failure).rejects.toThrow('run-legacy');
+    await expect(failure).rejects.toThrow('.');
+  });
+
+  it('never mistakes a legacy (non-canonical) recorded rootDir for a genuine cross-repository mismatch', async () => {
+    // A legacy run must be refused as unresumable outright — never silently reinterpreted as
+    // "just some other root" and reported as an ordinary mismatch, which would imply the tool DID
+    // manage to compare it (it did not: the raw stored value was never re-resolved at all).
+    const store = countingStore();
+    store.seedRun('run-legacy-2', '.', false, [], false);
+    const discovery: DiscoveryResult = { files: [discovered('a.test.ts')], excluded: [], diagnostics: [] };
+    const evaluation = stubEvaluationPort(async () => { throw new Error('must not dispatch'); });
+
+    const failure = runAudit(configuration, portsFor(discovery, [testCase('tc:v1:a')], evaluation, store), { resume: 'run-legacy-2' });
+
+    await expect(failure).rejects.not.toBeInstanceOf(AuditResumeRootDirMismatchError);
+    await expect(failure).rejects.toBeInstanceOf(AuditResumeLegacyRootDirError);
+  });
+
+  it('compares the resume request\'s rootDir through the store\'s own canonicalization, never the raw request string directly', async () => {
+    // Overrides `canonicalizeRootDir` to a non-identity mapping so this test can tell whether
+    // `preflightResume` actually calls it, rather than comparing `request.rootDir` verbatim (the
+    // exact defect this fix corrects). The recorded root is seeded as the CANONICALIZED form of
+    // `configuration.rootDir`, exactly like a real post-fix `beginRun` would have stored it.
+    const base = countingStore();
+    const canonicalRequestRootDir = `${configuration.rootDir}::canonical`;
+    const store: AuditStorePort = {
+      ...base,
+      async canonicalizeRootDir(rootDir: string): Promise<string> {
+        return rootDir === configuration.rootDir ? canonicalRequestRootDir : rootDir;
+      },
+    };
+    base.seedRun('run-canonical-match', canonicalRequestRootDir, false, []);
+    const discovery: DiscoveryResult = { files: [discovered('a.test.ts')], excluded: [], diagnostics: [] };
+    const evaluation = stubEvaluationPort(async (request) => classificationFor(request.testCase.id));
+
+    const result = await runAudit(configuration, portsFor(discovery, [testCase('tc:v1:a')], evaluation, store), { resume: 'run-canonical-match' });
+
+    // No mismatch/legacy error thrown at all — the raw strings ('.'-shaped `configuration.rootDir`
+    // vs. the seeded canonical form) would never compare equal on their own; only going through
+    // `canonicalizeRootDir` makes them match.
+    expect(result.resume?.nothingOutstanding).toBe(false);
+  });
+
+  it('canonicalizes rootDir BEFORE calling beginRun for a fresh (non-resume) run, never persisting the raw request string directly', async () => {
+    // Proves canonicalization happens at PERSIST time, not only at compare time — the distinction
+    // this defect fix depends on (see `AuditStorePort.canonicalizeRootDir`'s own doc for why
+    // resolving only at comparison time is the wrong fix).
+    const base = countingStore();
+    const beginRunCalls: string[] = [];
+    const store: AuditStorePort = {
+      ...base,
+      async beginRun(rootDir: string): Promise<string> {
+        beginRunCalls.push(rootDir);
+        return base.beginRun(rootDir);
+      },
+      async canonicalizeRootDir(rootDir: string): Promise<string> {
+        return `${rootDir}::canonical`;
+      },
+    };
+    const discovery: DiscoveryResult = { files: [discovered('a.test.ts')], excluded: [], diagnostics: [] };
+    const evaluation = stubEvaluationPort(async (request) => classificationFor(request.testCase.id));
+
+    await runAudit(configuration, portsFor(discovery, [testCase('tc:v1:a')], evaluation, store));
+
+    expect(beginRunCalls).toEqual([`${configuration.rootDir}::canonical`]);
   });
 });
 

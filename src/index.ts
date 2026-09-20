@@ -279,6 +279,7 @@ export {
 
 export { runAudit, type RunAuditOptions } from './application/audit.js';
 export {
+  AuditResumeLegacyRootDirError,
   AuditResumeRootDirMismatchError,
   AuditResumeRunNotFoundError,
   AuditResumeUnavailableError,
