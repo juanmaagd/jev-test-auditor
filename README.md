@@ -72,9 +72,56 @@ The default summary's `totals` include evidence counters (`evidenceBundles`, `ev
 - **Requires a TypeSafe API key** from `TYPESAFE_API_KEY` or `auth login` (see "Local API key storage" above) — never logged, printed, serialized, or included in any report or error message. Having neither is a usage error (exit 1) before any request is attempted.
 - **Runs with bounded concurrency**: a fixed pool sized from configuration's `concurrency` (default 4), no adaptive throttling (a later phase's concern). Verified provider rate limits: 250,000 input tokens/second, 1,200 requests/minute (`JEV_VERIFIED_RATE_LIMITS`).
 - **Never fabricates a verdict.** A failed evaluation (rate limit, timeout, malformed response, etc.) produces one `evaluation-failed` diagnostic naming the test case and the error's typed kind — never the API key or the request body — and contributes no classification; it is never counted as healthy.
-- **Thresholds are provisional and uncalibrated.** `CLASSIFICATION_POLICY_V1`'s applicability/confidence/level cut points are versioned guesses, not validated claims — a later benchmark phase calibrates them.
+- **Classification thresholds are provisional and versioned, not calibrated claims.** See "Classification policy" below for how a dimension's level and the overall verdict are actually decided, and the measured results recorded there.
 - **`needs-review` means uncertainty, not a passing or failing grade.** It covers a model-pin mismatch, a dimension with a low-confidence or missing answer, or a test case where every dimension came back not-applicable — insufficient evidence or certainty, never an invented score.
 - **A model-pin mismatch is always reported, never hidden**: every request pins the exact `jev-1.13.0` model id, and each classification's `model.matchesPin` — plus the run-level `modelMismatches` count in `--evaluate --json` — surfaces any response that answered with a different model.
+
+## Classification policy
+
+Each rubric dimension is judged independently, then combined into one non-compensatory verdict per test: `healthy`, `weak`, `misleading`, or `needs-review`. The verdict only ever depends on a single boundary — deficient (`misleading`/`weak`) versus acceptable (`acceptable`/`strong`) — and any judged `misleading` dimension forces the whole test `misleading` regardless of what else scored well; a strong dimension never cancels a critical failure elsewhere.
+
+As of `odd/tasks/classification-calibration.md` task C-1, a dimension's level is decided from the quality answer's probability distribution across its four levels, not from `confidence` or the weighted `score` alone. For each applicable dimension the tool computes:
+
+- `deficientMass` — the probability on `misleading` + `weak`.
+- `acceptableMass` — the probability on `acceptable` + `strong`.
+- `criticalMass` — the probability on `misleading` alone.
+
+A dimension is deficient when `deficientMass` clears `sideMin` (0.65) and acceptable when `acceptableMass` does; a deficient dimension is reported `misleading` only when `criticalMass` also clears `criticalMin` (0.5), otherwise `weak`. `needs-review` at the dimension level now means the mass genuinely straddles that one boundary — not that the answer merely leaned toward two adjacent levels on the same side of it, which is what the earlier `confidence`-based gate mistook for uncertainty.
+
+`score` and `confidence` are still reported on every dimension for transparency and audit — the full `probabilities`/`deficientMass`/`acceptableMass`/`criticalMass` breakdown appears in `--evaluate --json` — but neither is consulted to decide a level any more. That means a dimension can show a `score` under 2 (nominally "weak" by the old cut points) and still be reported `acceptable`: on the recorded pr-hero run below, one dimension scored 1.97 with a distribution of `{weak: 0.06, acceptable: 0.91, strong: 0.03}` — 94% of the mass on acceptable-or-better — and was correctly reported `acceptable`. A sub-2 score on a `healthy` test is not a bug; it means the model leaned decisively toward one side even though its weighted mean happened to sit near the old boundary.
+
+This is `CLASSIFICATION_POLICY_V2`, paired with `RUBRIC_V2` (task C-2, which rewrote the `determinism-isolation` and `falsifiability` applicability questions so they ask whether the shown evidence supports a judgment, not whether every possible influence is visible — the two dimensions were excluding themselves on tests Jev could actually judge). Both are what the shipped `--evaluate` path uses; `CLASSIFICATION_POLICY_V1` and `RUBRIC_V1` remain exported only to replay real provider output recorded before this change.
+
+**Thresholds remain provisional and versioned, not calibrated claims.** `applicabilityMin` (0.5), `sideMin` (0.65), and `criticalMin` (0.5) were picked mid-gap from ranges observed in one recorded run, not fit to a validated outcome; Phase 7 ("Benchmarks and calibration") is what calibrates them, and any recalibration ships as a new policy version, never a silent edit.
+
+### Measured results (2026-09-20)
+
+Two real recorded runs, replayed and re-run against `test/fixtures/recorded/`:
+
+| Discrimination fixture — 11 tests, 3 good controls / 8 deliberately bad | Before | V2 policy, same recorded answers | After |
+| --- | --- | --- | --- |
+| healthy | 0 | 3 | 3 |
+| weak | 2 | 2 | 1 |
+| misleading | 6 | 6 | 7 |
+| needs-review | 3 | 0 | 0 |
+
+The middle column isolates the policy change from provider variance: it is `CLASSIFICATION_POLICY_V2` replayed against the exact same `discrimination-raw-2026-09-20.json` answers as "Before" (`test/classification-replay.test.ts`, task C-1 alone, before the rubric fix) — no new model call, same evidence, same answers. It already proves "no bad test absolved": all 6 misleading and 2 weak verdicts are unchanged, and only the 3 good controls move, from `needs-review` to `healthy`. "After" is a separate, later live run with the rubric fix as well, so its difference from the middle column reflects a fresh provider call plus the rubric change, not the classification policy alone.
+
+| pr-hero subset — 63 real tests | Before | After |
+| --- | --- | --- |
+| healthy | 16 | 56 |
+| weak | 6 | 0 |
+| misleading | 0 | 0 |
+| needs-review | 41 | 7 |
+| not-applicable dimension judgments | 30 (24 `determinism-isolation` + 6 `falsifiability`) | 0 |
+
+"Before" is `CLASSIFICATION_POLICY_V1` + `RUBRIC_V1`, replayed against `discrimination-raw-2026-09-20.json`'s real recorded answers (`test/classification-replay.test.ts`) and, separately, the live `pr-hero-subset-2026-09-20.json` run. "After" is `CLASSIFICATION_POLICY_V2` + `RUBRIC_V2`, live: `discrimination-rubric-v2-2026-09-20.json` and `pr-hero-subset-calibrated-2026-09-20.json`.
+
+On pr-hero, 6 tests moved `weak` → `healthy` and 34 moved `needs-review` → `healthy`; 16 were already `healthy` and 7 stayed `needs-review`; no test moved toward a more severe status. Across the 433 dimensions that run actually judged, zero reported a deficient level (`misleading`/`weak`) whose `acceptableMass` exceeded its `deficientMass` — the reported level and the mass behind it never disagree.
+
+On the discrimination fixture, `determinism-isolation` applicability rose from below the 0.5 threshold on 7 of 11 tests (0.12–0.18) to 0.89–0.96 on all 11; `falsifiability` rose from below threshold on 4 of 11 tests (0.35–0.48) to 0.72–0.97 on all 11. One test, `records history across runs`, moved `weak` → `misleading` — not toward healthier: once `determinism-isolation` became applicable it scored `misleading` on its own (`deficientMass` 0.97, `criticalMass` 0.74), a real defect the self-excluding v1 question had hidden.
+
+**What this shows, and what it does not.** Both runs show the same shape: severity was preserved on tests deliberately written to be bad, while a real repository's verdicts stopped being dominated by `needs-review`. It does **not** show that the classifier is accurate. The discrimination fixture's bad tests are obvious by construction, written with the rubric in mind; it has only 3 good controls; and neither run has ground truth independent of the fixture author's own intent. Accuracy is a later-phase question, answered by Phase 7's deterministic mutation benchmarks and executable oracles, not by these two runs.
 
 ## Dry-run cost and call estimate
 
@@ -96,7 +143,7 @@ The default summary's `totals` include evidence counters (`evidenceBundles`, `ev
 | 4. Jev evaluation MVP | Versioned rubric and request composition, a TypeSafe HTTP gateway, deterministic non-compensatory classification, opt-in `audit --evaluate` wiring with terminal and canonical JSON reporting, and local per-user API key storage (`auth login`/`status`/`logout`). | **Completed** |
 | 5. Persistence, caching, and resilience | SQLite run store and cache, `--fresh`/resume, adaptive scheduling, and provider-throttling resilience. | Planned; not implemented |
 | 6. HTML reporting | Self-contained offline HTML renderer embedding the canonical JSON report. | Planned; not implemented |
-| 7. Benchmarks and calibration | Deterministic benchmark corpus, executable oracles, and calibrating `CLASSIFICATION_POLICY_V1`'s provisional thresholds. | Planned; not implemented |
+| 7. Benchmarks and calibration | Deterministic benchmark corpus, executable oracles, and calibrating the classification policy's provisional thresholds. | Planned; not implemented |
 
 ## Evidence bundles
 

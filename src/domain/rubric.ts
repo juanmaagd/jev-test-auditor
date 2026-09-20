@@ -469,10 +469,12 @@ export const RUBRIC_V1: Rubric = {
  * Task C-2 (`odd/tasks/classification-calibration.md`) rewrites of the two
  * applicability questions measured to exclude themselves on real evidence
  * (see the task doc's "Measured evidence"): `determinism-isolation`
- * (applicability 0.13-0.20 on 5 of 11 discrimination-fixture tests,
+ * (applicability 0.12-0.18 on 7 of the 11 discrimination-fixture tests,
  * including the one deliberately written to violate determinism) and
- * `falsifiability` (applicability 0.33-0.49, just under the 0.5 cut, on
- * several tests including a healthy control asserting an exact value).
+ * `falsifiability` (applicability 0.35-0.48, just under the 0.5 cut, on 4 of
+ * them including a healthy control asserting an exact value). Counted
+ * directly from `test/fixtures/recorded/discrimination-raw-2026-09-20.json`,
+ * the canonical raw recording.
  *
  * Both v1 questions asked, in effect, "is every possible influence on this
  * dimension visible?" — a question evidence bundles are deliberately built
