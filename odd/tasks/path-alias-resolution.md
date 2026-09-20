@@ -64,6 +64,17 @@ Path aliases are the norm, not an edge case. The three repositories available fo
 - TDD: enabled; require observed RED, GREEN, REFACTOR, and critical mutation evidence.
 - Test runner: Vitest.
 
+## Measured effect (A-2, 2026-09-20)
+
+| Repository | Fragments per test before | After | Unresolved before | After |
+| --- | --- | --- | --- | --- |
+| pr-hero | 1.44 | 2.33 | 17,316 | 7,665 |
+| supermarket-pro | 3.23 | 3.82 | 13,998 | 17,619 |
+| musive-s1 | 1.87 | 2.49 | 48,136 | 18,282 |
+| jev-test-auditor (no aliases) | 2.73 | 2.73 | 1,294 | 1,294 |
+
+supermarket-pro's unresolved total rose because resolution now reaches further: `alias-specifier` fell from 1,165 to zero, while `bare-specifier` rose from 12,813 to 17,599 as newly reachable helpers exposed their own real npm imports. musive-s1's denied count rose from 3 to 4,035, almost entirely `**/dist/**`, which is the source-preference rule refusing prebuilt workspace output.
+
 ## Acceptance criteria
 
 - The three mechanisms resolve on their real repositories, and unresolved counts drop sharply while fragments per test rise.
@@ -78,21 +89,24 @@ Path aliases are the norm, not an edge case. The three repositories available fo
   - Locate the nearest `tsconfig`/`jsconfig` and `package.json` for a file, parse JSONC, follow in-root `extends` chains, and build a deterministic mapping table with `baseUrl`, `paths`, subpath `imports`, and workspace package names.
   - Verify nearest-config selection, `extends` chains and cycles, out-of-root and `node_modules` refusal, malformed JSON, missing fields, and cache behavior.
   - Evidence: `86a0a9a` (`feat: read path alias configuration statically`) on `feat/alias-config-reader`; 4 files, 1,421 additions (1,421 authored changed lines, 563 of them tests). Suite 562 tests, typecheck, build, lint, and diff check passed. Observed RED before implementation. Nearest config wins with no cross-tree merging; `tsconfig` beats `jsconfig` at the same level; `package.json` `imports` uses its own nearest search; workspaces are read only from the root. `extends` follows strings and arrays left to right, child overrides parent wholesale, and `paths` resolve against the directory of whichever config supplies the effective `baseUrl` — tested in both directions. Condition preference for `imports` is `default`, `import`, `node`; unsupported conditions are recorded, never guessed. Review corrections: `config-unreadable` was declared but never emitted for a symlinked target escaping the root, and an absolute `extends` was being read as repository-root-relative, which let a decoy `<root>/etc/passwd.json` be inherited; both fixed with RED tests, the second including realpath handling for macOS `/tmp`. Mutations on root-first search, ignoring `baseUrl` for `paths`, following `extends` outside the root or into `node_modules`, dropping the cycle guard, ignoring condition preference, and restoring the root-relative absolute reading turned RED. Verified against the real repositories: pr-hero 16 `imports` entries, supermarket-pro frontend 6 `paths`, backend `baseUrl` only, musive-s1 8 inherited `paths` plus 10 workspace entries, zero refusals in all four.
-- [ ] **A-2 — Resolve mapped specifiers in evidence resolution**
+- [x] **A-2 — Resolve mapped specifiers in evidence resolution**
   - Apply the mapping table before declaring a specifier unresolved, keeping probing, deny, and containment unchanged, and refine unresolved reasons.
   - Verify each mechanism end to end, precedence, stale mappings, denied targets, root escape attempts, and no execution.
+  - Evidence: `ed4f4e5` (`feat: resolve aliased specifiers in evidence`) on `feat/alias-evidence-resolution`; 7 files, 719 additions and 51 deletions (770 authored changed lines, 351 of them tests). Suite 579 tests, typecheck, build, lint, and diff check passed. Observed RED before implementation with all 35 pre-existing resolution tests staying green. Precedence follows TypeScript's real rule: exact star-less patterns beat wildcards, longest matching prefix wins among wildcards, and a matched entry's targets are tried in declaration order. Containment is re-checked after wildcard substitution because the captured text is caller-controlled. Workspace bare names try `packageDir/src/index`, then the package directory, then the declared entry, so a `dist` main is never preferred over source; a dist-only package is reported denied rather than dropped. `alias-mapped-not-found` fires only when a declared mapping matched and every target was missing; a `baseUrl` miss stays `bare-specifier`. Hop 2 uses the helper's own nearest config. Mutations on first-match precedence, skipping the deny check, using the test file's config for hop 2, dropping the new reason, resolving into `node_modules`, and reverting the source preference turned RED.
+  - Open question recorded: a denied or out-of-root target is terminal and does not fall through to a later mechanism. Verified empirically inert on the three calibration repositories, but not proven safe in general.
 - [ ] **A-3 — Measure and document the effect**
   - Re-audit the three calibration repositories, record fragments per test and unresolved counts before and after, and update README and technical design.
   - Verify the recorded numbers against a real run.
 
 ## Progress
 
-- Current task: **A-2**.
-- Completed tasks: **A-1**.
-- Running authored count: **1,421**.
+- Current task: **A-3**.
+- Completed tasks: **A-1, A-2**.
+- Running authored count: **2,191**.
 - Slice ledger:
   - `feat/alias-config-reader`: `86a0a9a` — static alias configuration reader.
+  - `feat/alias-evidence-resolution`: `ed4f4e5` — alias matching, precedence, and source-preferring workspace resolution.
 
 ## Next step
 
-Branch `feat/alias-evidence-resolution` from `feat/alias-config-reader` and delegate A-2 to one writer with strict TDD, then review before the work-unit commit.
+Branch `feat/alias-measurement-docs` from `feat/alias-evidence-resolution` and delegate A-3 to one writer: record the measured table below in README and the technical design, including the supermarket-pro increase and its cause.
