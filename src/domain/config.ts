@@ -11,6 +11,23 @@ export interface ResolvedEvidenceConfiguration extends EvidenceBudget {
   readonly deny: readonly string[];
 }
 
+/**
+ * Audit store configuration overrides (Phase 5, task P5-1). `databasePath`
+ * overrides the adapter's own per-user default resolution
+ * (`resolveAuditStorePaths` in `src/adapters/sqlite-audit-store.ts`, which
+ * mirrors `resolveAuthStoragePaths`'s convention) — domain code never
+ * computes a default path itself (no `node:os`/`node:path` access; the
+ * domain layer stays pure), so `undefined` here means "let the adapter
+ * decide," never "no database."
+ */
+export interface StoreConfigurationOverrides {
+  readonly databasePath?: string;
+}
+
+export interface ResolvedStoreConfiguration {
+  readonly databasePath: string | undefined;
+}
+
 export interface ConfigurationOverrides {
   [key: string]: unknown;
   rootDir?: string;
@@ -18,6 +35,7 @@ export interface ConfigurationOverrides {
   exclude?: readonly string[];
   concurrency?: number;
   evidence?: EvidenceConfigurationOverrides;
+  store?: StoreConfigurationOverrides;
 }
 
 export interface ResolvedConfiguration {
@@ -26,6 +44,7 @@ export interface ResolvedConfiguration {
   readonly exclude: readonly string[];
   readonly concurrency: number;
   readonly evidence: ResolvedEvidenceConfiguration;
+  readonly store: ResolvedStoreConfiguration;
   readonly reportingOnly: true;
 }
 
@@ -38,6 +57,9 @@ export const DEFAULT_CONFIGURATION: ResolvedConfiguration = {
     maxFragmentBytes: DEFAULT_EVIDENCE_BUDGET.maxFragmentBytes,
     maxBundleBytes: DEFAULT_EVIDENCE_BUDGET.maxBundleBytes,
     deny: [],
+  },
+  store: {
+    databasePath: undefined,
   },
   reportingOnly: true,
 };
@@ -58,6 +80,9 @@ export function resolveConfiguration(
     exclude: [...(overrides.exclude ?? DEFAULT_CONFIGURATION.exclude)],
     concurrency: overrides.concurrency ?? DEFAULT_CONFIGURATION.concurrency,
     evidence,
+    store: {
+      databasePath: overrides.store?.databasePath ?? DEFAULT_CONFIGURATION.store.databasePath,
+    },
     reportingOnly: true,
   };
 }

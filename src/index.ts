@@ -6,6 +6,8 @@ export {
   type EvidenceConfigurationOverrides,
   type ResolvedConfiguration,
   type ResolvedEvidenceConfiguration,
+  type ResolvedStoreConfiguration,
+  type StoreConfigurationOverrides,
 } from './domain/config.js';
 export { createTestCaseId } from './adapters/test-case-identity.js';
 export {
@@ -255,8 +257,12 @@ export {
 
 export { runAudit } from './application/audit.js';
 export {
+  AuditStoreCorruptError,
+  AuditStoreSchemaVersionError,
+  WORK_ITEM_STATES,
   type AuditDiagnostic,
   type AuditDiscoveryPort,
+  type AuditEvaluationOutcome,
   type AuditEvaluationPort,
   type AuditEvaluationRequest,
   type AuditEvaluationResult,
@@ -270,6 +276,22 @@ export {
   type AuditRequest,
   type AuditResult,
   type AuditSourceReaderPort,
+  type AuditStoreError,
+  type AuditStoreErrorCode,
+  type AuditStorePort,
+  type AuditStoreWorkItemIdentity,
+  type AuditStoreWorkItemOutcome,
   type AuditTotals,
   type SourceReadRequest,
+  type WorkItemState,
 } from './domain/audit.js';
+
+export {
+  createSqliteAuditStore,
+  isSqliteExperimentalWarning,
+  resolveAuditStorePaths,
+  withSqliteExperimentalWarningSuppressed,
+  type AuditStorePathEnvironment,
+  type AuditStorePaths,
+  type CreateSqliteAuditStoreOptions,
+} from './adapters/sqlite-audit-store.js';

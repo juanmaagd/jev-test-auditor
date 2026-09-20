@@ -24,8 +24,8 @@
  * fails closed (`RangeError`) on any rubric/policy version mismatch, so this
  * import and `CLASSIFICATION_POLICY_V2`'s pin must move together.
  */
-import type { AuditEvaluationPort, AuditEvaluationRequest } from '../domain/audit.js';
-import { classifyEvaluation, CLASSIFICATION_POLICY_V2, type ClassificationResult } from '../domain/classification.js';
+import type { AuditEvaluationOutcome, AuditEvaluationPort, AuditEvaluationRequest } from '../domain/audit.js';
+import { classifyEvaluation, CLASSIFICATION_POLICY_V2 } from '../domain/classification.js';
 import type { JevGatewayPort } from '../domain/jev-gateway.js';
 import { buildJevRequest } from '../domain/jev-request.js';
 import { RUBRIC_V2 } from '../domain/rubric.js';
@@ -40,10 +40,10 @@ import { RUBRIC_V2 } from '../domain/rubric.js';
  */
 export function createJevEvaluationPort(gateway: JevGatewayPort): AuditEvaluationPort {
   return {
-    async evaluate(request: AuditEvaluationRequest): Promise<ClassificationResult> {
+    async evaluate(request: AuditEvaluationRequest): Promise<AuditEvaluationOutcome> {
       const jevRequest = buildJevRequest({ testCase: request.testCase, bundle: request.bundle, rubric: RUBRIC_V2 });
       const evaluation = await gateway.evaluate(jevRequest);
-      return classifyEvaluation({
+      const classification = classifyEvaluation({
         testCase: {
           testCaseId: request.testCase.id,
           repositoryRelativePath: request.testCase.repositoryRelativePath,
@@ -53,6 +53,7 @@ export function createJevEvaluationPort(gateway: JevGatewayPort): AuditEvaluatio
         rubric: RUBRIC_V2,
         policy: CLASSIFICATION_POLICY_V2,
       });
+      return { evaluation, classification };
     },
   };
 }

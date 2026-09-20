@@ -12,7 +12,7 @@ import type {
   DiscoveryResult,
   ExcludedTestFile,
 } from './discovery.js';
-import type { DryRunSkippedTotals } from './estimate.js';
+import type { DryRunSkippedReason, DryRunSkippedTotals } from './estimate.js';
 import type {
   TestExtractionRequest,
   TestExtractionResult,
@@ -21,8 +21,10 @@ import type {
   Diagnostic,
   DynamicMetadata,
   TestCase,
+  TestCaseId,
 } from './test-understanding.js';
 import type { EvidenceBudget, EvidenceBundle } from './evidence.js';
+import type { JevEvaluation } from './jev-gateway.js';
 
 export interface SourceReadRequest {
   readonly rootDir: string;
@@ -87,11 +89,29 @@ export interface AuditEvaluationRequest {
 }
 
 /**
- * The Jev evaluation port (Phase 4, task P4-4): builds the request, calls
- * the gateway, and classifies the result for exactly one evaluable test
- * case. Production is `src/adapters/jev-evaluation-port.ts`, composing
- * `buildJevRequest`, a `JevGatewayPort`, and `classifyEvaluation` over the
- * shipped `RUBRIC_V1`/`CLASSIFICATION_POLICY_V1`.
+ * The result of one evaluation call (Phase 5, task P5-1): the raw, normalized
+ * {@link JevEvaluation} the gateway returned, alongside the already-derived
+ * {@link ClassificationResult}. Kept together — rather than only the
+ * classification, as Phase 4 shipped — so a caller (`runAudit`) can persist
+ * both the raw answers and the normalized judgment (Phase 5 Scope: "Persist
+ * ... attempts, raw answers, normalized judgments") without a second Jev
+ * call; `ClassificationResult`'s own doc in `src/domain/classification.ts`
+ * notes exactly this: "raw answers ... remain available to the caller, so a
+ * future policy version can recompute this result without another Jev call."
+ */
+export interface AuditEvaluationOutcome {
+  readonly evaluation: JevEvaluation;
+  readonly classification: ClassificationResult;
+}
+
+/**
+ * The Jev evaluation port (Phase 4, task P4-4; widened by Phase 5, task
+ * P5-1 to also return the raw {@link JevEvaluation} — see
+ * {@link AuditEvaluationOutcome}): builds the request, calls the gateway,
+ * and classifies the result for exactly one evaluable test case. Production
+ * is `src/adapters/jev-evaluation-port.ts`, composing `buildJevRequest`, a
+ * `JevGatewayPort`, and `classifyEvaluation` over the shipped
+ * `RUBRIC_V2`/`CLASSIFICATION_POLICY_V2`.
  *
  * **This port is the entire opt-in gate.** `runAudit` (see {@link AuditPorts.evaluation})
  * evaluates every evaluable test case if and only if this port is present on
@@ -111,8 +131,137 @@ export interface AuditEvaluationRequest {
  * represented as a fabricated verdict.
  */
 export interface AuditEvaluationPort {
-  evaluate(request: AuditEvaluationRequest): Promise<ClassificationResult>;
+  evaluate(request: AuditEvaluationRequest): Promise<AuditEvaluationOutcome>;
 }
+
+/**
+ * The seven work-item states persistence recognizes (Phase 5, task P5-1;
+ * `odd/tasks/phase-5-persistence.md` Decisions: "Work-item states are the
+ * design's seven"). Only `completed` and a valid `cached` judgment
+ * participate in quality classification. Task P5-1 itself only ever
+ * produces `completed`, `failed`, and `skipped` records: `pending`/`running`
+ * are scheduler checkpoints (Phase 5, task P5-3) and `cached`/`uncertain`
+ * are cache-lookup outcomes (Phase 5, task P5-2). All seven are admitted by
+ * the type (and the adapter's schema `CHECK` constraint) from the start so
+ * a later phase never needs a backward-incompatible migration just to widen
+ * it.
+ */
+export const WORK_ITEM_STATES = ['pending', 'running', 'completed', 'cached', 'uncertain', 'skipped', 'failed'] as const;
+export type WorkItemState = (typeof WORK_ITEM_STATES)[number];
+
+/** Identifies the work item a persisted record belongs to, independent of run or state. */
+export interface AuditStoreWorkItemIdentity {
+  readonly testCaseId: TestCaseId;
+  readonly repositoryRelativePath: string;
+  readonly name: string;
+}
+
+/**
+ * One terminal work-item outcome to persist (Phase 5, task P5-1). A
+ * `completed` outcome carries both the raw {@link JevEvaluation} and the
+ * already-derived {@link ClassificationResult} (see {@link AuditEvaluationOutcome}'s
+ * own doc for why both are kept); a `failed` outcome carries the same typed
+ * error kind and message `runAudit` already reports in an
+ * `evaluation-failed` diagnostic (`src/application/audit.ts`); a `skipped`
+ * outcome carries the same {@link DryRunSkippedReason} `classifyTestCase`
+ * (`src/domain/estimate.ts`) already produces. `cached`, `uncertain`,
+ * `pending`, and `running` are not constructed by task P5-1 — see
+ * {@link WorkItemState}'s own doc.
+ */
+export type AuditStoreWorkItemOutcome =
+  | {
+    readonly state: 'completed';
+    readonly identity: AuditStoreWorkItemIdentity;
+    readonly evaluation: JevEvaluation;
+    readonly classification: ClassificationResult;
+  }
+  | {
+    readonly state: 'failed';
+    readonly identity: AuditStoreWorkItemIdentity;
+    readonly errorKind: string;
+    readonly errorMessage: string;
+  }
+  | {
+    readonly state: 'skipped';
+    readonly identity: AuditStoreWorkItemIdentity;
+    readonly reason: DryRunSkippedReason;
+  };
+
+/**
+ * The audit persistence port (Phase 5, task P5-1): append-only storage for
+ * one audit run's work-item outcomes, behind a port so the domain and
+ * application layers never import the `node:sqlite` adapter
+ * (`src/adapters/sqlite-audit-store.ts`) directly. Optional on
+ * {@link AuditPorts}, constructed lazily by the CLI exactly like
+ * {@link AuditEvaluationPort} — see `AuditPorts.store`'s own doc for the
+ * full opt-in contract: an offline audit without `--evaluate` must never
+ * construct this port, read a database file, or create one.
+ *
+ * `beginRun`/`finishRun` bracket exactly one audit run; `recordWorkItem` is
+ * called once per work item reaching a terminal state. Every method is
+ * append-only: no method here updates or deletes a previously written run,
+ * work item, attempt, judgment, or error record. (`finishRun` sets the run's
+ * own `finished_at` marker exactly once — completing that run's own record,
+ * never rewriting a fact already recorded about a work item.)
+ */
+export interface AuditStorePort {
+  /** Starts a new run record for `rootDir` and returns its generated run id. */
+  beginRun(rootDir: string): Promise<string>;
+  /** Persists one terminal work-item outcome for `runId`, atomically (all-or-nothing): a failure here leaves no partial record. */
+  recordWorkItem(runId: string, outcome: AuditStoreWorkItemOutcome): Promise<void>;
+  /** Marks `runId` finished. */
+  finishRun(runId: string): Promise<void>;
+  /** Releases the underlying database handle. Safe to call once, after every other call for this store has settled. */
+  close(): Promise<void>;
+}
+
+export type AuditStoreErrorCode = 'schema-version' | 'corrupt';
+
+abstract class AuditStoreErrorBase extends Error {
+  abstract readonly code: AuditStoreErrorCode;
+
+  protected constructor(message: string) {
+    super(message);
+    this.name = new.target.name;
+  }
+}
+
+/**
+ * The store's recorded schema version is newer than this build supports.
+ * Never silently recreated and never migrated backwards (Phase 5 Scope: "A
+ * corrupt or schema-incompatible store fails visibly with a named error").
+ */
+export class AuditStoreSchemaVersionError extends AuditStoreErrorBase {
+  readonly code = 'schema-version' as const;
+  readonly foundVersion: number;
+  readonly supportedVersion: number;
+
+  constructor(foundVersion: number, supportedVersion: number) {
+    super(
+      `Audit store schema version ${foundVersion} is newer than this build supports (up to version `
+      + `${supportedVersion}). Refusing to migrate backwards or silently recreate the database; use a `
+      + 'build that supports this schema version, or point the store at a fresh database file.',
+    );
+    this.foundVersion = foundVersion;
+    this.supportedVersion = supportedVersion;
+  }
+}
+
+/**
+ * The store's schema metadata exists but is missing, malformed, or
+ * otherwise not a recognized version record — an unknown schema version,
+ * distinct from {@link AuditStoreSchemaVersionError}'s known-but-too-new
+ * one. Never guessed at, never silently recreated.
+ */
+export class AuditStoreCorruptError extends AuditStoreErrorBase {
+  readonly code = 'corrupt' as const;
+
+  constructor(detail: string) {
+    super(`Audit store schema metadata is corrupt or unrecognized: ${detail}`);
+  }
+}
+
+export type AuditStoreError = AuditStoreSchemaVersionError | AuditStoreCorruptError;
 
 export interface AuditPorts {
   readonly discovery: AuditDiscoveryPort;
@@ -121,6 +270,8 @@ export interface AuditPorts {
   readonly evidence: AuditEvidencePort;
   /** Opt-in (Phase 4, task P4-4): see {@link AuditEvaluationPort}'s own doc for the full opt-in contract. */
   readonly evaluation?: AuditEvaluationPort;
+  /** Opt-in (Phase 5, task P5-1): see {@link AuditStorePort}'s own doc for the full opt-in contract. */
+  readonly store?: AuditStorePort;
 }
 
 export type AuditRequest = ResolvedConfiguration;

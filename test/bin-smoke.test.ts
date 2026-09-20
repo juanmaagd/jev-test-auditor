@@ -2,6 +2,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 interface PackageManifest {
@@ -371,6 +372,32 @@ describe('packed installed package', () => {
         if (savedAppData === undefined) delete process.env['APPDATA']; else process.env['APPDATA'] = savedAppData;
       }
       await expect(access(join(fixtureRoot, 'executed.marker'))).rejects.toThrow();
+
+      // Phase 5, task P5-1: a real, fresh child process proof that the sqlite ExperimentalWarning
+      // never reaches output, while an unrelated Node warning still does — immune to Node's
+      // once-per-process dedup of that exact warning (which would otherwise make an in-process
+      // assertion order-dependent on whatever else in the suite happened to import `node:sqlite`
+      // first; see `test/sqlite-audit-store.test.ts`'s own note on this). Exercises the just-built
+      // `dist/adapters/sqlite-audit-store.js` directly — not through `--evaluate` (which would
+      // require a real or faked network call through the installed binary) — in a brand new
+      // process where nothing has imported `node:sqlite` yet.
+      const warningModuleUrl = pathToFileURL(join(process.cwd(), 'dist', 'adapters', 'sqlite-audit-store.js')).href;
+      const warningDbFile = join(temporaryRoot, 'warning-check.sqlite3');
+      const warningScript = [
+        `import(${JSON.stringify(warningModuleUrl)}).then(async (mod) => {`,
+        `  const store = await mod.createSqliteAuditStore({ databaseFile: ${JSON.stringify(warningDbFile)} });`,
+        "  process.emitWarning('bin-smoke-unrelated-canary-warning');",
+        '  await store.close();',
+        // Deliberately no explicit process.exit() here: Node schedules a warning's default print
+        // asynchronously, so exiting immediately after emitWarning (verified empirically) can cut
+        // the print off before it flushes. Letting the process exit naturally once the event loop
+        // drains guarantees the warning is fully written first.
+        '}).catch((error) => { console.error(String((error && error.stack) || error)); process.exitCode = 1; });',
+      ].join('\n');
+      const warningCheck = spawnSync(process.execPath, ['-e', warningScript], { encoding: 'utf8' });
+      expect(warningCheck.status).toBe(0);
+      expect(warningCheck.stderr).not.toContain('ExperimentalWarning');
+      expect(warningCheck.stderr).toContain('bin-smoke-unrelated-canary-warning');
     } finally {
       await rm(temporaryRoot, { recursive: true, force: true });
     }

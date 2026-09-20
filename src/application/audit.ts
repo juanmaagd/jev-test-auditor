@@ -7,11 +7,14 @@ import type {
   AuditResult,
   AuditDiagnostic,
   AuditFileResult,
+  AuditStorePort,
+  AuditStoreWorkItemIdentity,
 } from '../domain/audit.js';
 import type { ClassificationResult, OverallClassificationStatus } from '../domain/classification.js';
 import { classifyTestCase, type DryRunSkippedReason } from '../domain/estimate.js';
 import type { Diagnostic, TestCase } from '../domain/test-understanding.js';
 import type { EvidenceBundle } from '../domain/evidence.js';
+import type { JevEvaluation } from '../domain/jev-gateway.js';
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -87,12 +90,20 @@ interface EvaluableItem {
  * path) and each file's own `testCases` order, so the resulting list's
  * order is deterministic independent of evaluation itself.
  */
+interface SkippedItem {
+  readonly testCase: TestCase;
+  readonly reason: DryRunSkippedReason;
+}
+
 function collectEvaluableItems(files: readonly AuditFileResult[]): {
   readonly items: readonly EvaluableItem[];
   readonly skippedByReason: Record<DryRunSkippedReason, number>;
+  /** Same skipped test cases as `skippedByReason`, kept individually (Phase 5, task P5-1) so `runEvaluation` can persist one `skipped` work item per test case, not only a tally. */
+  readonly skippedItems: readonly SkippedItem[];
 } {
   const items: EvaluableItem[] = [];
   const skippedByReason: Record<DryRunSkippedReason, number> = { skip: 0, todo: 0, 'evidence-unavailable': 0 };
+  const skippedItems: SkippedItem[] = [];
 
   for (const file of files) {
     const bundlesByTestCaseId = new Map(file.evidence.map((bundle) => [bundle.testCaseId, bundle]));
@@ -101,6 +112,7 @@ function collectEvaluableItems(files: readonly AuditFileResult[]): {
       const classification = classifyTestCase(testCase, bundle);
       if (classification.status === 'skipped') {
         skippedByReason[classification.reason] += 1;
+        skippedItems.push({ testCase, reason: classification.reason });
         continue;
       }
       if (bundle === undefined) {
@@ -111,11 +123,11 @@ function collectEvaluableItems(files: readonly AuditFileResult[]): {
     }
   }
 
-  return { items, skippedByReason };
+  return { items, skippedByReason, skippedItems };
 }
 
 type EvaluationOutcome =
-  | { readonly kind: 'success'; readonly classification: ClassificationResult }
+  | { readonly kind: 'success'; readonly testCase: TestCase; readonly classification: ClassificationResult; readonly evaluation: JevEvaluation }
   | { readonly kind: 'failure'; readonly testCase: TestCase; readonly error: unknown };
 
 interface EvaluationRunResult {
@@ -124,6 +136,10 @@ interface EvaluationRunResult {
   readonly diagnostics: readonly AuditDiagnostic[];
   /** The same failures, grouped by owning file path, as plain `Diagnostic`s (no path field) for merging into that file's own `diagnostics` — parity with how `evidence-selection-failed` is merged. */
   readonly fileDiagnosticsByPath: ReadonlyMap<string, readonly Diagnostic[]>;
+}
+
+function identityOf(testCase: TestCase): AuditStoreWorkItemIdentity {
+  return { testCaseId: testCase.id, repositoryRelativePath: testCase.repositoryRelativePath, name: testCase.name };
 }
 
 /**
@@ -136,19 +152,48 @@ interface EvaluationRunResult {
  * and the error's typed kind — never the request body, and never the API
  * key (the gateway's own error types are constructed so a key can never
  * reach their `message` in the first place; see `src/domain/jev-gateway.ts`).
+ *
+ * When `store`/`runId` are both given (Phase 5, task P5-1: `ports.store` is
+ * opt-in exactly like `ports.evaluation`), every terminal work item this
+ * function reaches — `skipped` up front (already known before the pool
+ * starts), then `completed`/`failed` as each pool worker settles — is
+ * persisted through `store.recordWorkItem` before that worker's outcome is
+ * returned, so an interrupted run still leaves every already-terminal item
+ * committed. `runBoundedPool` itself is untouched: this only adds a side
+ * effect inside the existing worker callback, never changes dispatch order
+ * or concurrency (that is Phase 5, task P5-3's job).
  */
 async function runEvaluation(
   files: readonly AuditFileResult[],
   evaluationPort: AuditEvaluationPort,
   concurrency: number,
+  store?: AuditStorePort,
+  runId?: string,
 ): Promise<EvaluationRunResult> {
-  const { items, skippedByReason } = collectEvaluableItems(files);
+  const { items, skippedByReason, skippedItems } = collectEvaluableItems(files);
+
+  if (store !== undefined && runId !== undefined) {
+    for (const skipped of skippedItems) {
+      await store.recordWorkItem(runId, { state: 'skipped', identity: identityOf(skipped.testCase), reason: skipped.reason });
+    }
+  }
 
   const outcomes = await runBoundedPool<EvaluableItem, EvaluationOutcome>(items, concurrency, async (item) => {
     try {
-      const classification = await evaluationPort.evaluate({ testCase: item.testCase, bundle: item.bundle });
-      return { kind: 'success', classification };
+      const { classification, evaluation } = await evaluationPort.evaluate({ testCase: item.testCase, bundle: item.bundle });
+      if (store !== undefined && runId !== undefined) {
+        await store.recordWorkItem(runId, { state: 'completed', identity: identityOf(item.testCase), evaluation, classification });
+      }
+      return { kind: 'success', testCase: item.testCase, classification, evaluation };
     } catch (error) {
+      if (store !== undefined && runId !== undefined) {
+        await store.recordWorkItem(runId, {
+          state: 'failed',
+          identity: identityOf(item.testCase),
+          errorKind: evaluationErrorKind(error),
+          errorMessage: messageOf(error),
+        });
+      }
       return { kind: 'failure', testCase: item.testCase, error };
     }
   });
@@ -352,10 +397,15 @@ export async function runAudit(
   let finalFiles: readonly AuditFileResult[] = results;
   let evaluation: AuditEvaluationResult | undefined;
   if (ports.evaluation !== undefined) {
-    const evaluationRun = await runEvaluation(results, ports.evaluation, request.concurrency);
+    // Phase 5, task P5-1: `ports.store` is opt-in exactly like `ports.evaluation` (see
+    // `AuditStorePort`'s own doc) — `beginRun`/`finishRun` bracket this one run only when a store
+    // is actually present, so an offline or store-less `--evaluate` run never touches it.
+    const runId = ports.store === undefined ? undefined : await ports.store.beginRun(request.rootDir);
+    const evaluationRun = await runEvaluation(results, ports.evaluation, request.concurrency, ports.store, runId);
     evaluation = evaluationRun.evaluation;
     diagnostics.push(...evaluationRun.diagnostics);
     finalFiles = withEvaluationDiagnostics(results, evaluationRun.fileDiagnosticsByPath);
+    if (ports.store !== undefined && runId !== undefined) await ports.store.finishRun(runId);
   }
 
   const evidenceBundles = finalFiles.flatMap((file) => file.evidence);

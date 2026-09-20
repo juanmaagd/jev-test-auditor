@@ -7,12 +7,14 @@ import type {
   AuditEvidenceBuildResult,
   AuditPorts,
   AuditRequest,
+  AuditStorePort,
+  AuditStoreWorkItemOutcome,
 } from '../src/domain/audit.js';
 import type { ClassificationResult, OverallClassificationStatus } from '../src/domain/classification.js';
 import type { DiscoveredTestFile, DiscoveryResult } from '../src/domain/discovery.js';
 import type { TestExtractionResult } from '../src/domain/extraction.js';
 import { buildEvidenceBundle, DEFAULT_EVIDENCE_BUDGET, type EvidenceBundle } from '../src/domain/evidence.js';
-import { JevRateLimitError } from '../src/domain/jev-gateway.js';
+import { JevRateLimitError, type JevEvaluation } from '../src/domain/jev-gateway.js';
 import type { TestCase, TestCaseId, TestModifierKind } from '../src/domain/test-understanding.js';
 
 const configuration: AuditRequest = {
@@ -24,6 +26,9 @@ const configuration: AuditRequest = {
     maxFragmentBytes: DEFAULT_EVIDENCE_BUDGET.maxFragmentBytes,
     maxBundleBytes: DEFAULT_EVIDENCE_BUDGET.maxBundleBytes,
     deny: [],
+  },
+  store: {
+    databasePath: undefined,
   },
   reportingOnly: true,
 };
@@ -424,11 +429,32 @@ function classificationFor(
   };
 }
 
-/** A stub `AuditEvaluationPort` whose `evaluate` behavior is fully controlled per test case id. */
+/**
+ * A stub `AuditEvaluationPort` whose `evaluate` behavior is fully controlled
+ * per test case id. Callers still hand back only a `ClassificationResult`
+ * (the Phase 4 shape this test file's fixtures already build); this helper
+ * synthesizes the matching raw `JevEvaluation` `AuditEvaluationPort.evaluate`
+ * now also returns (Phase 5, task P5-1) directly from that classification's
+ * own `model`/`usage` fields, so none of this file's existing call sites
+ * need to change.
+ */
 function stubEvaluationPort(
   handler: (request: AuditEvaluationRequest) => Promise<ClassificationResult>,
 ): AuditEvaluationPort {
-  return { evaluate: handler };
+  return {
+    async evaluate(request) {
+      const classification = await handler(request);
+      const evaluation: JevEvaluation = {
+        requestedModel: classification.model.requested,
+        respondedModel: classification.model.responded,
+        modelMatchesPin: classification.model.matchesPin,
+        answers: {},
+        usage: classification.usage,
+        attempts: 1,
+      };
+      return { classification, evaluation };
+    },
+  };
 }
 
 describe('evaluation wiring (--evaluate)', () => {
@@ -610,5 +636,165 @@ describe('evaluation wiring (--evaluate)', () => {
 
     expect(result.evaluation?.classifications.map((entry) => entry.testCaseId)).toEqual(cases.map((testCase) => testCase.id));
     expect(active.max).toBeLessThanOrEqual(2);
+  });
+});
+
+// --- Audit store persistence wiring (Phase 5, task P5-1) --------------------
+
+interface FakeStoreCall {
+  readonly runId: string;
+  readonly outcome: AuditStoreWorkItemOutcome;
+}
+
+interface FakeStore extends AuditStorePort {
+  readonly beginRunCalls: string[];
+  readonly workItemCalls: FakeStoreCall[];
+  readonly finishRunCalls: string[];
+  readonly closeCalls: number;
+}
+
+function fakeStore(): FakeStore {
+  const beginRunCalls: string[] = [];
+  const workItemCalls: FakeStoreCall[] = [];
+  const finishRunCalls: string[] = [];
+  let closeCalls = 0;
+  let nextRunId = 0;
+
+  return {
+    beginRunCalls,
+    workItemCalls,
+    finishRunCalls,
+    get closeCalls() { return closeCalls; },
+    async beginRun(rootDir: string): Promise<string> {
+      beginRunCalls.push(rootDir);
+      nextRunId += 1;
+      return `run-${nextRunId}`;
+    },
+    async recordWorkItem(runId: string, outcome: AuditStoreWorkItemOutcome): Promise<void> {
+      workItemCalls.push({ runId, outcome });
+    },
+    async finishRun(runId: string): Promise<void> {
+      finishRunCalls.push(runId);
+    },
+    async close(): Promise<void> {
+      closeCalls += 1;
+    },
+  };
+}
+
+describe('audit store persistence wiring (Phase 5, task P5-1)', () => {
+  it('never touches the store when ports.evaluation is absent (offline audit), even if a store port is supplied', async () => {
+    const store = fakeStore();
+    const discovery: DiscoveryResult = { files: [discovered('a.test.ts')], excluded: [], diagnostics: [] };
+
+    await runAudit(configuration, { ...portsFor(discovery, async () => 'source', () => extraction('a')), store });
+
+    expect(store.beginRunCalls).toEqual([]);
+    expect(store.workItemCalls).toEqual([]);
+    expect(store.finishRunCalls).toEqual([]);
+  });
+
+  it('begins one run, persists a completed work item with its raw evaluation and classification, and finishes the run', async () => {
+    const store = fakeStore();
+    const evaluableCase = testCaseWithModifiers('tc:v1:store-ok', [], 'store.test.ts');
+    const discovery: DiscoveryResult = { files: [discovered('store.test.ts')], excluded: [], diagnostics: [] };
+    const evaluation = stubEvaluationPort(async (request) => classificationFor(request.testCase.id, { status: 'healthy' }));
+
+    const result = await runAudit(configuration, {
+      discovery: { discover: async () => discovery },
+      sourceReader: { read: async () => 'source' },
+      extractor: { extract: () => ({ testCases: [evaluableCase], dynamicMetadata: [], diagnostics: [] }) },
+      evidence: { build: async (request) => ({ bundles: request.testCases.map((testCase) => emptyBundle(testCase.id)), diagnostics: [] }) },
+      evaluation,
+      store,
+    });
+
+    expect(store.beginRunCalls).toEqual(['/repo']);
+    expect(store.workItemCalls).toHaveLength(1);
+    const { runId, outcome } = store.workItemCalls[0]!;
+    expect(runId).toBe('run-1');
+    expect(outcome.state).toBe('completed');
+    if (outcome.state !== 'completed') throw new Error('unreachable');
+    expect(outcome.identity).toEqual({ testCaseId: evaluableCase.id, repositoryRelativePath: 'store.test.ts', name: evaluableCase.name });
+    expect(outcome.classification.status).toBe('healthy');
+    expect(outcome.evaluation.requestedModel).toBe('jev-1.13.0');
+    expect(outcome.evaluation.attempts).toBe(1);
+    expect(store.finishRunCalls).toEqual(['run-1']);
+    expect(result.evaluation?.classifications.map((entry) => entry.testCaseId)).toEqual([evaluableCase.id]);
+  });
+
+  it('persists a failed work item with the same typed error kind and message as its evaluation-failed diagnostic', async () => {
+    const store = fakeStore();
+    const failingCase = testCaseWithModifiers('tc:v1:store-fail', [], 'store-fail.test.ts');
+    const discovery: DiscoveryResult = { files: [discovered('store-fail.test.ts')], excluded: [], diagnostics: [] };
+    const evaluation = stubEvaluationPort(async () => { throw new JevRateLimitError(3); });
+
+    await runAudit(configuration, {
+      discovery: { discover: async () => discovery },
+      sourceReader: { read: async () => 'source' },
+      extractor: { extract: () => ({ testCases: [failingCase], dynamicMetadata: [], diagnostics: [] }) },
+      evidence: { build: async (request) => ({ bundles: request.testCases.map((testCase) => emptyBundle(testCase.id)), diagnostics: [] }) },
+      evaluation,
+      store,
+    });
+
+    expect(store.workItemCalls).toHaveLength(1);
+    const { outcome } = store.workItemCalls[0]!;
+    expect(outcome.state).toBe('failed');
+    if (outcome.state !== 'failed') throw new Error('unreachable');
+    expect(outcome.identity.testCaseId).toBe(failingCase.id);
+    expect(outcome.errorKind).toBe('rate-limit');
+    expect(outcome.errorMessage).toContain('Jev rate limit exceeded');
+  });
+
+  it('persists one skipped work item per skipped test case, with its reason', async () => {
+    const store = fakeStore();
+    const skipCase = testCaseWithModifiers('tc:v1:store-skip', ['skip'], 'store-skip.test.ts');
+    const todoCase = testCaseWithModifiers('tc:v1:store-todo', ['todo'], 'store-skip.test.ts');
+    const discovery: DiscoveryResult = { files: [discovered('store-skip.test.ts')], excluded: [], diagnostics: [] };
+    const evaluation = stubEvaluationPort(async (request) => classificationFor(request.testCase.id));
+
+    await runAudit(configuration, {
+      discovery: { discover: async () => discovery },
+      sourceReader: { read: async () => 'source' },
+      extractor: { extract: () => ({ testCases: [skipCase, todoCase], dynamicMetadata: [], diagnostics: [] }) },
+      evidence: { build: async (request) => ({ bundles: request.testCases.map((testCase) => emptyBundle(testCase.id)), diagnostics: [] }) },
+      evaluation,
+      store,
+    });
+
+    expect(store.workItemCalls).toHaveLength(2);
+    const outcomesByTestCaseId = new Map(store.workItemCalls.map(({ outcome }) => [outcome.identity.testCaseId, outcome]));
+    const skipOutcome = outcomesByTestCaseId.get(skipCase.id);
+    const todoOutcome = outcomesByTestCaseId.get(todoCase.id);
+    expect(skipOutcome?.state).toBe('skipped');
+    expect(todoOutcome?.state).toBe('skipped');
+    if (skipOutcome?.state !== 'skipped' || todoOutcome?.state !== 'skipped') throw new Error('unreachable');
+    expect(skipOutcome.reason).toBe('skip');
+    expect(todoOutcome.reason).toBe('todo');
+  });
+
+  it('records every already-terminal work item even when a later one in the same run fails', async () => {
+    const store = fakeStore();
+    const okCase = testCaseWithModifiers('tc:v1:store-mixed-ok', [], 'store-mixed.test.ts');
+    const failingCase = testCaseWithModifiers('tc:v1:store-mixed-fail', [], 'store-mixed.test.ts');
+    const discovery: DiscoveryResult = { files: [discovered('store-mixed.test.ts')], excluded: [], diagnostics: [] };
+    const evaluation = stubEvaluationPort(async (request) => {
+      if (request.testCase.id === failingCase.id) throw new Error('boom');
+      return classificationFor(request.testCase.id);
+    });
+
+    await runAudit({ ...configuration, concurrency: 1 }, {
+      discovery: { discover: async () => discovery },
+      sourceReader: { read: async () => 'source' },
+      extractor: { extract: () => ({ testCases: [okCase, failingCase], dynamicMetadata: [], diagnostics: [] }) },
+      evidence: { build: async (request) => ({ bundles: request.testCases.map((testCase) => emptyBundle(testCase.id)), diagnostics: [] }) },
+      evaluation,
+      store,
+    });
+
+    const states = new Map(store.workItemCalls.map(({ outcome }) => [outcome.identity.testCaseId, outcome.state]));
+    expect(states.get(okCase.id)).toBe('completed');
+    expect(states.get(failingCase.id)).toBe('failed');
   });
 });

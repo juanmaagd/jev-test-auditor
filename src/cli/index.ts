@@ -9,6 +9,7 @@ import { extractTestCases } from '../adapters/test-extraction.js';
 import { createAuditEvidencePort } from '../adapters/evidence-audit-port.js';
 import { createJevEvaluationPort } from '../adapters/jev-evaluation-port.js';
 import { createJevHttpGateway } from '../adapters/jev-http-gateway.js';
+import { createSqliteAuditStore, resolveAuditStorePaths } from '../adapters/sqlite-audit-store.js';
 import { readApiKeyFromPrompt } from '../adapters/auth-prompt.js';
 import {
   deleteStoredCredentials,
@@ -34,6 +35,7 @@ import type {
   AuditPorts,
   AuditRequest,
   AuditResult,
+  AuditStorePort,
 } from '../domain/audit.js';
 import type { ClassificationResult } from '../domain/classification.js';
 import type { ConfigurationOverrides } from '../domain/config.js';
@@ -57,6 +59,17 @@ export interface CliDependencies {
    * network ever attempted.
    */
   readonly createEvaluationPort?: () => AuditEvaluationPort | Promise<AuditEvaluationPort>;
+  /**
+   * Test seam only (Phase 5, task P5-1): overrides how the `--evaluate`
+   * audit store is constructed. Only consulted when `dependencies.audit` is
+   * not provided, and only when `--evaluate` was requested — production
+   * always uses the default, which opens (creating if needed) a
+   * `node:sqlite` database under `resolveAuditStorePaths()` (or
+   * `configuration.store.databasePath`, when set). Built only after a
+   * usable API key was already resolved, so a failed `--evaluate` (missing
+   * key) never creates a database file.
+   */
+  readonly createStorePort?: () => AuditStorePort | Promise<AuditStorePort>;
   /**
    * Test seam only, consulted by `auth login`: overrides how the API key is
    * read from the terminal. Production default (`readApiKeyFromPrompt`)
@@ -139,13 +152,14 @@ Options:
  * never construct one on its own, so an ordinary `audit` invocation never
  * touches `createJevHttpGateway`, an API key, or the network.
  */
-function createProductionPorts(evaluationPort?: AuditEvaluationPort): AuditPorts {
+function createProductionPorts(evaluationPort?: AuditEvaluationPort, storePort?: AuditStorePort): AuditPorts {
   return {
     discovery: { discover: discoverTestFiles },
     sourceReader: { read: readSourceFile },
     extractor: { extract: extractTestCases },
     evidence: createAuditEvidencePort(),
     ...(evaluationPort === undefined ? {} : { evaluation: evaluationPort }),
+    ...(storePort === undefined ? {} : { store: storePort }),
   };
 }
 
@@ -553,6 +567,8 @@ export async function runCli(
     return 1;
   }
 
+  const configuration = getResolvedConfiguration(parsed.overrides);
+
   let evaluationPort: AuditEvaluationPort | undefined;
   if (parsed.evaluate && dependencies.audit === undefined) {
     const buildEvaluationPort = dependencies.createEvaluationPort
@@ -572,27 +588,42 @@ export async function runCli(
     }
   }
 
-  const configuration = getResolvedConfiguration(parsed.overrides);
-  const result = dependencies.audit === undefined
-    ? await runAudit(configuration, createProductionPorts(evaluationPort))
-    : await dependencies.audit(configuration);
+  // Phase 5, task P5-1: the store is opt-in exactly like the evaluation port above, and is only
+  // ever built AFTER a usable API key already resolved (evaluationPort !== undefined) — so a
+  // failed `--evaluate` (missing/invalid key, handled above) never creates a database file.
+  let storePort: AuditStorePort | undefined;
+  if (parsed.evaluate && dependencies.audit === undefined && evaluationPort !== undefined) {
+    const buildStorePort = dependencies.createStorePort
+      ?? ((): Promise<AuditStorePort> => createSqliteAuditStore({
+        databaseFile: configuration.store.databasePath ?? resolveAuditStorePaths().databaseFile,
+      }));
+    storePort = await buildStorePort();
+  }
 
-  if (parsed.dryRun) {
-    const estimate = estimateDryRun(JEV_ESTIMATE_SNAPSHOT, result.files);
-    io.writeLine(parsed.json ? dryRunJsonLine(result.rootDir, estimate) : dryRunTextReport(result.rootDir, estimate));
+  try {
+    const result = dependencies.audit === undefined
+      ? await runAudit(configuration, createProductionPorts(evaluationPort, storePort))
+      : await dependencies.audit(configuration);
+
+    if (parsed.dryRun) {
+      const estimate = estimateDryRun(JEV_ESTIMATE_SNAPSHOT, result.files);
+      io.writeLine(parsed.json ? dryRunJsonLine(result.rootDir, estimate) : dryRunTextReport(result.rootDir, estimate));
+      return 0;
+    }
+
+    if (parsed.evaluate) {
+      io.writeLine(parsed.json ? evaluateJsonLine(result) : evaluateTextReport(result));
+      return 0;
+    }
+
+    io.writeLine(summary(result));
+    if (parsed.inspectPayloads) {
+      for (const line of inspectPayloadLines(result)) io.writeLine(line);
+    }
     return 0;
+  } finally {
+    if (storePort !== undefined) await storePort.close();
   }
-
-  if (parsed.evaluate) {
-    io.writeLine(parsed.json ? evaluateJsonLine(result) : evaluateTextReport(result));
-    return 0;
-  }
-
-  io.writeLine(summary(result));
-  if (parsed.inspectPayloads) {
-    for (const line of inspectPayloadLines(result)) io.writeLine(line);
-  }
-  return 0;
 }
 
 function isInvokedAsPackageEntry(): boolean {

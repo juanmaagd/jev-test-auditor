@@ -97,19 +97,22 @@ describe('createJevEvaluationPort', () => {
       rubric: RUBRIC_V2,
       policy: CLASSIFICATION_POLICY_V2,
     });
-    expect(result).toEqual(expected);
-    expect(result.status).toBe('needs-review');
-    expect(result.dimensions).toHaveLength(7);
-    expect(result.dimensions.every((dimension) => dimension.status === 'not-applicable')).toBe(true);
+    // Phase 5, task P5-1: `evaluate` now returns both the raw `JevEvaluation` (so a future policy
+    // version can recompute the judgment without another Jev call) and the derived classification.
+    expect(result.evaluation).toEqual(expectedEvaluation);
+    expect(result.classification).toEqual(expected);
+    expect(result.classification.status).toBe('needs-review');
+    expect(result.classification.dimensions).toHaveLength(7);
+    expect(result.classification.dimensions.every((dimension) => dimension.status === 'not-applicable')).toBe(true);
     // Asserts the shipped path's policy version directly (not only via the toEqual above), so a
     // regression that reverts src/adapters/jev-evaluation-port.ts to CLASSIFICATION_POLICY_V1
     // fails here even if some future change made the two policies coincidentally agree elsewhere.
-    expect(result.policyVersion).toBe(CLASSIFICATION_POLICY_V2.version);
+    expect(result.classification.policyVersion).toBe(CLASSIFICATION_POLICY_V2.version);
     // Asserts the shipped path's rubric version directly (task C-2): a regression that reverts
     // src/adapters/jev-evaluation-port.ts to RUBRIC_V1 while CLASSIFICATION_POLICY_V2.rubricVersion
     // stays pinned to 2 would throw RangeError from classifyEvaluation's own version guard before
     // this assertion is even reached, which is itself the guard this test exists to exercise.
-    expect(result.rubricVersion).toBe(RUBRIC_V2.version);
+    expect(result.classification.rubricVersion).toBe(RUBRIC_V2.version);
   });
 
   it('propagates a gateway rejection untouched (no wrapping, no swallowing) so the application layer sees the original typed error', async () => {

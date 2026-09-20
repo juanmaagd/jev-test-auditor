@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -6,8 +6,9 @@ import { runAudit } from '../src/application/audit.js';
 import { runCli, type CliIo } from '../src/cli/index.js';
 import { createJevEvaluationPort } from '../src/adapters/jev-evaluation-port.js';
 import { readStoredCredentials, resolveAuthStoragePaths, writeStoredCredentials } from '../src/adapters/auth-storage.js';
+import { resolveAuditStorePaths } from '../src/adapters/sqlite-audit-store.js';
 import { AuthPromptCancelledError } from '../src/domain/auth.js';
-import type { AuditEvaluationPort, AuditFileResult, AuditPorts, AuditResult } from '../src/domain/audit.js';
+import type { AuditEvaluationPort, AuditFileResult, AuditPorts, AuditResult, AuditStorePort } from '../src/domain/audit.js';
 import { buildEvidenceBundle, DEFAULT_EVIDENCE_BUDGET, type EvidenceBundle } from '../src/domain/evidence.js';
 import { canonicalizeEvidenceBundle } from '../src/index.js';
 import type { JevAnswer, JevEvaluation, JevGatewayPort } from '../src/domain/jev-gateway.js';
@@ -1294,6 +1295,141 @@ describe('--evaluate', () => {
       expect(report).toContain('Evaluated: 0');
       expect(report).toContain('Failed: 0');
     });
+  });
+});
+
+/**
+ * SQLite audit store wiring (Phase 5, task P5-1): the store is constructed
+ * lazily, exactly like the evaluation port — only when `--evaluate` was
+ * requested — and defaults to a file under the per-user config home this
+ * file's `useIsolatedConfigHome()` already sandboxes away from the real
+ * `~/.config`/`%APPDATA%`.
+ */
+describe('SQLite audit store (Phase 5, task P5-1)', () => {
+  useIsolatedConfigHome();
+
+  const mathFixtureFiles = {
+    'math.test.ts': "import { expect, test } from 'vitest';\ntest('adds', () => { expect(1 + 1).toBe(2); });\n",
+  };
+
+  function fakeEvaluationPort(): AuditEvaluationPort {
+    return {
+      async evaluate(request) {
+        return {
+          evaluation: {
+            requestedModel: 'jev-1.13.0',
+            respondedModel: 'jev-1.13.0',
+            modelMatchesPin: true,
+            answers: {},
+            usage: { inputTokens: 10, outputTokens: 1 },
+            attempts: 1,
+          },
+          classification: {
+            testCaseId: request.testCase.id,
+            repositoryRelativePath: request.testCase.repositoryRelativePath,
+            name: request.testCase.name,
+            status: 'healthy',
+            dimensions: [],
+            findings: [],
+            policyVersion: 2,
+            rubricVersion: 2,
+            model: { requested: 'jev-1.13.0', responded: 'jev-1.13.0', matchesPin: true },
+            usage: { inputTokens: 10, outputTokens: 1 },
+          },
+        };
+      },
+    };
+  }
+
+  it('creates no database file for a plain audit (no --evaluate)', async () => {
+    const root = await fixture(mathFixtureFiles);
+    const output = captureOutput();
+
+    const exitCode = await runCli(['audit', '--rootDir', root], output.io);
+
+    expect(exitCode).toBe(0);
+    const storePaths = resolveAuditStorePaths();
+    await expect(access(storePaths.databaseFile)).rejects.toThrow();
+  });
+
+  it('creates no database file when --evaluate exits early on a missing API key', async () => {
+    const output = captureOutput();
+
+    const exitCode = await runCli(['audit', '--evaluate'], output.io);
+
+    expect(exitCode).toBe(1);
+    const storePaths = resolveAuditStorePaths();
+    await expect(access(storePaths.databaseFile)).rejects.toThrow();
+  });
+
+  it('opens the SQLite store under the per-user config home when --evaluate is used, and persists the run', async () => {
+    const root = await fixture(mathFixtureFiles);
+    const output = captureOutput();
+
+    const exitCode = await runCli(['audit', '--rootDir', root, '--evaluate'], output.io, {
+      createEvaluationPort: () => fakeEvaluationPort(),
+    });
+
+    expect(exitCode).toBe(0);
+    const storePaths = resolveAuditStorePaths();
+    await expect(access(storePaths.databaseFile)).resolves.toBeUndefined();
+  });
+
+  it('a createStorePort test seam overrides store construction, records the run, and is closed once the audit completes', async () => {
+    const root = await fixture(mathFixtureFiles);
+    const output = captureOutput();
+    let workItems = 0;
+    let closed = false;
+    const fakeStore: AuditStorePort = {
+      beginRun: async () => 'fake-run-1',
+      recordWorkItem: async () => { workItems += 1; },
+      finishRun: async () => undefined,
+      close: async () => { closed = true; },
+    };
+
+    const exitCode = await runCli(['audit', '--rootDir', root, '--evaluate'], output.io, {
+      createEvaluationPort: () => fakeEvaluationPort(),
+      createStorePort: () => fakeStore,
+    });
+
+    expect(exitCode).toBe(0);
+    expect(workItems).toBe(1);
+    expect(closed).toBe(true);
+    // The production store was never constructed, so no real database file exists.
+    const storePaths = resolveAuditStorePaths();
+    await expect(access(storePaths.databaseFile)).rejects.toThrow();
+  });
+
+  it('the API key never reaches the database file, exercised end-to-end through the real key resolution, gateway, and store construction', async () => {
+    const root = await fixture(mathFixtureFiles);
+    const canaryKey = 'sk-store-key-never-persisted-canary';
+    const savedKey = process.env['TYPESAFE_API_KEY'];
+    const originalFetch = globalThis.fetch;
+    process.env['TYPESAFE_API_KEY'] = canaryKey;
+    const fetchSpy = vi.fn(async () => new Response(JSON.stringify({
+      model: 'jev-1.13.0', answers: {}, usage: { input_tokens: 0, output_tokens: 0 },
+    }), { status: 200 }));
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    try {
+      const output = captureOutput();
+
+      const exitCode = await runCli(['audit', '--rootDir', root, '--evaluate'], output.io);
+
+      expect(exitCode).toBe(0);
+      expect(fetchSpy).toHaveBeenCalled();
+      const [, requestInit] = fetchSpy.mock.calls[0] as unknown as [string, RequestInit];
+      const headers = requestInit.headers as Record<string, string>;
+      expect(headers['Authorization']).toBe(`Bearer ${canaryKey}`);
+
+      const storePaths = resolveAuditStorePaths();
+      const raw = await readFile(storePaths.databaseFile);
+      expect(raw.toString('latin1')).not.toContain(canaryKey);
+      expect(output.lines.join('\n')).not.toContain(canaryKey);
+    } finally {
+      if (savedKey === undefined) delete process.env['TYPESAFE_API_KEY']; else process.env['TYPESAFE_API_KEY'] = savedKey;
+      globalThis.fetch = originalFetch;
+    }
   });
 });
 

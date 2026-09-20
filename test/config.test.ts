@@ -14,6 +14,9 @@ describe('resolved configuration', () => {
         maxBundleBytes: DEFAULT_EVIDENCE_BUDGET.maxBundleBytes,
         deny: [],
       },
+      store: {
+        databasePath: undefined,
+      },
       reportingOnly: true,
     });
   });
@@ -53,6 +56,22 @@ describe('resolved configuration', () => {
     const resolved = resolveConfiguration({ reportingOnly: false });
 
     expect(resolved.reportingOnly).toBe(true);
+  });
+});
+
+// --- Audit store configuration (Phase 5, task P5-1) ------------------------
+
+describe('store configuration', () => {
+  it('defaults databasePath to undefined, deferring the default location to the adapter', () => {
+    const resolved = resolveConfiguration();
+
+    expect(resolved.store).toEqual({ databasePath: undefined });
+  });
+
+  it('carries an explicit databasePath override through untouched', () => {
+    const resolved = resolveConfiguration({ store: { databasePath: '/custom/audit-store.sqlite3' } });
+
+    expect(resolved.store).toEqual({ databasePath: '/custom/audit-store.sqlite3' });
   });
 });
 
