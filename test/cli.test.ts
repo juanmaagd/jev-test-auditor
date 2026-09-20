@@ -782,18 +782,23 @@ describe('--evaluate', () => {
     const fixedTestCaseId = 'tc:v1:abc' as TestCaseId;
 
     /**
-     * Every `.applicable` noul answer is `0.1` — below CLASSIFICATION_POLICY_V1's
-     * `applicabilityMin` of `0.5` — so every one of RUBRIC_V1's 7 dimensions is
-     * judged `not-applicable` and its `.quality` score is never read (the score
-     * answers below are structurally valid but their value never matters).
-     * Walking `classifyEvaluation`'s branches by hand for this fixed input:
-     * every dimension takes the `applicabilityProbability < policy.applicabilityMin`
-     * branch of `judgeDimension` (`status: 'not-applicable'`, `applicable: false`,
-     * `level`/`score`/`confidence`/`reason` all `undefined` and so dropped by
-     * `JSON.stringify`); `classifyOverall` then sees zero `applicableDimensions`,
-     * which is the `applicableDimensions.length === 0` branch, giving the
-     * overall `status: 'needs-review'`; `isFindingWorthy` never matches a
-     * `not-applicable` judgment, so `findings: []`.
+     * Every `.applicable` noul answer is `0.1` — below `applicabilityMin` of
+     * `0.5`, shared unchanged by `CLASSIFICATION_POLICY_V1` and the shipped
+     * `CLASSIFICATION_POLICY_V2` — so every one of RUBRIC_V1's 7 dimensions is
+     * judged `not-applicable` and its `.quality` score/probabilities are never
+     * read (the score answers below are structurally valid but their value
+     * never matters). Walking `classifyEvaluation`'s branches by hand for this
+     * fixed input: every dimension takes the `applicabilityProbability <
+     * policy.applicabilityMin` branch of `judgeDimensionV2` (`status:
+     * 'not-applicable'`, `applicable: false`, `level`/`score`/`confidence`/
+     * `reason`/`probabilities`/masses all `undefined` and so dropped by
+     * `JSON.stringify`) — identical to `judgeDimensionV1`'s same-named branch,
+     * since task C-1 does not touch applicability; `classifyOverall` then sees
+     * zero `applicableDimensions`, which is the `applicableDimensions.length
+     * === 0` branch, giving the overall `status: 'needs-review'`;
+     * `isFindingWorthy` never matches a `not-applicable` judgment, so
+     * `findings: []`. This golden therefore stays green across the V1→V2
+     * production wiring switch except for `policyVersion` itself.
      */
     function fixedAnswersGateway(): JevGatewayPort {
       return {
@@ -904,7 +909,7 @@ describe('--evaluate', () => {
           + '{"dimensionId":"falsifiability","dimensionLabel":"Falsifiability","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
           + '{"dimensionId":"refactor-resistance","dimensionLabel":"Refactor resistance","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
           + '{"dimensionId":"test-double-quality","dimensionLabel":"Test-double quality","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"}],'
-          + '"findings":[],"policyVersion":1,"rubricVersion":1,'
+          + '"findings":[],"policyVersion":2,"rubricVersion":1,'
           + '"model":{"requested":"jev-1.13.0","responded":"jev-1.13.0","matchesPin":true},'
           + '"usage":{"inputTokens":100,"outputTokens":0},'
           + '"evidence":{"fragments":0,"truncatedFragments":0,"denied":0,"unresolved":0,"omitted":0}}],'
@@ -929,33 +934,50 @@ describe('--evaluate', () => {
      * case exercise the per-test `evidence` provenance lookup, and
      * `usage`/`respondedModel` prove run-level accumulation.
      *
-     * Hand-derivation (`CLASSIFICATION_POLICY_V1`: `applicabilityMin` 0.5,
-     * `confidenceMin` 0.6, `levelCutPoints` [1, 2, 3]):
+     * Hand-derivation (shipped `CLASSIFICATION_POLICY_V2`: `applicabilityMin`
+     * 0.5 — unchanged from V1 — `sideMin` 0.65, `criticalMin` 0.5,
+     * `levelCutPoints` [1, 2, 3] consulted only for the acceptable/strong
+     * split; `confidence` is no longer read as a gate at all, only carried
+     * through for transparency):
      *
      * "misleading case" — only `falsifiability` and `behavioral-focus` are
-     * applicable (noul 0.9 each, confidence 0.9, above both thresholds); the
-     * other five dimensions get noul 0.1 (`not-applicable`).
-     *   - `falsifiability` score 0 → `levelForScore`: `0 < levelCutPoints[0]
-     *     (1)` → `misleading`.
-     *   - `behavioral-focus` score 3 → not `< 1`, not `< 2`, not `< 3` →
-     *     `strong`.
+     * applicable (noul 0.9 each, above `applicabilityMin`); the other five
+     * dimensions get noul 0.1 (`not-applicable`).
+     *   - `falsifiability` probabilities `{0: 0.85, 1: 0.1, 2: 0.03, 3:
+     *     0.02}` → `deficientMass = 0.85 + 0.1 = 0.95` (>= `sideMin` 0.65) →
+     *     deficient; `criticalMass = 0.85` (>= `criticalMin` 0.5) →
+     *     `misleading`.
+     *   - `behavioral-focus` probabilities `{0: 0.01, 1: 0.01, 2: 0.08, 3:
+     *     0.9}` → `acceptableMass = 0.08 + 0.9 = 0.98` (>= `sideMin`) →
+     *     acceptable; score 3 → `levelForScore` gives `strong`, and the
+     *     acceptable-side clamp keeps `strong` (already in `{acceptable,
+     *     strong}`).
      *   - `classifyOverall`: judged dimensions are [`behavioral-focus`
      *     strong, `falsifiability` misleading]; `criticalLevel` is
      *     `misleading`, and one judged dimension is at that level, so the
      *     overall status is `misleading` BEFORE anything else is inspected —
-     *     `behavioral-focus`'s `strong` never gets a chance to compensate.
+     *     `behavioral-focus`'s `strong` never gets a chance to compensate
+     *     (the non-compensatory rule holds identically under V2).
      *   - `isFindingWorthy`: only the judged `misleading` `falsifiability`
      *     dimension qualifies; `strong` and `not-applicable` dimensions
-     *     never do. `findings` has exactly one entry.
+     *     never do. `findings` has exactly one entry, now also carrying
+     *     `probabilities`/`deficientMass`/`acceptableMass`/`criticalMass`
+     *     (task C-1's per-dimension audit trail).
      *   - Evidence bundle: 1 fragment, nothing else → `evidence: {fragments:
      *     1, truncatedFragments: 0, denied: 0, unresolved: 0, omitted: 0}`.
      *   - Usage fixed at `{inputTokens: 150, outputTokens: 2}`.
      *
-     * "healthy case" — only `assertion-strength` (noul 0.8, score 2,
-     * confidence 0.8) and `diagnostic-quality` (noul 0.95, score 3,
-     * confidence 0.95) are applicable; the other five get noul 0.1.
-     *   - `assertion-strength` score 2 → not `< 1`, not `< 2` → `acceptable`.
-     *   - `diagnostic-quality` score 3 → `strong` (same as above).
+     * "healthy case" — only `assertion-strength` (noul 0.8) and
+     * `diagnostic-quality` (noul 0.95) are applicable; the other five get
+     * noul 0.1.
+     *   - `assertion-strength` probabilities `{0: 0.02, 1: 0.03, 2: 0.75, 3:
+     *     0.2}` → `acceptableMass = 0.75 + 0.2 = 0.95` (>= `sideMin`) →
+     *     acceptable; score 2 → `levelForScore` gives `acceptable` (`2 <
+     *     levelCutPoints[2]` (3)), so the clamp reports `acceptable`, not
+     *     `strong`.
+     *   - `diagnostic-quality` probabilities `{0: 0.01, 1: 0.01, 2: 0.08, 3:
+     *     0.9}` → `acceptableMass = 0.98`; score 3 → `strong` (same
+     *     distribution and reasoning as `behavioral-focus` above).
      *   - `classifyOverall`: judged dimensions are [`assertion-strength`
      *     acceptable, `diagnostic-quality` strong] — no `misleading`, no
      *     `weak`, at least one applicable dimension, none `needs-review`,
@@ -971,11 +993,15 @@ describe('--evaluate', () => {
      * 150 + 90 = 240, outputTokens: 2 + 1 = 3}`, `statusCounts: {healthy: 1,
      * misleading: 1, weak: 0, needs-review: 0}`, `respondedModel` taken from
      * the first entry in submission order ("misleading case", index 0) —
-     * `jev-1.13.0`, matching the pin, so `modelMismatches: 0`. Every one of
-     * these values was independently confirmed by actually running this
-     * exact scenario through the real pipeline in a throwaway scratch test
-     * before being pinned below (scratch file discarded afterward), so this
-     * literal is not hand-typed guesswork.
+     * `jev-1.13.0`, matching the pin, so `modelMismatches: 0`.
+     *
+     * Every mass and level above was independently computed by hand (see
+     * this task's writer report) AND cross-checked by running this exact
+     * scenario through the real, compiled `classifyEvaluation` with
+     * `CLASSIFICATION_POLICY_V2` before this literal was pinned — so the
+     * literal below is a verified transcription of a real run, not
+     * hand-typed guesswork or a value copied from the code without
+     * independently checking it against the math above.
      */
     it(
       'prints a second literal golden JSON line for a realistic mixed evaluation: one test case driven to misleading by a '
@@ -988,13 +1014,23 @@ describe('--evaluate', () => {
         function noul(probability: number): JevAnswer {
           return { type: 'noul', probability, raw: { type: 'noul', noul: probability } };
         }
-        function scoreAnswer(value: number, confidence: number): JevAnswer {
+        /**
+         * `probabilities` is now an explicit parameter (task C-1): the shipped
+         * `CLASSIFICATION_POLICY_V2` decides deficient/acceptable from the
+         * distribution, not from `score`/`confidence` alone, so a fixture that
+         * wants a specific level under V2 must supply a distribution that
+         * actually clears `sideMin` (0.65) on the intended side — a single
+         * fixed distribution reused for every `value` (as this fixture did
+         * under V1, since V1 never reads `probabilities`) would no longer
+         * produce the intended levels.
+         */
+        function scoreAnswer(value: number, confidence: number, probabilities: Record<string, number>): JevAnswer {
           const legend = { '0': 'Misleading', '1': 'Weak', '2': 'Acceptable', '3': 'Strong' };
-          const probabilities = { '0': 0.1, '1': 0.1, '2': 0.3, '3': 0.5 };
           return { type: 'score', score: value, legend, probabilities, confidence, raw: { type: 'score', score: value, legend, probabilities, confidence } };
         }
         const NOT_APPLICABLE = noul(0.1);
-        const IRRELEVANT_SCORE = scoreAnswer(0, 0.9);
+        /** Never read (every dimension using this is `not-applicable`), so its distribution is arbitrary. */
+        const IRRELEVANT_SCORE = scoreAnswer(0, 0.9, { '0': 0.1, '1': 0.1, '2': 0.3, '3': 0.5 });
 
         function mixedAnswersGateway(): JevGatewayPort {
           return {
@@ -1005,16 +1041,20 @@ describe('--evaluate', () => {
                 const [dimensionId, questionKind] = questionId.split('.');
                 if (isMisleadingCase) {
                   if (dimensionId === 'falsifiability') {
-                    answers[questionId] = questionKind === 'applicable' ? noul(0.9) : scoreAnswer(0, 0.9);
+                    // deficientMass 0.95 (>= sideMin 0.65), criticalMass 0.85 (>= criticalMin 0.5) -> misleading.
+                    answers[questionId] = questionKind === 'applicable' ? noul(0.9) : scoreAnswer(0, 0.9, { '0': 0.85, '1': 0.1, '2': 0.03, '3': 0.02 });
                   } else if (dimensionId === 'behavioral-focus') {
-                    answers[questionId] = questionKind === 'applicable' ? noul(0.9) : scoreAnswer(3, 0.9);
+                    // acceptableMass 0.98 (>= sideMin), score 3 -> strong.
+                    answers[questionId] = questionKind === 'applicable' ? noul(0.9) : scoreAnswer(3, 0.9, { '0': 0.01, '1': 0.01, '2': 0.08, '3': 0.9 });
                   } else {
                     answers[questionId] = questionKind === 'applicable' ? NOT_APPLICABLE : IRRELEVANT_SCORE;
                   }
                 } else if (dimensionId === 'assertion-strength') {
-                  answers[questionId] = questionKind === 'applicable' ? noul(0.8) : scoreAnswer(2, 0.8);
+                  // acceptableMass 0.95 (>= sideMin), score 2 -> acceptable (not strong: score < levelCutPoints[2]).
+                  answers[questionId] = questionKind === 'applicable' ? noul(0.8) : scoreAnswer(2, 0.8, { '0': 0.02, '1': 0.03, '2': 0.75, '3': 0.2 });
                 } else if (dimensionId === 'diagnostic-quality') {
-                  answers[questionId] = questionKind === 'applicable' ? noul(0.95) : scoreAnswer(3, 0.95);
+                  // acceptableMass 0.98 (>= sideMin), score 3 -> strong.
+                  answers[questionId] = questionKind === 'applicable' ? noul(0.95) : scoreAnswer(3, 0.95, { '0': 0.01, '1': 0.01, '2': 0.08, '3': 0.9 });
                 } else {
                   answers[questionId] = questionKind === 'applicable' ? NOT_APPLICABLE : IRRELEVANT_SCORE;
                 }
@@ -1131,26 +1171,31 @@ describe('--evaluate', () => {
           + '"respondedModel":"jev-1.13.0","modelMismatches":0},'
           + '"classifications":[{"testCaseId":"tc:v1:misleading-case","repositoryRelativePath":"mixed.test.ts","name":"misleading case","status":"misleading",'
           + '"dimensions":[{"dimensionId":"assertion-strength","dimensionLabel":"Assertion strength","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
-          + '{"dimensionId":"behavioral-focus","dimensionLabel":"Behavioral focus","applicable":true,"applicabilityProbability":0.9,"level":"strong","score":3,"confidence":0.9,"status":"judged"},'
+          + '{"dimensionId":"behavioral-focus","dimensionLabel":"Behavioral focus","applicable":true,"applicabilityProbability":0.9,"level":"strong","score":3,"confidence":0.9,"status":"judged",'
+          + '"probabilities":{"0":0.01,"1":0.01,"2":0.08,"3":0.9},"deficientMass":0.02,"acceptableMass":0.98,"criticalMass":0.01},'
           + '{"dimensionId":"determinism-isolation","dimensionLabel":"Determinism and isolation","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
           + '{"dimensionId":"diagnostic-quality","dimensionLabel":"Diagnostic quality","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
-          + '{"dimensionId":"falsifiability","dimensionLabel":"Falsifiability","applicable":true,"applicabilityProbability":0.9,"level":"misleading","score":0,"confidence":0.9,"status":"judged"},'
+          + '{"dimensionId":"falsifiability","dimensionLabel":"Falsifiability","applicable":true,"applicabilityProbability":0.9,"level":"misleading","score":0,"confidence":0.9,"status":"judged",'
+          + '"probabilities":{"0":0.85,"1":0.1,"2":0.03,"3":0.02},"deficientMass":0.95,"acceptableMass":0.05,"criticalMass":0.85},'
           + '{"dimensionId":"refactor-resistance","dimensionLabel":"Refactor resistance","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
           + '{"dimensionId":"test-double-quality","dimensionLabel":"Test-double quality","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"}],'
-          + '"findings":[{"testCaseId":"tc:v1:misleading-case","repositoryRelativePath":"mixed.test.ts","name":"misleading case","dimensionId":"falsifiability","dimensionLabel":"Falsifiability","level":"misleading","score":0,"confidence":0.9,"applicabilityProbability":0.9,"status":"judged"}],'
-          + '"policyVersion":1,"rubricVersion":1,'
+          + '"findings":[{"testCaseId":"tc:v1:misleading-case","repositoryRelativePath":"mixed.test.ts","name":"misleading case","dimensionId":"falsifiability","dimensionLabel":"Falsifiability","level":"misleading","score":0,"confidence":0.9,"applicabilityProbability":0.9,"status":"judged",'
+          + '"probabilities":{"0":0.85,"1":0.1,"2":0.03,"3":0.02},"deficientMass":0.95,"acceptableMass":0.05,"criticalMass":0.85}],'
+          + '"policyVersion":2,"rubricVersion":1,'
           + '"model":{"requested":"jev-1.13.0","responded":"jev-1.13.0","matchesPin":true},'
           + '"usage":{"inputTokens":150,"outputTokens":2},'
           + '"evidence":{"fragments":1,"truncatedFragments":0,"denied":0,"unresolved":0,"omitted":0}},'
           + '{"testCaseId":"tc:v1:healthy-case","repositoryRelativePath":"mixed.test.ts","name":"healthy case","status":"healthy",'
-          + '"dimensions":[{"dimensionId":"assertion-strength","dimensionLabel":"Assertion strength","applicable":true,"applicabilityProbability":0.8,"level":"acceptable","score":2,"confidence":0.8,"status":"judged"},'
+          + '"dimensions":[{"dimensionId":"assertion-strength","dimensionLabel":"Assertion strength","applicable":true,"applicabilityProbability":0.8,"level":"acceptable","score":2,"confidence":0.8,"status":"judged",'
+          + '"probabilities":{"0":0.02,"1":0.03,"2":0.75,"3":0.2},"deficientMass":0.05,"acceptableMass":0.95,"criticalMass":0.02},'
           + '{"dimensionId":"behavioral-focus","dimensionLabel":"Behavioral focus","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
           + '{"dimensionId":"determinism-isolation","dimensionLabel":"Determinism and isolation","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
-          + '{"dimensionId":"diagnostic-quality","dimensionLabel":"Diagnostic quality","applicable":true,"applicabilityProbability":0.95,"level":"strong","score":3,"confidence":0.95,"status":"judged"},'
+          + '{"dimensionId":"diagnostic-quality","dimensionLabel":"Diagnostic quality","applicable":true,"applicabilityProbability":0.95,"level":"strong","score":3,"confidence":0.95,"status":"judged",'
+          + '"probabilities":{"0":0.01,"1":0.01,"2":0.08,"3":0.9},"deficientMass":0.02,"acceptableMass":0.98,"criticalMass":0.01},'
           + '{"dimensionId":"falsifiability","dimensionLabel":"Falsifiability","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
           + '{"dimensionId":"refactor-resistance","dimensionLabel":"Refactor resistance","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
           + '{"dimensionId":"test-double-quality","dimensionLabel":"Test-double quality","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"}],'
-          + '"findings":[],"policyVersion":1,"rubricVersion":1,'
+          + '"findings":[],"policyVersion":2,"rubricVersion":1,'
           + '"model":{"requested":"jev-1.13.0","responded":"jev-1.13.0","matchesPin":true},'
           + '"usage":{"inputTokens":90,"outputTokens":1},'
           + '"evidence":{"fragments":2,"truncatedFragments":1,"denied":1,"unresolved":1,"omitted":1}}],'
