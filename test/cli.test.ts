@@ -1,4 +1,5 @@
 import { access, chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -1451,7 +1452,8 @@ describe('SQLite audit store (Phase 5, task P5-1)', () => {
     });
 
     expect(exitCode).toBe(0);
-    expect(workItems).toBe(1);
+    // pending + running + completed (Phase 5, task P5-3) for the fixture's one evaluable test case.
+    expect(workItems).toBe(3);
     expect(closed).toBe(true);
     // The production store was never constructed, so no real database file exists.
     const storePaths = resolveAuditStorePaths();
@@ -1501,7 +1503,20 @@ describe('SQLite audit store (Phase 5, task P5-1)', () => {
 
       const storePaths = resolveAuditStorePaths();
       const raw = await readFile(storePaths.databaseFile);
-      expect(raw.toString('latin1')).not.toContain(canaryKey);
+      const rawText = raw.toString('latin1');
+      // Prove the scan is not vacuous before trusting it. Since P5-3 the store runs in WAL mode,
+      // so a committed row lives in the `-wal` sidecar until the last connection closes and
+      // checkpoints it into this file. `runCli` does close the store, which is exactly why this
+      // assertion holds — but if that ever stops happening, the key scan below would pass against
+      // a nearly empty file and prove nothing. This makes that failure visible instead of silent.
+      expect(rawText).toContain('work_items');
+      expect(rawText).not.toContain(canaryKey);
+      // Any sidecar that survived (an uncheckpointed WAL, or its shared-memory index) is part of
+      // the on-disk store too, so it is held to the same guarantee rather than left unscanned.
+      for (const sidecar of [`${storePaths.databaseFile}-wal`, `${storePaths.databaseFile}-shm`]) {
+        if (!existsSync(sidecar)) continue;
+        expect((await readFile(sidecar)).toString('latin1')).not.toContain(canaryKey);
+      }
       expect(output.lines.join('\n')).not.toContain(canaryKey);
     } finally {
       if (savedKey === undefined) delete process.env['TYPESAFE_API_KEY']; else process.env['TYPESAFE_API_KEY'] = savedKey;

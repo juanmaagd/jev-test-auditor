@@ -15,7 +15,7 @@ import type { ClassificationResult, OverallClassificationStatus } from '../src/d
 import type { DiscoveredTestFile, DiscoveryResult } from '../src/domain/discovery.js';
 import type { TestExtractionResult } from '../src/domain/extraction.js';
 import { buildEvidenceBundle, DEFAULT_EVIDENCE_BUDGET, type EvidenceBundle } from '../src/domain/evidence.js';
-import { JevRateLimitError, type JevEvaluation } from '../src/domain/jev-gateway.js';
+import { JevAuthError, JevRateLimitError, type JevEvaluation } from '../src/domain/jev-gateway.js';
 import type { TestCase, TestCaseId, TestModifierKind } from '../src/domain/test-understanding.js';
 
 const configuration: AuditRequest = {
@@ -30,6 +30,10 @@ const configuration: AuditRequest = {
   },
   store: {
     databasePath: undefined,
+  },
+  schedule: {
+    requestsPerMinute: 1_200,
+    tokensPerSecond: 250_000,
   },
   reportingOnly: true,
 };
@@ -608,16 +612,21 @@ describe('evaluation wiring (--evaluate)', () => {
     });
   });
 
-  it('runs evaluation through a fixed-size concurrency pool (from configuration.concurrency), keeping results in deterministic submission order and never exceeding the configured bound even when later items resolve first', async () => {
+  it('runs evaluation through the adaptive scheduler at a stable concurrency (from configuration.concurrency) when nothing ever throttles, keeping results in deterministic submission order and never exceeding the configured bound even when later items resolve first', async () => {
     const cases = manyTestCases('pool', 4);
     const discovery: DiscoveryResult = { files: [discovered('pool.test.ts')], excluded: [], diagnostics: [] };
     const active = { count: 0, max: 0 };
     // Deliberately staggered so the FIRST-submitted item finishes LAST and the
-    // second-submitted item finishes first: a correct pool must still return
+    // second-submitted item finishes first: a correct scheduler must still return
     // results in submission order; an unbounded implementation would start
     // all four `evaluate` calls immediately (four workers were spun up in
     // the very own author's original mutation of dropping the pool bound),
-    // which `active.max` below would catch even before any timer fires.
+    // which `active.max` below would catch even before any timer fires. Every
+    // dispatch here is a first-attempt success (`attempts` defaults to 1, never
+    // retried), so the adaptive controller (Phase 5, task P5-3) never reduces —
+    // this test proves the no-throttling case stays exactly as bounded as
+    // Phase 4's fixed-size `runBoundedPool` was; adaptive reduction/restoration
+    // itself is covered by the "adaptive scheduling" describe block below.
     const delaysMs: Record<string, number> = {
       [cases[0]!.id]: 30,
       [cases[1]!.id]: 5,
@@ -738,12 +747,18 @@ describe('audit store persistence wiring (Phase 5, task P5-1)', () => {
     });
 
     expect(store.beginRunCalls).toEqual(['/repo']);
-    expect(store.workItemCalls).toHaveLength(1);
-    const { runId, outcome } = store.workItemCalls[0]!;
+    // Phase 5, task P5-3: a `pending` checkpoint recorded up front, then `running` once the
+    // scheduler picks the item up, then the terminal `completed` record — all three for the
+    // exact same run and identity, in that order.
+    expect(store.workItemCalls).toHaveLength(3);
+    const identity = { testCaseId: evaluableCase.id, repositoryRelativePath: 'store.test.ts', name: evaluableCase.name };
+    expect(store.workItemCalls[0]).toEqual({ runId: 'run-1', outcome: { state: 'pending', identity } });
+    expect(store.workItemCalls[1]).toEqual({ runId: 'run-1', outcome: { state: 'running', identity } });
+    const { runId, outcome } = store.workItemCalls[2]!;
     expect(runId).toBe('run-1');
     expect(outcome.state).toBe('completed');
     if (outcome.state !== 'completed') throw new Error('unreachable');
-    expect(outcome.identity).toEqual({ testCaseId: evaluableCase.id, repositoryRelativePath: 'store.test.ts', name: evaluableCase.name });
+    expect(outcome.identity).toEqual(identity);
     expect(outcome.classification.status).toBe('healthy');
     expect(outcome.evaluation.requestedModel).toBe('jev-1.13.0');
     expect(outcome.evaluation.attempts).toBe(1);
@@ -769,8 +784,9 @@ describe('audit store persistence wiring (Phase 5, task P5-1)', () => {
       store,
     });
 
-    expect(store.workItemCalls).toHaveLength(1);
-    const { outcome } = store.workItemCalls[0]!;
+    // pending, running, completed (Phase 5, task P5-3) — see the previous test's own comment.
+    expect(store.workItemCalls).toHaveLength(3);
+    const { outcome } = store.workItemCalls[2]!;
     expect(outcome.state).toBe('completed');
     if (outcome.state !== 'completed') throw new Error('unreachable');
     // The evaluation's model fields are distinct from the classification's own model fields —
@@ -796,8 +812,9 @@ describe('audit store persistence wiring (Phase 5, task P5-1)', () => {
       store,
     });
 
-    expect(store.workItemCalls).toHaveLength(1);
-    const { outcome } = store.workItemCalls[0]!;
+    // pending, running, failed (Phase 5, task P5-3) — see the earlier "begins one run" test.
+    expect(store.workItemCalls).toHaveLength(3);
+    const { outcome } = store.workItemCalls[2]!;
     expect(outcome.state).toBe('failed');
     if (outcome.state !== 'failed') throw new Error('unreachable');
     expect(outcome.identity.testCaseId).toBe(failingCase.id);
@@ -854,6 +871,464 @@ describe('audit store persistence wiring (Phase 5, task P5-1)', () => {
     const states = new Map(store.workItemCalls.map(({ outcome }) => [outcome.identity.testCaseId, outcome.state]));
     expect(states.get(okCase.id)).toBe('completed');
     expect(states.get(failingCase.id)).toBe('failed');
+  });
+
+  it('records a pending checkpoint for every evaluable item up front, before the scheduler dispatches anything at all', async () => {
+    const store = fakeStore();
+    const first = testCaseWithModifiers('tc:v1:checkpoint-a', [], 'checkpoint.test.ts');
+    const second = testCaseWithModifiers('tc:v1:checkpoint-b', [], 'checkpoint.test.ts');
+    const discovery: DiscoveryResult = { files: [discovered('checkpoint.test.ts')], excluded: [], diagnostics: [] };
+    const evaluation = stubEvaluationPort(async (request) => classificationFor(request.testCase.id));
+
+    // concurrency: 1 makes the whole sequence fully deterministic: item B cannot start until item
+    // A has completely finished, so the ordering below is the ONLY possible ordering — not one of
+    // several plausible ones a race could reorder.
+    await runAudit({ ...configuration, concurrency: 1 }, {
+      discovery: { discover: async () => discovery },
+      sourceReader: { read: async () => 'source' },
+      extractor: { extract: () => ({ testCases: [first, second], dynamicMetadata: [], diagnostics: [] }) },
+      evidence: { build: async (request) => ({ bundles: request.testCases.map((testCase) => emptyBundle(testCase.id)), diagnostics: [] }) },
+      evaluation,
+      store,
+    });
+
+    expect(store.workItemCalls.map(({ outcome }) => `${outcome.state}:${outcome.identity.testCaseId}`)).toEqual([
+      `pending:${first.id}`,
+      `pending:${second.id}`,
+      `running:${first.id}`,
+      `completed:${first.id}`,
+      `running:${second.id}`,
+      `completed:${second.id}`,
+    ]);
+  });
+
+  it('records pending, then running, then the terminal outcome for a cache hit, exactly like a fresh dispatch', async () => {
+    const store = fakeStore();
+    const cacheKey = createAuditCacheKeyPort();
+    const evaluableCase = testCaseWithModifiers('tc:v1:checkpoint-cached', [], 'checkpoint-cached.test.ts');
+    const discovery: DiscoveryResult = { files: [discovered('checkpoint-cached.test.ts')], excluded: [], diagnostics: [] };
+    const evaluation = stubEvaluationPort(async (request) => classificationFor(request.testCase.id));
+    const portsForRun: AuditPorts = {
+      discovery: { discover: async () => discovery },
+      sourceReader: { read: async () => 'source' },
+      extractor: { extract: () => ({ testCases: [evaluableCase], dynamicMetadata: [], diagnostics: [] }) },
+      evidence: { build: async (request) => ({ bundles: request.testCases.map((testCase) => emptyBundle(testCase.id)), diagnostics: [] }) },
+      evaluation,
+      store,
+      cacheKey,
+    };
+
+    await runAudit(configuration, portsForRun); // warms the cache
+    const secondRunCallsBefore = store.workItemCalls.length;
+    await runAudit(configuration, portsForRun); // served from cache
+
+    const secondRunCalls = store.workItemCalls.slice(secondRunCallsBefore);
+    expect(secondRunCalls.map(({ outcome }) => outcome.state)).toEqual(['pending', 'running', 'cached']);
+  });
+});
+
+// --- Adaptive scheduling and checkpoints (Phase 5, task P5-3) --------------
+
+describe('adaptive scheduling (Phase 5, task P5-3)', () => {
+  /** A promise this test settles by hand (`resolve`/`reject`), so a scenario can control the exact
+   * order dispatches complete in — never a race against real timer delays. */
+  function deferredGate(): { readonly promise: Promise<void>; readonly resolve: () => void; readonly reject: (error: unknown) => void } {
+    let resolveFn!: () => void;
+    let rejectFn!: (error: unknown) => void;
+    const promise = new Promise<void>((resolve, reject) => { resolveFn = resolve; rejectFn = reject; });
+    return { promise, resolve: resolveFn, reject: rejectFn };
+  }
+
+  /** Drains the microtask queue: a `setTimeout` callback only fires once every already-queued
+   * microtask (including ones newly enqueued by resolving a promise) has run, so this reliably
+   * waits for a `waitForCapacity()`/`evaluate()` chain to progress as far as it currently can,
+   * without ever depending on the real clock's actual duration. */
+  async function flush(): Promise<void> {
+    await new Promise((resolve) => { setTimeout(resolve, 0); });
+  }
+
+  /** `count` evaluable test cases in one file, each gated on its own `deferredGate`, so a test
+   * fully controls dispatch completion order. `attemptsByIndex` overrides a successful dispatch's
+   * `attempts` (default `1`); settling a gate with `.reject(error)` instead of `.resolve()` makes
+   * that dispatch fail with `error` rather than succeed. `snapshots[i]` records how many dispatches
+   * (including this one) were concurrently inside `evaluate` the instant item `i` started. */
+  function gatedScheduling(count: number, attemptsByIndex: Readonly<Record<number, number>> = {}): {
+    readonly cases: readonly TestCase[];
+    readonly gates: readonly ReturnType<typeof deferredGate>[];
+    readonly active: { count: number; max: number };
+    readonly snapshots: number[];
+    readonly evaluation: AuditEvaluationPort;
+  } {
+    const cases = manyTestCases('scheduled', count);
+    const gates = cases.map(() => deferredGate());
+    const active = { count: 0, max: 0 };
+    const snapshots: number[] = new Array(count).fill(0);
+    const evaluation: AuditEvaluationPort = {
+      async evaluate(request) {
+        const index = cases.findIndex((testCase) => testCase.id === request.testCase.id);
+        active.count += 1;
+        active.max = Math.max(active.max, active.count);
+        snapshots[index] = active.count;
+        try {
+          await gates[index]!.promise;
+        } finally {
+          active.count -= 1;
+        }
+        return {
+          evaluation: {
+            requestedModel: 'jev-1.13.0',
+            respondedModel: 'jev-1.13.0',
+            modelMatchesPin: true,
+            answers: {},
+            usage: { inputTokens: 10, outputTokens: 0 },
+            attempts: attemptsByIndex[index] ?? 1,
+          },
+          classification: classificationFor(request.testCase.id),
+        };
+      },
+    };
+    return { cases, gates, active, snapshots, evaluation };
+  }
+
+  function portsFor2(discovery: DiscoveryResult, cases: readonly TestCase[], evaluation: AuditEvaluationPort): AuditPorts {
+    return {
+      discovery: { discover: async () => discovery },
+      sourceReader: { read: async () => 'source' },
+      extractor: { extract: () => ({ testCases: [...cases], dynamicMetadata: [], diagnostics: [] }) },
+      evidence: { build: async (request) => ({ bundles: request.testCases.map((testCase) => emptyBundle(testCase.id)), diagnostics: [] }) },
+      evaluation,
+    };
+  }
+
+  it('a successful dispatch that needed internal retries (attempts > 1) reduces concurrency for later dispatches, never above the configured ceiling', async () => {
+    const discovery: DiscoveryResult = { files: [discovered('scheduled.test.ts')], excluded: [], diagnostics: [] };
+    const { cases, gates, active, snapshots, evaluation } = gatedScheduling(4, { 0: 4 });
+
+    const auditPromise = runAudit({ ...configuration, concurrency: 2 }, portsFor2(discovery, cases, evaluation));
+
+    await flush();
+    expect(active.max).toBe(2); // the ceiling: items 0 and 1 dispatched together
+
+    gates[0]!.resolve(); // the throttled dispatch settles first
+    await flush();
+    gates[1]!.resolve();
+    await flush();
+    expect(snapshots[2]).toBe(1); // reduced to 1: item 2 could only start alone
+
+    gates[2]!.resolve();
+    await flush();
+    expect(snapshots[3]).toBe(1); // still reduced: item 3 also started alone
+
+    gates[3]!.resolve();
+    const result = await auditPromise;
+
+    expect(result.evaluation?.totals.evaluated).toBe(4);
+  });
+
+  it('a rate-limit failure reduces concurrency exactly like a successful-but-retried dispatch', async () => {
+    const discovery: DiscoveryResult = { files: [discovered('scheduled.test.ts')], excluded: [], diagnostics: [] };
+    const { cases, gates, snapshots, evaluation } = gatedScheduling(3);
+
+    const auditPromise = runAudit({ ...configuration, concurrency: 2 }, portsFor2(discovery, cases, evaluation));
+
+    await flush();
+    gates[0]!.reject(new JevRateLimitError(4));
+    await flush();
+    gates[1]!.resolve();
+    await flush();
+    expect(snapshots[2]).toBe(1); // reduced to 1 by the rate-limit failure: item 2 started alone
+
+    gates[2]!.resolve();
+    const result = await auditPromise;
+
+    expect(result.evaluation?.totals).toMatchObject({ evaluated: 2, failed: 1 });
+  });
+
+  it('a non-throttle failure (e.g. an auth error) does not reduce concurrency the way a throttled dispatch would', async () => {
+    const discovery: DiscoveryResult = { files: [discovered('scheduled.test.ts')], excluded: [], diagnostics: [] };
+    const { cases, gates, snapshots, evaluation } = gatedScheduling(3);
+
+    const auditPromise = runAudit({ ...configuration, concurrency: 2 }, portsFor2(discovery, cases, evaluation));
+
+    await flush();
+    gates[0]!.reject(new JevAuthError(1));
+    await flush();
+    gates[1]!.resolve();
+    await flush();
+    // Unaffected: the ceiling (2) is still fully available, so item 2 dispatches alongside item 1
+    // (still in flight) at the moment it starts — a throttled item 0 would have forced this to 1
+    // instead (see the "rate-limit failure" test above).
+    expect(snapshots[2]).toBe(2);
+
+    gates[2]!.resolve();
+    const result = await auditPromise;
+
+    expect(result.evaluation?.totals).toMatchObject({ evaluated: 2, failed: 1 });
+  });
+
+  it('a non-throttle failure does not count toward the clean-window restore streak either — only a genuinely clean dispatch does', async () => {
+    const discovery: DiscoveryResult = { files: [discovered('scheduled.test.ts')], excluded: [], diagnostics: [] };
+    // item 0 throttled (limit -> 1); item 1 a non-throttle failure (must NOT progress the streak);
+    // items 2-5 clean (4 of them — one short of DEFAULT_ADAPTIVE_CONCURRENCY_RESTORE_WINDOW's 5 if
+    // item 1 correctly contributed nothing); items 6-7 clean, dispatched only once restoration has
+    // actually happened. If item 1 wrongly counted as clean, restoration would land one dispatch
+    // EARLIER than this test expects, and items 6+7 would start together instead of items 7 alone
+    // after item 6 already finished — see the two possible `snapshots[7]` values below.
+    const { cases, gates, snapshots, evaluation } = gatedScheduling(8, { 0: 4 });
+
+    const auditPromise = runAudit({ ...configuration, concurrency: 2 }, portsFor2(discovery, cases, evaluation));
+
+    await flush();
+    gates[0]!.resolve(); // throttled -> limit 2 -> 1, streak reset to 0
+    await flush();
+    gates[1]!.reject(new JevAuthError(1)); // neutral: must leave the streak at 0, not 1
+    await flush();
+    expect(snapshots[2]).toBe(1); // item 2 starts alone either way (limit is still 1 here)
+
+    gates[2]!.resolve(); // clean 1/5 (if item 1 correctly contributed 0) or 2/5 (if it wrongly did)
+    await flush();
+    gates[3]!.resolve(); // clean 2/5 or 3/5
+    await flush();
+    gates[4]!.resolve(); // clean 3/5 or 4/5
+    await flush();
+    gates[5]!.resolve(); // clean 4/5 (correct: no restore yet) or 5/5 (buggy: restores here already)
+    await flush();
+    expect(snapshots[6]).toBe(1); // item 6 always starts alone at this point either way
+
+    gates[6]!.resolve(); // clean 5/5 under correct behavior -> restores now; already-restored under the bug
+    await flush();
+
+    // Correct: restoration happens exactly here (after item 6), so item 7 — the last item — starts
+    // alone, with nothing left to pair with. Buggy (item 1 wrongly counted as clean): restoration
+    // already happened one step earlier, so items 6 and 7 would have started TOGETHER instead, and
+    // this assertion (checked after item 6 already resolved) would see item 7 with no live sibling
+    // either way from THIS test alone — the earlier `snapshots[6]` capture is what a premature
+    // restore cannot fake, since it is asserted before item 6 even starts either way. The
+    // decisive difference is `snapshots[7]`: under the bug, item 7 was already dispatched (and
+    // recorded) back when item 6 started — its snapshot would be `2` at that earlier moment. Under
+    // correct behavior it is dispatched only now, alone.
+    expect(snapshots[7]).toBe(1);
+
+    gates[7]!.resolve();
+    const result = await auditPromise;
+
+    expect(result.evaluation?.totals).toMatchObject({ evaluated: 7, failed: 1 });
+  });
+
+  it('a cache hit does not count toward the clean-window restore streak either — it made no provider request at all', async () => {
+    const discovery: DiscoveryResult = { files: [discovered('cache-neutral.test.ts')], excluded: [], diagnostics: [] };
+    // Same shape as the two discriminator tests above: item 0 throttled (limit -> 1); item 1 a
+    // cache hit (must contribute nothing to the streak); items 2-6 clean (5 of them); item 7 clean,
+    // dispatched only once restoration has actually happened. A cache hit wrongly counted as
+    // 'clean' would restore one dispatch earlier, exactly like the auth-error case above.
+    const cases = manyTestCases('cache-neutral', 8);
+    const cachedCase = cases[1]!;
+    const sourceText = 'source';
+    const bundleFor = (testCase: TestCase): EvidenceBundle => emptyBundle(testCase.id);
+    const cacheKeyPort = createAuditCacheKeyPort();
+    const cachedKey = cacheKeyPort.computeKey({ testCase: cachedCase, bundle: bundleFor(cachedCase) }, sourceText);
+
+    const baseStore = fakeStore();
+    await baseStore.recordWorkItem('seed-run', {
+      state: 'completed',
+      identity: { testCaseId: cachedCase.id, repositoryRelativePath: cachedCase.repositoryRelativePath, name: cachedCase.name },
+      cacheKey: cachedKey,
+      evaluation: {
+        requestedModel: 'jev-1.13.0', respondedModel: 'jev-1.13.0', modelMatchesPin: true,
+        answers: {}, usage: { inputTokens: 5, outputTokens: 0 }, attempts: 1,
+      },
+      classification: classificationFor(cachedCase.id, { status: 'healthy' }),
+    });
+    const cacheHitGate = deferredGate();
+    const store: AuditStorePort = {
+      ...baseStore,
+      async lookup(key: string) {
+        if (key === cachedKey) await cacheHitGate.promise;
+        return baseStore.lookup(key);
+      },
+    };
+
+    const gates = cases.map((testCase) => (testCase.id === cachedCase.id ? undefined : deferredGate()));
+    const active = { count: 0, max: 0 };
+    const snapshots: number[] = new Array(cases.length).fill(0);
+    let evaluateCallsForCachedCase = 0;
+    const evaluation: AuditEvaluationPort = {
+      async evaluate(request) {
+        if (request.testCase.id === cachedCase.id) evaluateCallsForCachedCase += 1;
+        const index = cases.findIndex((testCase) => testCase.id === request.testCase.id);
+        active.count += 1;
+        active.max = Math.max(active.max, active.count);
+        snapshots[index] = active.count;
+        try {
+          await gates[index]!.promise;
+        } finally {
+          active.count -= 1;
+        }
+        return {
+          evaluation: {
+            requestedModel: 'jev-1.13.0', respondedModel: 'jev-1.13.0', modelMatchesPin: true,
+            answers: {}, usage: { inputTokens: 10, outputTokens: 0 }, attempts: index === 0 ? 4 : 1,
+          },
+          classification: classificationFor(request.testCase.id),
+        };
+      },
+    };
+
+    const auditPromise = runAudit({ ...configuration, concurrency: 2 }, {
+      discovery: { discover: async () => discovery },
+      sourceReader: { read: async () => sourceText },
+      extractor: { extract: () => ({ testCases: [...cases], dynamicMetadata: [], diagnostics: [] }) },
+      evidence: { build: async (request) => ({ bundles: request.testCases.map((testCase) => bundleFor(testCase)), diagnostics: [] }) },
+      evaluation,
+      store,
+      cacheKey: cacheKeyPort,
+    });
+
+    await flush();
+    gates[0]!.resolve(); // throttled -> limit 2 -> 1, streak reset to 0
+    await flush();
+    cacheHitGate.resolve(); // cache hit settles: must leave the streak at 0, not 1
+    await flush();
+    expect(evaluateCallsForCachedCase).toBe(0); // never dispatched to the provider at all
+    expect(snapshots[2]).toBe(1); // item 2 starts alone either way (limit is still 1 here)
+
+    gates[2]!.resolve(); // clean 1/5 (correct) or 2/5 (buggy)
+    await flush();
+    gates[3]!.resolve(); // clean 2/5 or 3/5
+    await flush();
+    gates[4]!.resolve(); // clean 3/5 or 4/5
+    await flush();
+    gates[5]!.resolve(); // clean 4/5 (correct: no restore yet) or 5/5 (buggy: restores here already)
+    await flush();
+    expect(snapshots[6]).toBe(1); // item 6 always starts alone at this point either way
+
+    gates[6]!.resolve(); // clean 5/5 under correct behavior -> restores now
+    await flush();
+    // Decisive: under the bug, item 7 was already dispatched (paired with item 6, back when item 6
+    // started) with a recorded snapshot of 2; under correct behavior it only dispatches now, alone.
+    expect(snapshots[7]).toBe(1);
+
+    gates[7]!.resolve();
+    const result = await auditPromise;
+
+    expect(result.evaluation?.totals).toMatchObject({ evaluated: 7, cached: 1, failed: 0 });
+  });
+
+  it('a clean window of consecutive non-throttled dispatches restores concurrency back to the configured ceiling, never above it', async () => {
+    const discovery: DiscoveryResult = { files: [discovered('scheduled.test.ts')], excluded: [], diagnostics: [] };
+    // item 0 throttled, items 1-5 clean (exactly DEFAULT_ADAPTIVE_CONCURRENCY_RESTORE_WINDOW),
+    // items 6-7 clean, dispatched only once restoration has already happened.
+    const { cases, gates, active, snapshots, evaluation } = gatedScheduling(8, { 0: 4 });
+
+    const auditPromise = runAudit({ ...configuration, concurrency: 2 }, portsFor2(discovery, cases, evaluation));
+
+    await flush();
+    expect(active.max).toBe(2); // initial ceiling reached
+
+    gates[0]!.resolve(); // throttled -> limit drops to 1
+    await flush();
+    gates[1]!.resolve(); // clean streak 1/5 -> item 2 starts alone
+    await flush();
+    expect(snapshots[2]).toBe(1);
+    gates[2]!.resolve(); // clean streak 2/5 -> item 3 starts alone
+    await flush();
+    expect(snapshots[3]).toBe(1);
+    gates[3]!.resolve(); // clean streak 3/5 -> item 4 starts alone
+    await flush();
+    expect(snapshots[4]).toBe(1);
+    gates[4]!.resolve(); // clean streak 4/5 -> item 5 starts alone
+    await flush();
+    expect(snapshots[5]).toBe(1);
+    gates[5]!.resolve(); // clean streak 5/5 -> RESTORED to the ceiling (2); items 6 and 7 both start
+    await flush();
+    expect(snapshots[6]).toBe(1);
+    expect(snapshots[7]).toBe(2); // item 7 joined item 6 — full ceiling reused, never exceeded
+
+    gates[6]!.resolve();
+    gates[7]!.resolve();
+    const result = await auditPromise;
+
+    expect(result.evaluation?.totals.evaluated).toBe(8);
+    expect(active.max).toBe(2); // the ceiling was reduced, then restored — never exceeded
+  });
+
+  // --- Request/token budget wiring --------------------------------------
+
+  function fakeSchedulerTimers(startAt = 1_000_000): { readonly clock: () => number; readonly sleep: (ms: number) => Promise<void>; readonly sleepCalls: number[] } {
+    let current = startAt;
+    const sleepCalls: number[] = [];
+    return {
+      clock: () => current,
+      sleep: async (ms: number) => { sleepCalls.push(ms); current += ms; },
+      sleepCalls,
+    };
+  }
+
+  it('observes the configured request budget: dispatching beyond requestsPerMinute waits on the injected clock/sleep seam, never the real clock', async () => {
+    const discovery: DiscoveryResult = { files: [discovered('budget.test.ts')], excluded: [], diagnostics: [] };
+    const cases = manyTestCases('budget', 3);
+    let evaluateCalls = 0;
+    const evaluation = stubEvaluationPort(async (request) => { evaluateCalls += 1; return classificationFor(request.testCase.id); });
+    const { clock, sleep, sleepCalls } = fakeSchedulerTimers();
+
+    const result = await runAudit(
+      { ...configuration, concurrency: 3, schedule: { requestsPerMinute: 2, tokensPerSecond: 1_000_000 } },
+      portsFor2(discovery, cases, evaluation),
+      { clock, sleep },
+    );
+
+    expect(evaluateCalls).toBe(3);
+    expect(result.evaluation?.totals.evaluated).toBe(3);
+    expect(sleepCalls.length).toBeGreaterThan(0);
+    expect(sleepCalls.some((ms) => ms > 0)).toBe(true);
+  });
+
+  it('folds a retried dispatch\'s real attempt count into the request budget, not just the one slot reserved before dispatch', async () => {
+    const discovery: DiscoveryResult = { files: [discovered('retry-budget.test.ts')], excluded: [], diagnostics: [] };
+    const cases = manyTestCases('retry-budget', 2);
+    // concurrency 1 keeps this fully sequential: item 0 dispatches first (reserving 1 request
+    // slot), reports 3 attempts (2 retried internally by the gateway before it succeeded), then
+    // item 1 dispatches. requestsPerMinute is 2: if the 2 extra retried attempts were silently
+    // dropped, only 1 request would ever be recorded and item 1 would sail through unblocked.
+    const evaluation = stubEvaluationPort(async (request) => classificationFor(request.testCase.id), { attempts: 3 });
+    const { clock, sleep, sleepCalls } = fakeSchedulerTimers(3_000_000);
+
+    const result = await runAudit(
+      { ...configuration, concurrency: 1, schedule: { requestsPerMinute: 2, tokensPerSecond: 1_000_000 } },
+      portsFor2(discovery, cases, evaluation),
+      { clock, sleep },
+    );
+
+    expect(result.evaluation?.totals.evaluated).toBe(2);
+    // Item 0 alone (1 reserved + 2 extra retried = 3) already exceeds the budget of 2, so item 1
+    // must wait — this can only be true if the retried attempts were actually folded in.
+    expect(sleepCalls.length).toBeGreaterThan(0);
+  });
+
+  it('observes the configured token budget: once already-recorded usage meets tokensPerSecond, the next dispatch waits on the injected seam', async () => {
+    const discovery: DiscoveryResult = { files: [discovered('token-budget.test.ts')], excluded: [], diagnostics: [] };
+    const cases = manyTestCases('token-budget', 2);
+    const evaluation = stubEvaluationPort(async (request) => classificationFor(request.testCase.id, { inputTokens: 100, outputTokens: 0 }));
+    const { clock, sleep, sleepCalls } = fakeSchedulerTimers(2_000_000);
+
+    const result = await runAudit(
+      { ...configuration, concurrency: 1, schedule: { requestsPerMinute: 1_000, tokensPerSecond: 100 } },
+      portsFor2(discovery, cases, evaluation),
+      { clock, sleep },
+    );
+
+    expect(result.evaluation?.totals.evaluated).toBe(2);
+    expect(sleepCalls.length).toBeGreaterThan(0);
+  });
+
+  it('never touches the real clock/sleep when RunAuditOptions omits them (production default), and stays fast because the default schedule budget is never exceeded by a small run', async () => {
+    const discovery: DiscoveryResult = { files: [discovered('default-clock.test.ts')], excluded: [], diagnostics: [] };
+    const cases = manyTestCases('default-clock', 2);
+    const evaluation = stubEvaluationPort(async (request) => classificationFor(request.testCase.id));
+
+    const result = await runAudit({ ...configuration, concurrency: 2 }, portsFor2(discovery, cases, evaluation));
+
+    expect(result.evaluation?.totals.evaluated).toBe(2);
   });
 });
 
@@ -920,7 +1395,12 @@ describe('content-addressed caching (Phase 5, task P5-2)', () => {
     await runAudit(configuration, portsForRun);
 
     expect(evaluateCalls).toBe(2);
-    expect(store.workItemCalls.every(({ outcome }) => outcome.state === 'completed' && outcome.cacheKey === undefined)).toBe(true);
+    // pending + running + completed per run (Phase 5, task P5-3), so 2 runs of 1 item each is 6
+    // calls total — but exactly 2 of them (one per run) are the terminal `completed` outcome, and
+    // both carry no cache key at all (never even a `cacheKey: undefined` field observed elsewhere).
+    const completedOutcomes = store.workItemCalls.filter(({ outcome }) => outcome.state === 'completed');
+    expect(completedOutcomes).toHaveLength(2);
+    expect(completedOutcomes.every(({ outcome }) => outcome.state === 'completed' && outcome.cacheKey === undefined)).toBe(true);
   });
 
   it('--fresh bypasses lookup and issues a new provider request despite a warm cache, appending a new immutable completed result without altering the prior one; a later plain run then reuses the newest, not the older, judgment', async () => {

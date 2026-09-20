@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_CONFIGURATION, resolveConfiguration } from '../src/domain/config.js';
 import { DEFAULT_EVIDENCE_BUDGET } from '../src/domain/evidence.js';
+import { JEV_VERIFIED_RATE_LIMITS } from '../src/domain/jev-pricing.js';
 
 describe('resolved configuration', () => {
   it('uses deterministic zero-config defaults', () => {
@@ -16,6 +17,10 @@ describe('resolved configuration', () => {
       },
       store: {
         databasePath: undefined,
+      },
+      schedule: {
+        requestsPerMinute: JEV_VERIFIED_RATE_LIMITS.requestsPerMinute,
+        tokensPerSecond: JEV_VERIFIED_RATE_LIMITS.tokensPerSecond,
       },
       reportingOnly: true,
     });
@@ -72,6 +77,49 @@ describe('store configuration', () => {
     const resolved = resolveConfiguration({ store: { databasePath: '/custom/audit-store.sqlite3' } });
 
     expect(resolved.store).toEqual({ databasePath: '/custom/audit-store.sqlite3' });
+  });
+});
+
+// --- Adaptive-scheduling budget configuration (Phase 5, task P5-3) --------
+
+describe('schedule configuration', () => {
+  it('defaults to the verified provider rate limits, not an invented number', () => {
+    const resolved = resolveConfiguration();
+
+    expect(resolved.schedule).toEqual({
+      requestsPerMinute: JEV_VERIFIED_RATE_LIMITS.requestsPerMinute,
+      tokensPerSecond: JEV_VERIFIED_RATE_LIMITS.tokensPerSecond,
+    });
+  });
+
+  it('overrides only requestsPerMinute, leaving tokensPerSecond at its default', () => {
+    const resolved = resolveConfiguration({ schedule: { requestsPerMinute: 42 } });
+
+    expect(resolved.schedule).toEqual({
+      requestsPerMinute: 42,
+      tokensPerSecond: JEV_VERIFIED_RATE_LIMITS.tokensPerSecond,
+    });
+  });
+
+  it('overrides only tokensPerSecond, leaving requestsPerMinute at its default', () => {
+    const resolved = resolveConfiguration({ schedule: { tokensPerSecond: 777 } });
+
+    expect(resolved.schedule).toEqual({
+      requestsPerMinute: JEV_VERIFIED_RATE_LIMITS.requestsPerMinute,
+      tokensPerSecond: 777,
+    });
+  });
+
+  it('rejects a non-positive requestsPerMinute', () => {
+    expect(() => resolveConfiguration({ schedule: { requestsPerMinute: 0 } })).toThrow(RangeError);
+  });
+
+  it('rejects a non-positive tokensPerSecond', () => {
+    expect(() => resolveConfiguration({ schedule: { tokensPerSecond: -1 } })).toThrow(RangeError);
+  });
+
+  it('rejects a non-finite requestsPerMinute', () => {
+    expect(() => resolveConfiguration({ schedule: { requestsPerMinute: Number.POSITIVE_INFINITY } })).toThrow(RangeError);
   });
 });
 

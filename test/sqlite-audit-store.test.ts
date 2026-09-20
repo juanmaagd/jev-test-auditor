@@ -358,6 +358,47 @@ describe('createSqliteAuditStore migrations', () => {
   });
 });
 
+// --- WAL mode (Phase 5, task P5-3) ---------------------------------------------------------
+
+describe('createSqliteAuditStore write performance mode', () => {
+  it('opens the database in WAL journal mode, not the default rollback-journal mode', async () => {
+    const databaseFile = await tempDatabaseFile();
+
+    const store = await createSqliteAuditStore({ databaseFile });
+    await store.close();
+
+    // `journal_mode` is a persistent property of the database file itself (unlike `synchronous`,
+    // which is per-connection and so cannot be observed this way from a freshly reopened handle),
+    // so a fresh connection correctly reads back what the store set.
+    const db = new DatabaseSync(databaseFile);
+    try {
+      const journalMode = (db.prepare('PRAGMA journal_mode').get() as { readonly journal_mode: string }).journal_mode;
+      expect(journalMode).toBe('wal');
+    } finally {
+      db.close();
+    }
+  });
+
+  // P5-1 verifier finding B's own tests (`createSqliteAuditStore native failure wrapping`, above)
+  // already exercise a garbage file and a read-only file; this confirms the WAL pragma calls this
+  // task added stay inside that same wrapping — a real regression this task introduced and fixed
+  // during its own verification (setting WAL mode on a read-only file itself needs to write).
+  it('still reports AuditStoreCorruptError, not a raw native error, when setting WAL mode fails on a read-only database file', async () => {
+    const databaseFile = await tempDatabaseFile();
+    await mkdir(dirname(databaseFile), { recursive: true });
+    await writeFile(databaseFile, Buffer.alloc(0));
+    await chmod(databaseFile, 0o400);
+
+    try {
+      const error: unknown = await createSqliteAuditStore({ databaseFile }).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(AuditStoreCorruptError);
+      expect((error as Error).message).not.toContain('ERR_SQLITE_ERROR');
+    } finally {
+      await chmod(databaseFile, 0o600);
+    }
+  });
+});
+
 // --- Foreign database protection (P5-1 verifier finding B) ---------------------------------
 
 describe('createSqliteAuditStore foreign database protection', () => {
@@ -881,5 +922,65 @@ describe('createSqliteAuditStore lookup', () => {
     } finally {
       db.close();
     }
+  });
+
+  // Phase 5, task P5-3: `pending`/`running` checkpoints (recorded up front and on pickup by the
+  // scheduler) are new non-terminal rows that did not exist when P5-2's `lookup` query was
+  // written — a real regression risk the task explicitly calls out, not a hypothetical one.
+  it('still returns only the completed judgment once pending and running checkpoints exist for the very same work item and run', async () => {
+    databaseFile = await tempDatabaseFile();
+    store = await createSqliteAuditStore({ databaseFile });
+    const runId = await store.beginRun('/repo');
+    const testCaseId = 'tc:v1:lookup-with-checkpoints' as TestCaseId;
+    const identity = { testCaseId, repositoryRelativePath: 'a.test.ts', name: 'adds numbers' };
+
+    // The realistic production sequence for one evaluable item: `pending` up front, `running` on
+    // pickup, then its terminal `completed` record — all through the real port, exactly as
+    // `runEvaluation` (`src/application/audit.ts`) now writes them.
+    await store.recordWorkItem(runId, { state: 'pending', identity });
+    await store.recordWorkItem(runId, { state: 'running', identity });
+    await recordCompleted(store, runId, testCaseId, 'ck-with-checkpoints', 'healthy', true);
+
+    const hit = await store.lookup('ck-with-checkpoints');
+    expect(hit?.classification.status).toBe('healthy');
+  });
+
+  // Unlike the test above (the realistic shape `recordWorkItem` actually produces — a
+  // pending/running row never carries a cache key, so the `attempts` INNER JOIN alone already
+  // excludes it, exactly like the existing "excludes a non-completed work item" defensive test
+  // above for `failed`), this manufactures the one case where the query's explicit
+  // `w.state = 'completed'` predicate is independently provable for `pending`/`running` too: a
+  // `running` row that somehow carries a matching cache key AND a matching attempts/judgments
+  // pair, bypassing `recordWorkItem` via direct SQL — the same technique used above.
+  it('excludes a running work item even if it somehow carries the same cache key and a matching attempts/judgments pair (defensive; direct SQL)', async () => {
+    databaseFile = await tempDatabaseFile();
+    store = await createSqliteAuditStore({ databaseFile });
+    const runId = await store.beginRun('/repo');
+    const testCaseId = 'tc:v1:lookup-running-defensive' as TestCaseId;
+
+    await recordCompleted(store, runId, testCaseId, 'ck-running-defensive', 'healthy', true);
+
+    const db = new DatabaseSync(databaseFile);
+    try {
+      const inserted = db.prepare(
+        'INSERT INTO work_items (run_id, test_case_id, repository_relative_path, name, state, recorded_at, cache_key) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      ).run(runId, testCaseId, 'a.test.ts', 'adds numbers', 'running', new Date().toISOString(), 'ck-running-defensive');
+      const workItemId = Number(inserted.lastInsertRowid);
+      db.prepare(
+        'INSERT INTO attempts (work_item_id, requested_model, responded_model, model_matches_pin, attempts, raw_answers, input_tokens, output_tokens) VALUES (?, ?, ?, 1, 1, \'{}\', 0, 0)',
+      ).run(workItemId, 'jev-eval-requested-model', 'jev-eval-responded-model');
+      db.prepare(
+        'INSERT INTO judgments (work_item_id, status, policy_version, rubric_version, classification) VALUES (?, ?, ?, ?, ?)',
+      ).run(workItemId, 'misleading', 3, 6, JSON.stringify(classificationWithStatus(testCaseId, 'misleading')));
+    } finally {
+      db.close();
+    }
+
+    // A `lookup` that forgot the `state = 'completed'` filter (and happened to also lose the
+    // `attempts` INNER JOIN's protection) could return either row here; this newer `running` row
+    // deliberately carries a different `status` (`misleading`) than the real `completed` row
+    // (`healthy`), so returning the wrong one is observable.
+    const hit = await store.lookup('ck-running-defensive');
+    expect(hit?.classification.status).toBe('healthy');
   });
 });

@@ -124,12 +124,15 @@ export const JEV_ESTIMATE_SNAPSHOT: JevEstimateSnapshot = {
 /**
  * Verified TypeSafe/Jev provider rate limits (2026-09-20, docs.typesafe.ai/models):
  * 250,000 input tokens per second and 1,200 requests per minute. Recorded
- * here, next to {@link JEV_ESTIMATE_SNAPSHOT}, as documented facts only —
- * Phase 4 does no adaptive throttling against them (Phase 5's "resilience"
- * concern per `odd/tasks/phase-4-jev-evaluation.md`'s Decisions: "Concurrency
- * in this phase is a fixed bounded pool from existing `concurrency`
- * configuration, with no adaptive throttling"); nothing in this phase reads
- * or enforces these values at runtime.
+ * here, next to {@link JEV_ESTIMATE_SNAPSHOT}, as documented facts. Phase 4
+ * did no adaptive throttling against them (Phase 5's "resilience" concern
+ * per `odd/tasks/phase-4-jev-evaluation.md`'s Decisions: "Concurrency in
+ * this phase is a fixed bounded pool from existing `concurrency`
+ * configuration, with no adaptive throttling"). Phase 5, task P5-3 is the
+ * first to actually enforce them at runtime: these exact numbers are
+ * `ResolvedConfiguration.schedule`'s default (`src/domain/config.ts`),
+ * consulted by `createRequestTokenBudgetGate` (`src/application/scheduler.ts`)
+ * to gate every real evaluation dispatch.
  */
 export const JEV_VERIFIED_RATE_LIMITS: { readonly tokensPerSecond: number; readonly requestsPerMinute: number } = {
   tokensPerSecond: 250_000,

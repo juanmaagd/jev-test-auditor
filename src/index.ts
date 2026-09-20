@@ -2,11 +2,14 @@ export { getResolvedConfiguration } from './application/configure.js';
 export {
   DEFAULT_CONFIGURATION,
   resolveConfiguration,
+  validateScheduleConfiguration,
   type ConfigurationOverrides,
   type EvidenceConfigurationOverrides,
   type ResolvedConfiguration,
   type ResolvedEvidenceConfiguration,
+  type ResolvedScheduleConfiguration,
   type ResolvedStoreConfiguration,
+  type ScheduleConfigurationOverrides,
   type StoreConfigurationOverrides,
 } from './domain/config.js';
 export { createTestCaseId } from './adapters/test-case-identity.js';
@@ -127,6 +130,25 @@ export {
   type DryRunSkippedTotals,
   type JevEstimateSnapshot,
 } from './domain/estimate.js';
+
+export {
+  createAdaptiveConcurrencyController,
+  DEFAULT_ADAPTIVE_CONCURRENCY_RESTORE_WINDOW,
+  type AdaptiveConcurrencyController,
+  type AdaptiveConcurrencyOptions,
+  type ThrottleSignal,
+} from './domain/scheduler.js';
+export {
+  createRequestTokenBudgetGate,
+  defaultSchedulerClock,
+  defaultSchedulerSleep,
+  runAdaptiveSchedule,
+  type RequestTokenBudgetConfig,
+  type RequestTokenBudgetGate,
+  type ScheduledWorkOutcome,
+  type SchedulerClock,
+  type SchedulerSleep,
+} from './application/scheduler.js';
 
 export {
   JEV_MODEL_ID,

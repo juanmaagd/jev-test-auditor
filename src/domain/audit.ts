@@ -158,8 +158,12 @@ export interface AuditCacheKeyPort {
  * participate in quality classification. Task P5-1 itself only ever
  * produced `completed`, `failed`, and `skipped` records; task P5-2 adds
  * `cached`, produced exactly once — on a cache hit (see
- * {@link AuditStorePort.lookup}) — and never anywhere else. `pending`/
- * `running` remain scheduler checkpoints reserved for Phase 5, task P5-3.
+ * {@link AuditStorePort.lookup}) — and never anywhere else. Task P5-3 adds
+ * `pending` (recorded up front for every evaluable work item, before the
+ * scheduler dispatches anything) and `running` (recorded the moment the
+ * scheduler picks that item up) — the two non-terminal checkpoints a later
+ * phase's `--resume <runId>` reads back to compute the outstanding set; see
+ * {@link AuditStoreWorkItemOutcome}'s own doc.
  * `uncertain` is admitted by the type (and the adapter's schema `CHECK`
  * constraint) for forward compatibility only: nothing in this codebase
  * produces it as of task P5-2, and no semantics are defined for it here —
@@ -178,26 +182,54 @@ export interface AuditStoreWorkItemIdentity {
 }
 
 /**
- * One terminal work-item outcome to persist (Phase 5, task P5-1). A
- * `completed` outcome carries both the raw {@link JevEvaluation} and the
- * already-derived {@link ClassificationResult} (see {@link AuditEvaluationOutcome}'s
- * own doc for why both are kept); a `failed` outcome carries the same typed
- * error kind and message `runAudit` already reports in an
- * `evaluation-failed` diagnostic (`src/application/audit.ts`); a `skipped`
- * outcome carries the same {@link DryRunSkippedReason} `classifyTestCase`
- * (`src/domain/estimate.ts`) already produces. `uncertain`, `pending`, and
- * `running` are not constructed anywhere in this codebase — see
- * {@link WorkItemState}'s own doc. A `cached` outcome (task P5-2) carries
- * the exact `cacheKey` that hit and the reused {@link ClassificationResult}
- * — never a fresh {@link JevEvaluation}, since no provider request was
- * made. `completed`'s own `cacheKey` is optional, not because a real
- * evaluation lacks one, but so a caller that never wires
- * {@link AuditCacheKeyPort} (or a pre-P5-2 test fixture) still compiles and
- * persists exactly as before — see {@link AuditStorePort.lookup}'s own doc
- * for why an absent key simply means "can never be found again," never a
- * silent behavior change.
+ * One work-item outcome to persist. Four are terminal — carried over from
+ * Phase 5, task P5-1/P5-2: a `completed` outcome carries both the raw
+ * {@link JevEvaluation} and the already-derived {@link ClassificationResult}
+ * (see {@link AuditEvaluationOutcome}'s own doc for why both are kept); a
+ * `failed` outcome carries the same typed error kind and message `runAudit`
+ * already reports in an `evaluation-failed` diagnostic
+ * (`src/application/audit.ts`); a `skipped` outcome carries the same
+ * {@link DryRunSkippedReason} `classifyTestCase` (`src/domain/estimate.ts`)
+ * already produces; a `cached` outcome carries the exact `cacheKey` that
+ * hit and the reused {@link ClassificationResult} — never a fresh
+ * {@link JevEvaluation}, since no provider request was made.
+ *
+ * `pending` and `running` (Phase 5, task P5-3) are the two non-terminal
+ * checkpoints: `pending` is recorded for every evaluable work item up
+ * front, before the scheduler dispatches anything at all, and `running` is
+ * recorded the moment the scheduler actually picks that item up — both
+ * carry only {@link AuditStoreWorkItemIdentity}, nothing else, since
+ * neither represents a fact about how the item resolved. Together with the
+ * terminal states, they make the run's *intended* work durable, not only
+ * its *finished* work: a process killed mid-run leaves every item it never
+ * reached with only a `pending` row (never started) or a `running` row
+ * (in flight when the process died), which a later phase (P5-4,
+ * `--resume <runId>`) reads back to compute the outstanding set — every
+ * work item under a run id whose most recently recorded state is `pending`
+ * or `running` rather than one of the four terminal states. Appending a
+ * `pending`/`running` row is exactly like every other write here: it never
+ * updates or deletes an earlier row for the same work item, so the
+ * complete `pending` → `running` → terminal trail (or a shorter one, for
+ * whichever point a crash landed on) is always the full, honest history —
+ * never rewritten to look as if the crash never happened.
+ *
+ * `uncertain` is not constructed anywhere in this codebase — see
+ * {@link WorkItemState}'s own doc. `completed`'s own `cacheKey` is
+ * optional, not because a real evaluation lacks one, but so a caller that
+ * never wires {@link AuditCacheKeyPort} (or a pre-P5-2 test fixture) still
+ * compiles and persists exactly as before — see {@link AuditStorePort.lookup}'s
+ * own doc for why an absent key simply means "can never be found again,"
+ * never a silent behavior change.
  */
 export type AuditStoreWorkItemOutcome =
+  | {
+    readonly state: 'pending';
+    readonly identity: AuditStoreWorkItemIdentity;
+  }
+  | {
+    readonly state: 'running';
+    readonly identity: AuditStoreWorkItemIdentity;
+  }
   | {
     readonly state: 'completed';
     readonly identity: AuditStoreWorkItemIdentity;
@@ -239,7 +271,10 @@ export interface AuditStoreCachedJudgment {
  * construct this port, read a database file, or create one.
  *
  * `beginRun`/`finishRun` bracket exactly one audit run; `recordWorkItem` is
- * called once per work item reaching a terminal state. Every method is
+ * called once per work item reaching a terminal state, and (Phase 5, task
+ * P5-3) once more each time that same work item passes through a
+ * non-terminal checkpoint (`pending`, then `running`) on its way there —
+ * see {@link AuditStoreWorkItemOutcome}'s own doc for why. Every method is
  * append-only: no method here updates or deletes a previously written run,
  * work item, attempt, judgment, or error record. (`finishRun` sets the run's
  * own `finished_at` marker exactly once — completing that run's own record,
@@ -248,7 +283,7 @@ export interface AuditStoreCachedJudgment {
 export interface AuditStorePort {
   /** Starts a new run record for `rootDir` and returns its generated run id. */
   beginRun(rootDir: string): Promise<string>;
-  /** Persists one terminal work-item outcome for `runId`, atomically (all-or-nothing): a failure here leaves no partial record. */
+  /** Persists one work-item outcome for `runId` — terminal or one of the two non-terminal checkpoints (`pending`, `running`; Phase 5, task P5-3) — atomically (all-or-nothing): a failure here leaves no partial record. */
   recordWorkItem(runId: string, outcome: AuditStoreWorkItemOutcome): Promise<void>;
   /**
    * Looks up the cached judgment for `cacheKey` (Phase 5, task P5-2).
@@ -445,7 +480,8 @@ export interface AuditEvaluationTotals {
  * `classifications` holds one entry per successfully evaluated test case,
  * in the same deterministic file-then-test-case order as `AuditResult.files`
  * regardless of which gateway call actually completed first (see
- * `runBoundedPool` in `src/application/audit.ts`) — never sorted or
+ * `runAdaptiveSchedule` in `src/application/scheduler.ts`, Phase 5, task
+ * P5-3 — replacing Phase 4's fixed-size `runBoundedPool`) — never sorted or
  * reordered afterward, and never containing an entry for a failed or
  * skipped test case.
  */

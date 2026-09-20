@@ -13,9 +13,19 @@ import type {
 } from '../domain/audit.js';
 import type { ClassificationResult, OverallClassificationStatus } from '../domain/classification.js';
 import { classifyTestCase, type DryRunSkippedReason } from '../domain/estimate.js';
+import { createAdaptiveConcurrencyController, DEFAULT_ADAPTIVE_CONCURRENCY_RESTORE_WINDOW, type ThrottleSignal } from '../domain/scheduler.js';
+import type { ResolvedScheduleConfiguration } from '../domain/config.js';
 import type { Diagnostic, TestCase } from '../domain/test-understanding.js';
 import type { EvidenceBundle } from '../domain/evidence.js';
 import type { JevEvaluation } from '../domain/jev-gateway.js';
+import {
+  createRequestTokenBudgetGate,
+  defaultSchedulerClock,
+  defaultSchedulerSleep,
+  runAdaptiveSchedule,
+  type SchedulerClock,
+  type SchedulerSleep,
+} from './scheduler.js';
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -40,39 +50,25 @@ function withPath(diagnostic: Diagnostic, repositoryRelativePath: string): Audit
 }
 
 /**
- * Runs `worker` over `items` with at most `limit` concurrently in flight,
- * writing each result to its own fixed index rather than appending as
- * workers settle — so `results[i]` always corresponds to `items[i]`
- * regardless of which one actually finishes first (Phase 4, task P4-4:
- * "Deterministic result ordering regardless of completion order"). A
- * non-positive, non-integer, or otherwise invalid `limit` (including
- * `NaN`) falls back to `1` rather than silently running zero or an
- * unbounded number of workers.
+ * `error`'s reported HTTP-attempt count (see `src/domain/jev-gateway.ts`'s
+ * `JevGatewayErrorBase.attempts`) when `error` carries one, else `1` — a
+ * conservative fallback for a foreign `AuditEvaluationPort` implementation
+ * that throws something with no `attempts` field: `evaluate()` was
+ * definitely called at least once, so `1` (never `0`) is the safe minimum
+ * to fold into the request budget (see {@link RequestTokenBudgetGate.recordDispatch}'s
+ * own doc in `src/application/scheduler.ts`).
  */
-async function runBoundedPool<T, R>(
-  items: readonly T[],
-  limit: number,
-  worker: (item: T) => Promise<R>,
-): Promise<R[]> {
-  const results: R[] = new Array(items.length);
-  if (items.length === 0) return results;
-
-  const poolSize = Number.isInteger(limit) && limit > 0 ? Math.min(limit, items.length) : 1;
-  let nextIndex = 0;
-
-  async function runWorker(): Promise<void> {
-    for (;;) {
-      const currentIndex = nextIndex;
-      nextIndex += 1;
-      if (currentIndex >= items.length) return;
-      const item = items[currentIndex];
-      if (item === undefined) throw new Error(`unreachable: pool index ${currentIndex} out of range`);
-      results[currentIndex] = await worker(item);
-    }
+function evaluationErrorAttempts(error: unknown): number {
+  if (typeof error === 'object' && error !== null && 'attempts' in error) {
+    const attempts = (error as { readonly attempts: unknown }).attempts;
+    if (typeof attempts === 'number' && Number.isFinite(attempts) && attempts >= 0) return attempts;
   }
+  return 1;
+}
 
-  await Promise.all(Array.from({ length: poolSize }, runWorker));
-  return results;
+/** `true` for the two typed error kinds that mean "the provider itself pushed back" (429/529 — see `src/domain/jev-gateway.ts`'s `JevRateLimitError`/`JevOverloadedError`), as opposed to every other failure (auth, malformed request/response, timeout, abort), which carries no throttling evidence at all. */
+function isThrottleErrorKind(kind: string): boolean {
+  return kind === 'rate-limit' || kind === 'overloaded';
 }
 
 interface EvaluableItem {
@@ -161,56 +157,117 @@ function identityOf(testCase: TestCase): AuditStoreWorkItemIdentity {
 }
 
 /**
+ * Scheduling inputs (Phase 5, task P5-3), always present — unlike
+ * `store`/`cache`, adaptive throttling and budget observance are not
+ * opt-in: every real evaluation dispatch respects them, store or no store.
+ * `clock`/`sleep` are the only timer seam `runEvaluation` touches (see
+ * `src/application/scheduler.ts`'s own doc); `runAudit` defaults them to
+ * `defaultSchedulerClock`/`defaultSchedulerSleep` when a caller (the CLI)
+ * supplies neither.
+ */
+interface EvaluationSchedulerOptions {
+  readonly clock: SchedulerClock;
+  readonly sleep: SchedulerSleep;
+  readonly budget: ResolvedScheduleConfiguration;
+}
+
+/**
  * Evaluates every evaluable test case across `files` through
- * `evaluationPort`, bounded by `concurrency` (Phase 4 Decisions: "a fixed
- * bounded pool from existing `concurrency` configuration, with no adaptive
- * throttling"). A rejected `evaluate` call is isolated to its own test case:
- * it contributes no entry to `classifications` (never a fabricated verdict)
- * and produces one `evaluation-failed` diagnostic naming the test case id
- * and the error's typed kind — never the request body, and never the API
- * key (the gateway's own error types are constructed so a key can never
- * reach their `message` in the first place; see `src/domain/jev-gateway.ts`).
+ * `evaluationPort`, dispatched by the adaptive scheduler
+ * (`src/application/scheduler.ts`'s `runAdaptiveSchedule`, Phase 5, task
+ * P5-3 — replacing Phase 4's fixed-size `runBoundedPool`): it starts at
+ * `concurrency` (never exceeding it), halves on an observed provider
+ * throttle, and restores by one step after enough consecutive clean
+ * dispatches (see `src/domain/scheduler.ts`'s own doc for the exact
+ * transitions). Every real dispatch also passes through
+ * `scheduler.budget`'s request/token gate first (`createRequestTokenBudgetGate`),
+ * so this run never issues more than the configured requests-per-minute or
+ * tokens-per-second, independent of concurrency. A rejected `evaluate` call
+ * is isolated to its own test case: it contributes no entry to
+ * `classifications` (never a fabricated verdict) and produces one
+ * `evaluation-failed` diagnostic naming the test case id and the error's
+ * typed kind — never the request body, and never the API key (the
+ * gateway's own error types are constructed so a key can never reach their
+ * `message` in the first place; see `src/domain/jev-gateway.ts`).
+ *
+ * **Throttle-signal derivation** (Phase 5 Decisions: "derived from observed
+ * provider responses ... not from a wall-clock heuristic"): the gateway
+ * retries 429/529 internally and surfaces only the final outcome, so this
+ * function never sees a 429 directly. It reuses two seams that already
+ * cross the port boundary rather than widening the gateway contract —
+ * `JevEvaluation.attempts` (a successful dispatch's own attempt count,
+ * already persisted as `attempts.attempts`) and the failure's typed error
+ * kind: `attempts > 1` on a success is possible ONLY because the gateway
+ * retries exclusively on 429/529 (see `src/adapters/jev-http-gateway.ts`'s
+ * own doc — no other outcome is ever retried), so it is an exact, existing
+ * signal of "the provider pushed back, then let this one through" — never
+ * a guess. A failure whose kind is `'rate-limit'`/`'overloaded'`
+ * (`JevRateLimitError`/`JevOverloadedError`) is throttling that was never
+ * recovered from. Every other outcome (a cache hit, or any other failure
+ * kind) reports `'neutral'` — see `ThrottleSignal`'s own doc
+ * (`src/domain/scheduler.ts`) for why an unrelated failure must stay
+ * invisible to the adaptive controller rather than being folded into
+ * either direction.
  *
  * When `store`/`runId` are both given (Phase 5, task P5-1: `ports.store` is
- * opt-in exactly like `ports.evaluation`), every terminal work item this
- * function reaches — `skipped` up front (already known before the pool
- * starts), then `completed`/`cached`/`failed` as each pool worker settles —
- * is persisted through `store.recordWorkItem` before that worker's outcome
- * is returned, so an interrupted run still leaves every already-terminal
- * item committed. `runBoundedPool` itself is untouched: this only adds a
- * side effect inside the existing worker callback, never changes dispatch
- * order or concurrency (that is Phase 5, task P5-3's job).
+ * opt-in exactly like `ports.evaluation`), every evaluable item gets a
+ * `pending` checkpoint recorded up front, before the scheduler dispatches
+ * anything at all, then a `running` checkpoint the moment the scheduler
+ * actually picks it up, then its terminal outcome
+ * (`completed`/`cached`/`failed`) once it settles — persisted through
+ * `store.recordWorkItem` before that worker's outcome is returned, so an
+ * interrupted run still leaves every already-reached checkpoint committed
+ * (a `skipped` item, already known before the scheduler starts at all,
+ * skips straight to its terminal record — it is never dispatched, so it
+ * has no `pending`/`running` checkpoint of its own). See
+ * `AuditStoreWorkItemOutcome`'s own doc (`src/domain/audit.ts`) for exactly
+ * what a later phase's `--resume <runId>` can read back from this trail.
  *
  * When `cache` is also given (Phase 5, task P5-2; requires `store`/`runId`
  * too — caching without persistence has nothing to look anything up in),
  * each item's cache key is computed first. Unless `cache.fresh` is `true`,
  * `store.lookup` runs before ever calling `evaluationPort.evaluate`: a hit
  * records a `cached` work item and reuses the stored judgment, skipping
- * the provider call entirely; a miss (or `cache.fresh`) dispatches exactly
- * as before, and a successful dispatch's `completed` record now also
- * carries the computed key, so a later run can find it. `cache.fresh`
- * never skips recording — it only skips the lookup — so a fresh dispatch's
- * result is still a new, immutable, appended `completed` record; it never
- * mutates or deletes the judgment(s) already stored under that key.
+ * the provider call (and the request/token budget gate, and any throttle
+ * signal — a cache hit is `'neutral'`) entirely; a miss (or `cache.fresh`)
+ * dispatches exactly as before, and a successful dispatch's `completed`
+ * record now also carries the computed key, so a later run can find it.
+ * `cache.fresh` never skips recording — it only skips the lookup — so a
+ * fresh dispatch's result is still a new, immutable, appended `completed`
+ * record; it never mutates or deletes the judgment(s) already stored under
+ * that key.
  */
 async function runEvaluation(
   files: readonly AuditFileResult[],
   evaluationPort: AuditEvaluationPort,
   concurrency: number,
+  scheduler: EvaluationSchedulerOptions,
   store?: AuditStorePort,
   runId?: string,
   cache?: EvaluationCacheOptions,
 ): Promise<EvaluationRunResult> {
   const { items, skippedByReason, skippedItems } = collectEvaluableItems(files);
   const cacheEnabled = store !== undefined && runId !== undefined && cache !== undefined;
+  const controller = createAdaptiveConcurrencyController({ ceiling: concurrency, restoreWindow: DEFAULT_ADAPTIVE_CONCURRENCY_RESTORE_WINDOW });
+  const budgetGate = createRequestTokenBudgetGate(scheduler.budget, scheduler.clock, scheduler.sleep);
 
   if (store !== undefined && runId !== undefined) {
     for (const skipped of skippedItems) {
       await store.recordWorkItem(runId, { state: 'skipped', identity: identityOf(skipped.testCase), reason: skipped.reason });
     }
+    // Phase 5, task P5-3: every evaluable item's intended work is made durable BEFORE the
+    // scheduler dispatches anything at all — see `AuditStoreWorkItemOutcome`'s own doc for why a
+    // later phase's `--resume <runId>` needs this recorded up front, not only once an item starts.
+    for (const item of items) {
+      await store.recordWorkItem(runId, { state: 'pending', identity: identityOf(item.testCase) });
+    }
   }
 
-  const outcomes = await runBoundedPool<EvaluableItem, EvaluationOutcome>(items, concurrency, async (item) => {
+  const outcomes = await runAdaptiveSchedule<EvaluableItem, EvaluationOutcome>(items, controller, async (item) => {
+    if (store !== undefined && runId !== undefined) {
+      await store.recordWorkItem(runId, { state: 'running', identity: identityOf(item.testCase) });
+    }
+
     let cacheKey: string | undefined;
     if (cacheEnabled) {
       // Believed unreachable: every evaluable item's file was successfully read (a read failure
@@ -229,14 +286,16 @@ async function runEvaluation(
               cacheKey,
               classification: hit.classification,
             });
-            return { kind: 'cached', testCase: item.testCase, classification: hit.classification };
+            return { result: { kind: 'cached', testCase: item.testCase, classification: hit.classification }, signal: 'neutral' };
           }
         }
       }
     }
 
+    await budgetGate.waitForCapacity();
     try {
       const { classification, evaluation } = await evaluationPort.evaluate({ testCase: item.testCase, bundle: item.bundle });
+      budgetGate.recordDispatch(Math.max(0, evaluation.attempts - 1), evaluation.usage.inputTokens + evaluation.usage.outputTokens);
       if (store !== undefined && runId !== undefined) {
         await store.recordWorkItem(runId, {
           state: 'completed',
@@ -246,8 +305,10 @@ async function runEvaluation(
           classification,
         });
       }
-      return { kind: 'success', testCase: item.testCase, classification, evaluation };
+      const signal: ThrottleSignal = evaluation.attempts > 1 ? 'throttled' : 'clean';
+      return { result: { kind: 'success', testCase: item.testCase, classification, evaluation }, signal };
     } catch (error) {
+      budgetGate.recordDispatch(Math.max(0, evaluationErrorAttempts(error) - 1), 0);
       if (store !== undefined && runId !== undefined) {
         await store.recordWorkItem(runId, {
           state: 'failed',
@@ -256,7 +317,8 @@ async function runEvaluation(
           errorMessage: messageOf(error),
         });
       }
-      return { kind: 'failure', testCase: item.testCase, error };
+      const signal: ThrottleSignal = isThrottleErrorKind(evaluationErrorKind(error)) ? 'throttled' : 'neutral';
+      return { result: { kind: 'failure', testCase: item.testCase, error }, signal };
     }
   });
 
@@ -350,6 +412,17 @@ export interface RunAuditOptions {
    * {@link AuditPorts.cacheKey}'s own doc). Defaults to `false`.
    */
   readonly fresh?: boolean;
+  /**
+   * Test seam only (Phase 5, task P5-3): overrides the adaptive scheduler's
+   * notion of wall-clock time and its wait mechanism, so a request/token
+   * budget test never sleeps on the real clock. Production default:
+   * `defaultSchedulerClock`/`defaultSchedulerSleep` (`src/application/scheduler.ts`,
+   * real `Date.now`/a real `setTimeout`-based wait). Has no effect unless
+   * `ports.evaluation` is present — an offline audit never constructs a
+   * scheduler at all.
+   */
+  readonly clock?: SchedulerClock;
+  readonly sleep?: SchedulerSleep;
 }
 
 export async function runAudit(
@@ -510,7 +583,16 @@ export async function runAudit(
     const cache = ports.cacheKey === undefined || sourceTextByPath === undefined
       ? undefined
       : { port: ports.cacheKey, sourceTextByPath, fresh: options.fresh ?? false };
-    const evaluationRun = await runEvaluation(results, ports.evaluation, request.concurrency, ports.store, runId, cache);
+    // Phase 5, task P5-3: scheduling (adaptive concurrency and the request/token budget gate) is
+    // never opt-in — every real evaluation dispatch goes through it, store or no store, cache or
+    // no cache. `clock`/`sleep` default to the real clock/timer exactly once evaluation is
+    // actually requested at all (never constructed for an offline audit).
+    const scheduler = {
+      clock: options.clock ?? defaultSchedulerClock,
+      sleep: options.sleep ?? defaultSchedulerSleep,
+      budget: request.schedule,
+    };
+    const evaluationRun = await runEvaluation(results, ports.evaluation, request.concurrency, scheduler, ports.store, runId, cache);
     evaluation = evaluationRun.evaluation;
     diagnostics.push(...evaluationRun.diagnostics);
     finalFiles = withEvaluationDiagnostics(results, evaluationRun.fileDiagnosticsByPath);

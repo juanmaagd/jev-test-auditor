@@ -433,6 +433,22 @@ export async function createSqliteAuditStore(options: CreateSqliteAuditStoreOpti
   }
 
   try {
+    // Phase 5, task P5-3: every evaluable work item now writes up to three separate append-only
+    // transactions (`pending`, `running`, then its terminal outcome) instead of P5-1/P5-2's one,
+    // so a run's total transaction count roughly triples. SQLite's default rollback-journal mode
+    // does a full `fsync` on every `COMMIT`, which is the dominant cost for many small sequential
+    // single-row transactions like these. WAL mode amortizes that cost across the whole run
+    // instead of paying it per row, without weakening the durability this adapter actually needs:
+    // every committed row is still crash-safe against an application crash (a full disk-power-loss
+    // window during an uncheckpointed WAL is an acceptable tradeoff for a local audit-tool cache,
+    // not a production database). Transaction semantics (`BEGIN`/`COMMIT`/`ROLLBACK` in `migrate`
+    // and `recordWorkItem`) are unaffected — WAL only changes how a commit is physically durable,
+    // never the SQL-level guarantees. Set once per connection, before migrations run, and inside
+    // the same try/catch as `migrate` below: a garbage file or a read-only file fails right here
+    // (setting WAL mode itself needs to write), and must still surface as the same named
+    // `AuditStoreCorruptError`, never a raw native error.
+    db.exec('PRAGMA journal_mode = WAL;');
+    db.exec('PRAGMA synchronous = NORMAL;');
     migrate(db);
   } catch (error) {
     db.close();
