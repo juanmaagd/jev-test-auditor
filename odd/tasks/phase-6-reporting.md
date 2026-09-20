@@ -75,10 +75,13 @@ The JSON report is the contract every later phase reads: Phase 7's benchmarks co
 
 ## Tasks
 
-- [ ] **P6-1 — Capture and persist per-request latency**
+- [x] **P6-1 — Capture and persist per-request latency**
   - Measure wall-clock latency in the gateway around the whole call and per attempt, without changing timeout, abort, or backoff behavior.
   - Thread it through the evaluation result and persist it with a transactional v2-to-v3 migration.
   - Verify: a hand-built v2 database upgrades without losing a row; an unknown or newer version still fails with its named error; the dry run's read-only path still creates no file or sidecar; P5-3's throttle signal is unchanged.
+  - Evidence: `ba799f7` (`feat: capture and persist per-request latency`) on `feat/phase-6-latency`, off `feat/phase-6-reporting`. 6 files, 359 insertions / 15 deletions. Suite 29 files/855 tests (850 on `main` before this phase), typecheck, lint, build, and diff check passed. Schema version 3 adds two nullable columns to `attempts`: `latency_ms`, the whole-call wall-clock total including every internal retry and the backoff wait between attempts, and `attempt_latencies_ms`, that same evaluation's per-attempt breakdown. Both are nullable deliberately, so a row recorded before this migration reads as "never captured" rather than as a fabricated zero — the migration never backfills. Latency rides on `JevEvaluation` itself, which is why no change was needed in `src/adapters/jev-evaluation-port.ts`, `src/application/audit.ts`, or `src/domain/audit.ts`: `runEvaluation` already passes the whole evaluation object to `recordWorkItem` (`src/application/audit.ts:407`), so the new fields reach the store by travelling inside it.
+  - Orchestrator spot checks, run independently. The delegated worker's runtime stalled before it could update this document, so the tree was assessed directly rather than trusted from a report: 855 tests, typecheck, lint, build, and diff check all clean. The absence of the application and port files from the diff was investigated rather than assumed to be a gap, and traced to the whole-object hand-off at `audit.ts:407`. The specific risk named when delegating this task — that a new numeric column sits directly beside `attempts`, `input_tokens`, and `output_tokens`, which is exactly the adjacency P5-1's original swap-blind defect lived in — was tested by hand: swapping `output_tokens` with `latency_ms` in the insert turned 5 tests RED, including `expected 8642 to be 47`, a latency value landing in the token column. The non-symmetric fixtures did their job. The v2-to-v3 upgrade is proven by a hand-built v2 database (`test/sqlite-audit-store.test.ts:300`), not only by fresh creation.
+  - Delivered by a worker whose runtime stalled at the documentation step; the implementation and its tests were already complete and verified in the tree, so the task was finished rather than restarted. This is recorded because the failure was the client runtime's, not the task's, and the distinction matters when reading this ledger later.
 - [ ] **P6-2 — Emit one versioned canonical JSON report**
   - Define the report envelope with an explicit report version, distinct from store schema, rubric, and policy versions, and publish its schema.
   - Expose discovery decisions, provenance, scores, probabilities, model and rubric versions, per-test-case cache status, usage, latency, and errors; mark an incomplete run as incomplete.
@@ -93,10 +96,15 @@ The JSON report is the contract every later phase reads: Phase 7's benchmarks co
 
 ## Progress
 
-- Current task: **P6-1 — not started**.
-- Completed tasks: none.
-- Running authored count: **0**, against a 4,000-line forecast.
-- Slice ledger: empty.
+- Current task: **P6-2 — not started**.
+- Completed tasks: **P6-1**.
+- Running authored count: **374**, against a 4,000-line forecast.
+- Slice ledger:
+  - `feat/phase-6-latency`: `ba799f7` — whole-call and per-attempt wall-clock latency in the gateway, carried on `JevEvaluation`, persisted by schema version 3's two nullable `attempts` columns.
+
+## What P6-2 can now read
+
+`JevEvaluation.latencyMs` (whole call, retries and backoff included) and `JevEvaluation.attemptLatenciesMs` (per HTTP attempt, backoff excluded), both optional — absent means never captured, never zero. Persisted as `attempts.latency_ms` and `attempts.attempt_latencies_ms`, and reconstructed by `loadRunState` without fabricating a value for a pre-P6-1 row.
 
 ## Open questions carried forward
 
@@ -106,4 +114,4 @@ The JSON report is the contract every later phase reads: Phase 7's benchmarks co
 
 ## Next step
 
-Delegate P6-1 on a child branch off `feat/phase-6-reporting` with strict TDD, then review, verify, and commit before opening P6-2.
+Delegate P6-2 (the versioned canonical JSON report) on a child branch off `feat/phase-6-latency`. It now has latency available — see "What P6-2 can now read" above — and must add the report version envelope, per-test-case cache status, and incomplete-run visibility.
