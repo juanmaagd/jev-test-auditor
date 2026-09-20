@@ -159,7 +159,7 @@ Each is demonstrably met, per the evidence cited; none is marked met on assumpti
 
 ## Progress
 
-- Current task: **P5-5 — done; phase complete**, pending orchestrator review and commit.
+- Current task: **none — Phase 5 complete**.
 - Completed tasks: **P5-1**, **P5-2**, **P5-3**, **P5-4**, **P5-5**.
 - Running authored count: **~8,095** (1,827 after P5-1 + ~1,301 for P5-2 + ~1,677 for P5-3 + ~1,553 for P5-4 + ~686 for the rootDir-identity defect fix + ~1,051 for P5-5), well over the 3,000-line phase forecast — expected, per this document's own note that Phases 3 and 4 overran similarly.
 - Slice ledger:
@@ -167,7 +167,7 @@ Each is demonstrably met, per the evidence cited; none is marked met on assumpti
   - `feat/phase-5-cache-key`: `86d1416` — content-addressed cache key (`src/adapters/cache-key.ts`), schema version 2 (`work_items.cache_key`), `AuditStorePort.lookup`, cache-aware `runEvaluation`, and `--fresh`.
   - `feat/phase-5-scheduler`: `aec02f8` — adaptive concurrency controller (`src/domain/scheduler.ts`), the dynamic dispatcher and request/token budget gate (`src/application/scheduler.ts`, replacing `runBoundedPool`), `ResolvedConfiguration.schedule`, and durable `pending`/`running` checkpoints (`AuditStoreWorkItemOutcome`).
   - `feat/phase-5-resume`: `2ae8caf` + `7b80a8e` — `AuditStorePort.loadRunState`, `--resume <runId>` preflight and completion in `runAudit`/`runEvaluation`, three new named resume error types, and CLI wiring (`--resume` parsing, error handling, `Nothing to resume` reporting, `resume` field in `--evaluate`/`--evaluate --json`); plus, found and fixed in the same slice before commit, the rootDir-identity defect fix — see "Open questions carried forward" below for the full design, symlink, and backward-compatibility decisions.
-  - `feat/phase-5-cache-aware-estimate`, off `feat/phase-5-resume`: not yet committed — cache-aware `estimateDryRun` (`cacheHitTestCaseIds`/`cacheHits`), `computeDryRunCacheHits`/`RunAuditOptions.retainSourceText`/`AuditResult.sourceTextByPath` (`src/application/audit.ts`), the read-only `openSqliteAuditStoreForLookup` adapter (`src/adapters/sqlite-audit-store.ts`), and CLI wiring/reporting (`src/cli/index.ts`) — see P5-5's own evidence bullet above for the full design, including the `immutable=1` empirical investigation.
+  - `feat/phase-5-cache-aware-estimate`: `632d384` + `6712cb8` — cache-aware `estimateDryRun` (`cacheHitTestCaseIds`/`cacheHits`), `computeDryRunCacheHits`/`RunAuditOptions.retainSourceText`/`AuditResult.sourceTextByPath` (`src/application/audit.ts`), the read-only `openSqliteAuditStoreForLookup` adapter (`src/adapters/sqlite-audit-store.ts`), and CLI wiring/reporting (`src/cli/index.ts`) — see P5-5's own evidence bullet above for the full design, including the `immutable=1` empirical investigation.
 
 ## Open questions carried forward
 
@@ -194,4 +194,8 @@ Each is demonstrably met, per the evidence cited; none is marked met on assumpti
 
 ## Next step
 
-Orchestrator reviews P5-5 (cache-aware `--dry-run`) on `feat/phase-5-cache-aware-estimate`, off `feat/phase-5-resume` — in particular the two decision gaps flagged immediately above (the byte-identity-vs-disclosure reading, and the schema-version discrimination behavior) — and commits it. This is the phase's last planned task: once P5-5 is reviewed and committed, Phase 5 ("Persistence, caching, and resilience") is complete, subject to the still-open items listed above (none of which block this task's own acceptance criteria).
+Phase 5 is complete and reviewed. Both P5-5 decision gaps were resolved by the orchestrator and implemented in `6712cb8`: the dry-run report now states whether the local cache was consulted and, when it was not, whether that is because no store exists yet or because the store's schema predates this build, while every estimate number stays exactly as it was. The schema-version discrimination P5-5 proposed was confirmed correct — an older store degrades to a disclosed "not consulted", while a newer or corrupt one keeps failing with the same visible named error `--evaluate` raises.
+
+Verified independently by the orchestrator against the built CLI: a cold dry run discloses "no audit store exists yet" and creates no file or config directory; a store whose schema is older discloses the migration reason and names `--evaluate` as the remedy, with the store's hash and size unchanged and no sidecar created; a store recorded at version 999 fails with a named, readable message and exit 1, no stack trace.
+
+Integrating the Phase 5 chain into `main` is the user's decision. The natural next step after that is Phase 6 (self-contained offline HTML reporting) per `docs/implementation-plan.md`, with the open questions above carried into it — in particular that `store.databasePath` and `schedule` remain reachable only programmatically, and that error messages now persist to disk, which raises the stakes on the gateway's existing `redact()`.
