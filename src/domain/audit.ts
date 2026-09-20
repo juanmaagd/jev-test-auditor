@@ -315,8 +315,43 @@ export interface AuditStorePort {
   lookup(cacheKey: string): Promise<AuditStoreCachedJudgment | undefined>;
   /** Marks `runId` finished. */
   finishRun(runId: string): Promise<void>;
+  /**
+   * Loads the durable state of a previously started run (Phase 5, task
+   * P5-4, `--resume <runId>`): `undefined` when no run with `runId` exists
+   * at all — a distinct, visible error at the caller (see
+   * `AuditResumeRunNotFoundError`), never confused with "a run that exists
+   * but has nothing outstanding." See {@link AuditStoreRunState}'s own doc
+   * for exactly what `terminalWorkItems` does (and does not) include.
+   */
+  loadRunState(runId: string): Promise<AuditStoreRunState | undefined>;
   /** Releases the underlying database handle. Safe to call once, after every other call for this store has settled. */
   close(): Promise<void>;
+}
+
+/**
+ * The durable state of one previously started run (Phase 5, task P5-4),
+ * read back for `--resume <runId>`.
+ *
+ * `terminalWorkItems` holds exactly one {@link AuditStoreWorkItemOutcome}
+ * per work-item identity that has at least one recorded row under this
+ * run: the identity's LAST recorded row (highest `work_items.id`,
+ * insertion order — never `recorded_at`, for the same collision reason
+ * `AuditStorePort.lookup`'s own doc gives), and only when that last row's
+ * state is one of the four terminal states (`completed`, `cached`,
+ * `failed`, `skipped`). An identity whose last row is `pending`/`running`,
+ * or that has no row at all under this run, is never included here — it is
+ * exactly the run's *outstanding* set, and this port deliberately does not
+ * compute that set itself: the caller (`runAudit`, `src/application/audit.ts`)
+ * is the one that already knows which identities are currently evaluable
+ * (or skippable) at all, so "outstanding" is "currently relevant and NOT
+ * in this list," decided there, not duplicated here.
+ */
+export interface AuditStoreRunState {
+  /** The root directory this run was originally started against (`AuditStorePort.beginRun`'s own argument) — compared by the caller against the root being audited now, so a run recorded for one repository is never silently resumed against another. */
+  readonly rootDir: string;
+  /** Whether `finishRun` was ever called for this run. `true` implies (but is not the only way to reach) "nothing is outstanding" — every terminal work item a finished run could have is already reflected in `terminalWorkItems`; see this interface's own doc for why an unfinished run can independently have zero outstanding items too (a crash between the last item's terminal write and `finishRun` itself). */
+  readonly finished: boolean;
+  readonly terminalWorkItems: readonly AuditStoreWorkItemOutcome[];
 }
 
 export type AuditStoreErrorCode = 'schema-version' | 'corrupt';
@@ -379,6 +414,97 @@ export class AuditStoreCorruptError extends AuditStoreErrorBase {
 }
 
 export type AuditStoreError = AuditStoreSchemaVersionError | AuditStoreCorruptError;
+
+export type AuditResumeErrorCode = 'run-not-found' | 'root-dir-mismatch' | 'store-unavailable';
+
+abstract class AuditResumeErrorBase extends Error {
+  abstract readonly code: AuditResumeErrorCode;
+  readonly runId: string;
+
+  protected constructor(runId: string, message: string) {
+    super(message);
+    this.name = new.target.name;
+    this.runId = runId;
+  }
+}
+
+/**
+ * `--resume <runId>` (Phase 5, task P5-4) named `runId`, but no run with
+ * that id exists in the audit store at all (`AuditStorePort.loadRunState`
+ * returned `undefined`) — never silently started as a new run instead, and
+ * never confused with {@link AuditResumeRootDirMismatchError} or "a run
+ * that exists but is already finished" (not an error at all — see
+ * `runAudit`'s own doc).
+ */
+export class AuditResumeRunNotFoundError extends AuditResumeErrorBase {
+  readonly code = 'run-not-found' as const;
+
+  constructor(runId: string) {
+    super(runId, `--resume ${runId}: no run with this id exists in the audit store.`);
+  }
+}
+
+/**
+ * `--resume <runId>` named a run that exists, but was originally started
+ * (`AuditStorePort.beginRun`) against a different root directory than the
+ * one being audited now — never silently resumed against the wrong
+ * repository's recorded work items.
+ */
+export class AuditResumeRootDirMismatchError extends AuditResumeErrorBase {
+  readonly code = 'root-dir-mismatch' as const;
+  readonly recordedRootDir: string;
+  readonly requestedRootDir: string;
+
+  constructor(runId: string, recordedRootDir: string, requestedRootDir: string) {
+    super(
+      runId,
+      `--resume ${runId}: this run was recorded against root "${recordedRootDir}", not "${requestedRootDir}" being audited now.`,
+    );
+    this.recordedRootDir = recordedRootDir;
+    this.requestedRootDir = requestedRootDir;
+  }
+}
+
+/**
+ * `--resume <runId>` was requested but no {@link AuditStorePort} is
+ * available to resume from at all — defensive: the CLI itself never
+ * reaches `runAudit` in this shape (`--resume` requires `--evaluate`, and
+ * a successful `--evaluate` always constructs a store), but a direct
+ * library caller could still pass `RunAuditOptions.resume` without a
+ * store, and this is reported the same named way rather than throwing a
+ * raw `TypeError` from an unguarded `ports.store!`.
+ */
+export class AuditResumeUnavailableError extends AuditResumeErrorBase {
+  readonly code = 'store-unavailable' as const;
+
+  constructor(runId: string) {
+    super(runId, `--resume ${runId}: no audit store is available to resume from (requires --evaluate with a working audit store).`);
+  }
+}
+
+export type AuditResumeError = AuditResumeRunNotFoundError | AuditResumeRootDirMismatchError | AuditResumeUnavailableError;
+
+/**
+ * `--resume <runId>`'s own summary of one audit run (Phase 5, task P5-4),
+ * present on {@link AuditResult} only when `RunAuditOptions.resume` was
+ * used. `outstanding` is how many currently evaluable work items were NOT
+ * already terminal under this run id (the ones this call actually
+ * dispatched, or would have — `0` for the `nothingOutstanding` case);
+ * `reused` is how many were already terminal and were reused as-is,
+ * without a new provider request. `nothingOutstanding` is `true` in
+ * exactly two cases, both reported identically to the caller: the run was
+ * already finished (`AuditStoreRunState.finished`), diagnosed before any
+ * discovery ran at all; or discovery ran and found zero outstanding items
+ * anyway (a crash between the last item's terminal write and `finishRun`
+ * itself — see {@link AuditStoreRunState.finished}'s own doc). Neither is
+ * an error: see `runAudit`'s own doc.
+ */
+export interface AuditResumeSummary {
+  readonly runId: string;
+  readonly outstanding: number;
+  readonly reused: number;
+  readonly nothingOutstanding: boolean;
+}
 
 export interface AuditPorts {
   readonly discovery: AuditDiscoveryPort;
@@ -499,6 +625,8 @@ export interface AuditResult {
   readonly reportingOnly: true;
   /** `undefined` unless `--evaluate` was requested (i.e. `AuditPorts.evaluation` was present) — see {@link AuditEvaluationPort}'s doc for the full opt-in contract. */
   readonly evaluation?: AuditEvaluationResult;
+  /** `undefined` unless `RunAuditOptions.resume` was used (Phase 5, task P5-4) — see {@link AuditResumeSummary}'s own doc. */
+  readonly resume?: AuditResumeSummary;
 }
 
 export type AuditConfigurationOverrides = ConfigurationOverrides;

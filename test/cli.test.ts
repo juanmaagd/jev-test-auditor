@@ -7,7 +7,7 @@ import { runAudit } from '../src/application/audit.js';
 import { runCli, type CliIo } from '../src/cli/index.js';
 import { createJevEvaluationPort } from '../src/adapters/jev-evaluation-port.js';
 import { readStoredCredentials, resolveAuthStoragePaths, writeStoredCredentials } from '../src/adapters/auth-storage.js';
-import { resolveAuditStorePaths } from '../src/adapters/sqlite-audit-store.js';
+import { createSqliteAuditStore, resolveAuditStorePaths } from '../src/adapters/sqlite-audit-store.js';
 import { AuthPromptCancelledError } from '../src/domain/auth.js';
 import { AuditStoreSchemaVersionError } from '../src/domain/audit.js';
 import type { AuditEvaluationPort, AuditFileResult, AuditPorts, AuditResult, AuditStorePort, AuditStoreWorkItemOutcome } from '../src/domain/audit.js';
@@ -1443,6 +1443,7 @@ describe('SQLite audit store (Phase 5, task P5-1)', () => {
       recordWorkItem: async () => { workItems += 1; },
       lookup: async () => undefined,
       finishRun: async () => undefined,
+      loadRunState: async () => undefined,
       close: async () => { closed = true; },
     };
 
@@ -1568,23 +1569,53 @@ describe('content-addressed caching wiring (Phase 5, task P5-2)', () => {
     };
   }
 
-  /** A stateful in-memory store, persisted ACROSS `runCli` calls by returning the same instance from `createStorePort` every time — simulating what a real on-disk SQLite file would do between two separate CLI invocations against the same root. */
+  /**
+   * A stateful in-memory store, persisted ACROSS `runCli` calls by returning the same instance
+   * from `createStorePort` every time — simulating what a real on-disk SQLite file would do
+   * between two separate CLI invocations against the same root. Tracks each `recordWorkItem` call
+   * alongside its owning `runId` (Phase 5, task P5-4) so `loadRunState` can answer per-run, exactly
+   * like the real adapter's `MAX(id)`-grouped query: the LAST recorded outcome per identity within
+   * that one run, filtered down to the four terminal states.
+   */
   function statefulStore(): AuditStorePort {
-    const workItems: AuditStoreWorkItemOutcome[] = [];
+    const workItemCalls: { readonly runId: string; readonly outcome: AuditStoreWorkItemOutcome }[] = [];
+    const rootDirByRunId = new Map<string, string>();
+    const finishedRunIds = new Set<string>();
     let runCount = 0;
     return {
-      beginRun: async () => { runCount += 1; return `run-${runCount}`; },
-      recordWorkItem: async (_runId, outcome) => { workItems.push(outcome); },
+      beginRun: async (rootDir) => {
+        runCount += 1;
+        const runId = `run-${runCount}`;
+        rootDirByRunId.set(runId, rootDir);
+        return runId;
+      },
+      recordWorkItem: async (runId, outcome) => { workItemCalls.push({ runId, outcome }); },
       lookup: async (cacheKey) => {
-        for (let index = workItems.length - 1; index >= 0; index -= 1) {
-          const outcome = workItems[index]!;
+        for (let index = workItemCalls.length - 1; index >= 0; index -= 1) {
+          const { outcome } = workItemCalls[index]!;
           if (outcome.state === 'completed' && outcome.cacheKey === cacheKey && outcome.evaluation.modelMatchesPin) {
             return { classification: outcome.classification };
           }
         }
         return undefined;
       },
-      finishRun: async () => undefined,
+      finishRun: async (runId) => { finishedRunIds.add(runId); },
+      loadRunState: async (runId) => {
+        const rootDir = rootDirByRunId.get(runId);
+        if (rootDir === undefined) return undefined;
+        const lastByIdentity = new Map<string, AuditStoreWorkItemOutcome>();
+        for (const call of workItemCalls) {
+          if (call.runId !== runId) continue;
+          lastByIdentity.set(
+            JSON.stringify([call.outcome.identity.testCaseId, call.outcome.identity.repositoryRelativePath, call.outcome.identity.name]),
+            call.outcome,
+          );
+        }
+        const terminalWorkItems = [...lastByIdentity.values()].filter(
+          (outcome) => outcome.state === 'completed' || outcome.state === 'cached' || outcome.state === 'failed' || outcome.state === 'skipped',
+        );
+        return { rootDir, finished: finishedRunIds.has(runId), terminalWorkItems };
+      },
       close: async () => undefined,
     };
   }
@@ -1614,6 +1645,258 @@ describe('content-addressed caching wiring (Phase 5, task P5-2)', () => {
     });
     expect(third).toBe(0);
     expect(evaluateCalls).toBe(2); // --fresh bypassed the warm cache
+  });
+});
+
+/**
+ * `--resume <runId>` wiring end-to-end (Phase 5, task P5-4), through the real `runCli` pipeline
+ * and, for the central test, the REAL `node:sqlite` adapter — not a store fake — so this exercises
+ * genuine persistence and reopening, not a stand-in for it.
+ */
+describe('resume wiring (Phase 5, task P5-4)', () => {
+  useIsolatedConfigHome();
+
+  const twoTestFixtureFiles = {
+    'math.test.ts': "import { expect, test } from 'vitest';\n"
+      + "test('adds', () => { expect(1 + 1).toBe(2); });\n"
+      + "test('subtracts', () => { expect(2 - 1).toBe(1); });\n",
+  };
+
+  /**
+   * A deterministic evaluation port: every test case's classification is derived purely from its
+   * own name (never from call count or ordering), so a baseline run and a later interrupted+resumed
+   * run over the SAME fixture produce byte-identical classifications regardless of which physical
+   * dispatch computed them — required for this suite's byte-for-byte report comparison.
+   * `hangFor`, when given, makes that ONE test case's `evaluate()` call never resolve at all (no
+   * timer, no rejection) — the closest a unit test can get to a literal SIGKILL: the provider
+   * request is genuinely in flight and its answer is never received, exactly like P5-3's own
+   * measured SIGKILL evidence, as opposed to a caught, terminal `failed` outcome a mere rejection
+   * would produce (impossible to leave `running` for `--resume` to find — see this task's own
+   * report on why a rejecting gateway can never simulate an interruption under P5-3's per-item
+   * failure isolation).
+   */
+  function deterministicEvaluationPort(hangFor?: string, onCall?: (name: string) => void): AuditEvaluationPort {
+    return {
+      async evaluate(request) {
+        onCall?.(request.testCase.name);
+        if (request.testCase.name === hangFor) return new Promise<never>(() => {});
+        const tokens = request.testCase.name.length * 10;
+        return {
+          evaluation: {
+            requestedModel: 'jev-1.13.0',
+            respondedModel: 'jev-1.13.0',
+            modelMatchesPin: true,
+            answers: {},
+            usage: { inputTokens: tokens, outputTokens: 1 },
+            attempts: 1,
+          },
+          classification: {
+            testCaseId: request.testCase.id,
+            repositoryRelativePath: request.testCase.repositoryRelativePath,
+            name: request.testCase.name,
+            status: 'healthy',
+            dimensions: [],
+            findings: [],
+            policyVersion: 2,
+            rubricVersion: 2,
+            model: { requested: 'jev-1.13.0', responded: 'jev-1.13.0', matchesPin: true },
+            usage: { inputTokens: tokens, outputTokens: 1 },
+          },
+        };
+      },
+    };
+  }
+
+  async function tempDbFile(): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), 'jev-resume-store-'));
+    temporaryRoots.push(dir);
+    return join(dir, 'audit-store.sqlite3');
+  }
+
+  /** Wraps a real store so the test can learn the `runId` `beginRun` mints, without changing the store's own behavior. */
+  function capturingRunId(store: AuditStorePort, onRunId: (runId: string) => void): AuditStorePort {
+    return {
+      ...store,
+      beginRun: async (rootDir: string) => {
+        const runId = await store.beginRun(rootDir);
+        onRunId(runId);
+        return runId;
+      },
+    };
+  }
+
+  async function waitUntil(check: () => Promise<boolean>, timeoutMs = 2000, intervalMs = 10): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      if (await check()) return;
+      if (Date.now() > deadline) throw new Error('waitUntil: condition never became true');
+      await new Promise((resolve) => { setTimeout(resolve, intervalMs); });
+    }
+  }
+
+  it(
+    'an in-flight request that never resolves (the closest a unit test gets to a literal SIGKILL) leaves the completed item '
+    + 'committed; --resume dispatches only the outstanding item, never re-dispatches the completed one, and produces the same '
+    + 'evaluation report an uninterrupted run over the same fixture would',
+    async () => {
+      const root = await fixture(twoTestFixtureFiles);
+
+      // Baseline: a completely separate database, never touched by the interrupted/resumed pair
+      // below, so a warm cache can never make the final comparison vacuous.
+      const baselineDb = await tempDbFile();
+      const baselineOutput = captureOutput();
+      const baselineExit = await runCli(['audit', '--rootDir', root, '--evaluate', '--json'], baselineOutput.io, {
+        createEvaluationPort: () => deterministicEvaluationPort(),
+        createStorePort: () => createSqliteAuditStore({ databaseFile: baselineDb }),
+      });
+      expect(baselineExit).toBe(0);
+      const baselineReport = JSON.parse(baselineOutput.lines[0]!) as Record<string, unknown>;
+
+      // Interrupted attempt: 'adds' completes and commits for real; 'subtracts' is called (its
+      // `running` checkpoint is written BEFORE `evaluate()` is ever invoked — see
+      // `src/application/audit.ts`'s `runEvaluation`) and then hangs forever. `runCli`'s own
+      // returned promise therefore never settles — it is deliberately never awaited.
+      const interruptedDb = await tempDbFile();
+      let capturedRunId: string | undefined;
+      const subtractsCalled = { resolve: (): void => {} };
+      const subtractsCalledPromise = new Promise<void>((resolve) => { subtractsCalled.resolve = resolve; });
+      const interruptedStore = capturingRunId(
+        await createSqliteAuditStore({ databaseFile: interruptedDb }),
+        (runId) => { capturedRunId = runId; },
+      );
+      const interruptedEvaluation = deterministicEvaluationPort('subtracts', (name) => {
+        if (name === 'subtracts') subtractsCalled.resolve();
+      });
+      // Deliberately not awaited — this call never resolves.
+      void runCli(['audit', '--rootDir', root, '--evaluate'], captureOutput().io, {
+        createEvaluationPort: () => interruptedEvaluation,
+        createStorePort: () => interruptedStore,
+      });
+
+      await subtractsCalledPromise;
+      if (capturedRunId === undefined) throw new Error('expected a captured run id');
+      const runId = capturedRunId;
+      // Poll until 'adds' has genuinely committed as `completed` — a handful of async store writes
+      // happen between 'subtracts' being called and 'adds' settling; this waits for the real thing
+      // rather than assuming a fixed delay.
+      await waitUntil(async () => {
+        const state = await interruptedStore.loadRunState(runId);
+        return state !== undefined && state.terminalWorkItems.length === 1;
+      });
+      const interruptedState = await interruptedStore.loadRunState(runId);
+      expect(interruptedState?.finished).toBe(false);
+      expect(interruptedState?.terminalWorkItems.map((item) => item.identity.name)).toEqual(['adds']);
+      // Close this connection cleanly before reopening it for the resume — exactly like a real
+      // process restart against the same on-disk file (P5-3's own measured SIGKILL/reopen evidence).
+      await interruptedStore.close();
+
+      const dispatchedOnResume: string[] = [];
+      const resumeOutput = captureOutput();
+      const resumeExit = await runCli(['audit', '--rootDir', root, '--evaluate', '--json', '--resume', runId], resumeOutput.io, {
+        createEvaluationPort: () => deterministicEvaluationPort(undefined, (name) => { dispatchedOnResume.push(name); }),
+        createStorePort: () => createSqliteAuditStore({ databaseFile: interruptedDb }),
+      });
+
+      expect(resumeExit).toBe(0);
+      // Only the outstanding item is ever dispatched — 'adds' is reused, never redispatched.
+      expect(dispatchedOnResume).toEqual(['subtracts']);
+
+      const resumedReport = JSON.parse(resumeOutput.lines[0]!) as Record<string, unknown>;
+      expect(resumedReport['resume']).toEqual({ runId, outstanding: 1, reused: 1 });
+      // Same final report as an uninterrupted run over the same fixture — everything except the
+      // resume-specific metadata this task deliberately adds matches byte-for-byte (compared as
+      // parsed objects here to isolate that one intentional, documented difference).
+      delete resumedReport['resume'];
+      expect(resumedReport).toEqual(baselineReport);
+    },
+  );
+
+  it('rejects with a named message and exit code 1 when --resume is combined with a different --rootDir than the run was recorded against', async () => {
+    const rootA = await fixture(twoTestFixtureFiles);
+    const rootB = await fixture(twoTestFixtureFiles);
+    const db = await tempDbFile();
+    let runId: string | undefined;
+    const store = capturingRunId(await createSqliteAuditStore({ databaseFile: db }), (id) => { runId = id; });
+
+    const first = await runCli(['audit', '--rootDir', rootA, '--evaluate'], captureOutput().io, {
+      createEvaluationPort: () => deterministicEvaluationPort(),
+      createStorePort: () => store,
+    });
+    expect(first).toBe(0);
+    if (runId === undefined) throw new Error('expected a captured run id');
+
+    const output = captureOutput();
+    const exitCode = await runCli(['audit', '--rootDir', rootB, '--evaluate', '--resume', runId], output.io, {
+      createEvaluationPort: () => deterministicEvaluationPort(),
+      createStorePort: () => createSqliteAuditStore({ databaseFile: db }),
+    });
+
+    expect(exitCode).toBe(1);
+    expect(output.lines).toHaveLength(1);
+    expect(output.lines[0]).toContain(runId);
+    expect(output.lines[0]).toContain(rootA);
+    expect(output.lines[0]).toContain(rootB);
+  });
+
+  it('a run id that was never started is a named usage error, exit code 1, no stack trace', async () => {
+    const root = await fixture(twoTestFixtureFiles);
+    const db = await tempDbFile();
+    const output = captureOutput();
+
+    const exitCode = await runCli(['audit', '--rootDir', root, '--evaluate', '--resume', 'never-started-run'], output.io, {
+      createEvaluationPort: () => deterministicEvaluationPort(),
+      createStorePort: () => createSqliteAuditStore({ databaseFile: db }),
+    });
+
+    expect(exitCode).toBe(1);
+    expect(output.lines).toHaveLength(1);
+    expect(output.lines[0]).toContain('never-started-run');
+  });
+
+  it('an already-finished run reports honestly that there is nothing to resume — not an error, exit code 0 — and dispatches nothing', async () => {
+    const root = await fixture(twoTestFixtureFiles);
+    const db = await tempDbFile();
+    let runId: string | undefined;
+    const store = capturingRunId(await createSqliteAuditStore({ databaseFile: db }), (id) => { runId = id; });
+
+    const first = await runCli(['audit', '--rootDir', root, '--evaluate'], captureOutput().io, {
+      createEvaluationPort: () => deterministicEvaluationPort(),
+      createStorePort: () => store,
+    });
+    expect(first).toBe(0);
+    if (runId === undefined) throw new Error('expected a captured run id');
+
+    const dispatched: string[] = [];
+    const output = captureOutput();
+    const exitCode = await runCli(['audit', '--rootDir', root, '--evaluate', '--resume', runId], output.io, {
+      createEvaluationPort: () => deterministicEvaluationPort(undefined, (name) => { dispatched.push(name); }),
+      createStorePort: () => createSqliteAuditStore({ databaseFile: db }),
+    });
+
+    expect(exitCode).toBe(0);
+    expect(dispatched).toEqual([]);
+    expect(output.lines).toHaveLength(1);
+    expect(output.lines[0]).toContain('Nothing to resume');
+    expect(output.lines[0]).toContain(runId);
+  });
+
+  it('--resume is rejected without --evaluate', async () => {
+    const root = await fixture(twoTestFixtureFiles);
+    const output = captureOutput();
+
+    const exitCode = await runCli(['audit', '--rootDir', root, '--resume', 'whatever-run'], output.io);
+
+    expect(exitCode).toBe(1);
+    expect(output.lines[0]).toContain('--resume requires --evaluate');
+  });
+
+  it('--resume with no following value is a usage error naming the missing argument', async () => {
+    const output = captureOutput();
+
+    const exitCode = await runCli(['audit', '--evaluate', '--resume'], output.io);
+
+    expect(exitCode).toBe(1);
+    expect(output.lines[0]).toContain('--resume requires a run id');
   });
 });
 

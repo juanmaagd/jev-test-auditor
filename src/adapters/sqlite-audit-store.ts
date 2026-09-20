@@ -33,12 +33,15 @@ import {
   AuditStoreSchemaVersionError,
   type AuditStoreCachedJudgment,
   type AuditStorePort,
+  type AuditStoreRunState,
   type AuditStoreWorkItemIdentity,
   type AuditStoreWorkItemOutcome,
   type WorkItemState,
 } from '../domain/audit.js';
 import type { ClassificationResult } from '../domain/classification.js';
+import type { DryRunSkippedReason } from '../domain/estimate.js';
 import type { JevEvaluation } from '../domain/jev-gateway.js';
+import type { TestCaseId } from '../domain/test-understanding.js';
 
 const APP_DIR_NAME = 'jev-test-auditor';
 const DATABASE_FILE_NAME = 'audit-store.sqlite3';
@@ -383,6 +386,89 @@ function insertSkip(db: DatabaseSync, workItemId: number, reason: string): void 
   db.prepare('INSERT INTO skips (work_item_id, reason) VALUES (?, ?)').run(workItemId, reason);
 }
 
+// --- Row readers (Phase 5, task P5-4: `AuditStorePort.loadRunState`, for `--resume <runId>`) --
+
+interface StoredAttemptRow {
+  readonly requested_model: string;
+  readonly responded_model: string;
+  readonly model_matches_pin: number;
+  readonly attempts: number;
+  readonly raw_answers: string;
+  readonly input_tokens: number;
+  readonly output_tokens: number;
+}
+
+function loadAttempt(db: DatabaseSync, workItemId: number): JevEvaluation | undefined {
+  const row = db.prepare(`
+    SELECT requested_model, responded_model, model_matches_pin, attempts, raw_answers, input_tokens, output_tokens
+    FROM attempts WHERE work_item_id = ?
+  `).get(workItemId) as StoredAttemptRow | undefined;
+  if (row === undefined) return undefined;
+  return {
+    requestedModel: row.requested_model,
+    respondedModel: row.responded_model,
+    modelMatchesPin: row.model_matches_pin === 1,
+    answers: JSON.parse(row.raw_answers) as JevEvaluation['answers'],
+    usage: { inputTokens: row.input_tokens, outputTokens: row.output_tokens },
+    attempts: row.attempts,
+  };
+}
+
+function loadJudgment(db: DatabaseSync, workItemId: number): ClassificationResult | undefined {
+  const row = db.prepare('SELECT classification FROM judgments WHERE work_item_id = ?').get(workItemId) as
+    | { readonly classification: string }
+    | undefined;
+  if (row === undefined) return undefined;
+  return JSON.parse(row.classification) as ClassificationResult;
+}
+
+function loadError(db: DatabaseSync, workItemId: number): { readonly kind: string; readonly message: string } | undefined {
+  return db.prepare('SELECT kind, message FROM errors WHERE work_item_id = ?').get(workItemId) as
+    | { readonly kind: string; readonly message: string }
+    | undefined;
+}
+
+function loadSkip(db: DatabaseSync, workItemId: number): { readonly reason: string } | undefined {
+  return db.prepare('SELECT reason FROM skips WHERE work_item_id = ?').get(workItemId) as
+    | { readonly reason: string }
+    | undefined;
+}
+
+interface LastRowPerIdentity {
+  readonly id: number;
+  readonly test_case_id: string;
+  readonly repository_relative_path: string;
+  readonly name: string;
+  readonly state: string;
+  readonly cache_key: string | null;
+}
+
+/**
+ * The LAST recorded `work_items` row (highest `id`, insertion order) per
+ * `(test_case_id, repository_relative_path, name)` identity for `runId` —
+ * regardless of that row's state. Grouping is by `MAX(id)`, deliberately
+ * never `MIN(id)`: the whole point of a `pending` → `running` → terminal
+ * trail (Phase 5, task P5-3) is that the LATEST row is the current truth,
+ * and every earlier row is superseded history the caller
+ * (`loadRunState` below) must never mistake for it — see
+ * `test/sqlite-audit-store.test.ts`'s own MIN(id)-vs-MAX(id) test for
+ * exactly the corruption a swap here would cause.
+ */
+function lastRowPerIdentity(db: DatabaseSync, runId: string): readonly LastRowPerIdentity[] {
+  return db.prepare(`
+    SELECT w.id AS id, w.test_case_id AS test_case_id, w.repository_relative_path AS repository_relative_path,
+           w.name AS name, w.state AS state, w.cache_key AS cache_key
+    FROM work_items w
+    INNER JOIN (
+      SELECT test_case_id, repository_relative_path, name, MAX(id) AS max_id
+      FROM work_items
+      WHERE run_id = ?
+      GROUP BY test_case_id, repository_relative_path, name -- MUTATION
+    ) last ON last.max_id = w.id
+    WHERE w.run_id = ?
+  `).all(runId, runId) as unknown as readonly LastRowPerIdentity[];
+}
+
 export interface CreateSqliteAuditStoreOptions {
   readonly databaseFile: string;
 }
@@ -502,6 +588,45 @@ export async function createSqliteAuditStore(options: CreateSqliteAuditStoreOpti
 
     async finishRun(runId: string): Promise<void> {
       db.prepare('UPDATE runs SET finished_at = ? WHERE id = ?').run(new Date().toISOString(), runId);
+    },
+
+    async loadRunState(runId: string): Promise<AuditStoreRunState | undefined> {
+      const runRow = db.prepare('SELECT root_dir, finished_at FROM runs WHERE id = ?').get(runId) as
+        | { readonly root_dir: string; readonly finished_at: string | null }
+        | undefined;
+      if (runRow === undefined) return undefined;
+
+      const terminalWorkItems: AuditStoreWorkItemOutcome[] = [];
+      for (const row of lastRowPerIdentity(db, runId)) {
+        const identity: AuditStoreWorkItemIdentity = {
+          testCaseId: row.test_case_id as TestCaseId,
+          repositoryRelativePath: row.repository_relative_path,
+          name: row.name,
+        };
+        if (row.state === 'completed') {
+          const evaluation = loadAttempt(db, row.id);
+          const classification = loadJudgment(db, row.id);
+          if (evaluation !== undefined && classification !== undefined) {
+            terminalWorkItems.push({ state: 'completed', identity, ...(row.cache_key === null ? {} : { cacheKey: row.cache_key }), evaluation, classification });
+          }
+        } else if (row.state === 'cached') {
+          const classification = loadJudgment(db, row.id);
+          if (classification !== undefined && row.cache_key !== null) {
+            terminalWorkItems.push({ state: 'cached', identity, cacheKey: row.cache_key, classification });
+          }
+        } else if (row.state === 'failed') {
+          const error = loadError(db, row.id);
+          if (error !== undefined) terminalWorkItems.push({ state: 'failed', identity, errorKind: error.kind, errorMessage: error.message });
+        } else if (row.state === 'skipped') {
+          const skip = loadSkip(db, row.id);
+          if (skip !== undefined) terminalWorkItems.push({ state: 'skipped', identity, reason: skip.reason as DryRunSkippedReason });
+        }
+        // 'pending'/'running' (and an 'uncertain' row, never produced today — see
+        // `WorkItemState`'s own doc) are intentionally not included: see `AuditStoreRunState`'s own
+        // doc for why this port never decides what is "outstanding."
+      }
+
+      return { rootDir: runRow.root_dir, finished: runRow.finished_at !== null, terminalWorkItems };
     },
 
     async close(): Promise<void> {

@@ -14,6 +14,7 @@ import {
   AuditStoreCorruptError,
   AuditStoreSchemaVersionError,
   type AuditStorePort,
+  type AuditStoreRunState,
   type AuditStoreWorkItemOutcome,
 } from '../src/domain/audit.js';
 import type { ClassificationResult } from '../src/domain/classification.js';
@@ -982,5 +983,168 @@ describe('createSqliteAuditStore lookup', () => {
     // (`healthy`), so returning the wrong one is observable.
     const hit = await store.lookup('ck-running-defensive');
     expect(hit?.classification.status).toBe('healthy');
+  });
+});
+
+// --- loadRunState (Phase 5, task P5-4: --resume) -----------------------------------------
+
+describe('createSqliteAuditStore loadRunState', () => {
+  let store: AuditStorePort;
+  let databaseFile: string;
+
+  afterEach(async () => {
+    await store?.close();
+  });
+
+  it('returns undefined when no run exists with this id', async () => {
+    databaseFile = await tempDatabaseFile();
+    store = await createSqliteAuditStore({ databaseFile });
+
+    await expect(store.loadRunState('no-such-run')).resolves.toBeUndefined();
+  });
+
+  it('reports the run\'s own rootDir, and finished: false until finishRun is called, true afterward', async () => {
+    databaseFile = await tempDatabaseFile();
+    store = await createSqliteAuditStore({ databaseFile });
+    const runId = await store.beginRun('/repo/resume-rootdir');
+
+    const beforeFinish = await store.loadRunState(runId);
+    expect(beforeFinish?.rootDir).toBe('/repo/resume-rootdir');
+    expect(beforeFinish?.finished).toBe(false);
+
+    await store.finishRun(runId);
+
+    const afterFinish = await store.loadRunState(runId);
+    expect(afterFinish?.finished).toBe(true);
+  });
+
+  it(
+    'takes the LAST recorded row per identity (highest id, insertion order), not the first: a pending-then-running-then-completed '
+    + 'trail resolves to exactly one terminal work item (completed) — a MIN(id) bug would instead see the first (pending) row and '
+    + 'report zero terminal work items',
+    async () => {
+      databaseFile = await tempDatabaseFile();
+      store = await createSqliteAuditStore({ databaseFile });
+      const runId = await store.beginRun('/repo');
+      const testCaseId = 'tc:v1:resume-trail' as TestCaseId;
+      const identity = { testCaseId, repositoryRelativePath: 'a.test.ts', name: 'adds numbers' };
+
+      await store.recordWorkItem(runId, { state: 'pending', identity });
+      await store.recordWorkItem(runId, { state: 'running', identity });
+      await recordCompleted(store, runId, testCaseId, 'ck-resume-trail', 'healthy', true);
+
+      const state = await store.loadRunState(runId);
+      expect(state?.terminalWorkItems).toHaveLength(1);
+      expect(state?.terminalWorkItems[0]?.state).toBe('completed');
+    },
+  );
+
+  it('never includes an item whose only recorded row is pending or running (never reached a terminal state) — this is the outstanding set a caller must dispatch', async () => {
+    databaseFile = await tempDatabaseFile();
+    store = await createSqliteAuditStore({ databaseFile });
+    const runId = await store.beginRun('/repo');
+    const pendingOnly = { testCaseId: 'tc:v1:resume-pending-only' as TestCaseId, repositoryRelativePath: 'a.test.ts', name: 'still pending' };
+    const runningOnly = { testCaseId: 'tc:v1:resume-running-only' as TestCaseId, repositoryRelativePath: 'a.test.ts', name: 'still running' };
+
+    await store.recordWorkItem(runId, { state: 'pending', identity: pendingOnly });
+    await store.recordWorkItem(runId, { state: 'pending', identity: runningOnly });
+    await store.recordWorkItem(runId, { state: 'running', identity: runningOnly });
+
+    const state = await store.loadRunState(runId);
+    expect(state?.terminalWorkItems).toEqual([]);
+  });
+
+  it('reconstructs a completed work item\'s raw evaluation and classification exactly, field for field, from distinct non-symmetric fixture values', async () => {
+    databaseFile = await tempDatabaseFile();
+    store = await createSqliteAuditStore({ databaseFile });
+    const runId = await store.beginRun('/repo');
+    const testCaseId = 'tc:v1:resume-completed' as TestCaseId;
+    const identity = { testCaseId, repositoryRelativePath: 'a.test.ts', name: 'adds numbers' };
+
+    await store.recordWorkItem(runId, {
+      state: 'completed',
+      identity,
+      cacheKey: 'ck-resume-completed',
+      evaluation: sampleEvaluation(),
+      classification: sampleClassification(testCaseId),
+    });
+
+    const state = await store.loadRunState(runId);
+    expect(state?.terminalWorkItems).toHaveLength(1);
+    const outcome = state?.terminalWorkItems[0];
+    expect(outcome?.state).toBe('completed');
+    if (outcome?.state !== 'completed') throw new Error('unreachable');
+    expect(outcome.identity).toEqual(identity);
+    // Every field below is a distinct, non-symmetric fixture value (see `sampleEvaluation`'s own
+    // comment) — a swap of any two columns in the reconstruction fails exactly one assertion.
+    expect(outcome.evaluation).toEqual(sampleEvaluation());
+    expect(outcome.classification).toEqual(sampleClassification(testCaseId));
+  });
+
+  it('reconstructs a cached work item\'s reused classification', async () => {
+    databaseFile = await tempDatabaseFile();
+    store = await createSqliteAuditStore({ databaseFile });
+    const runId = await store.beginRun('/repo');
+    const testCaseId = 'tc:v1:resume-cached' as TestCaseId;
+    const identity = { testCaseId, repositoryRelativePath: 'a.test.ts', name: 'adds numbers' };
+
+    await store.recordWorkItem(runId, {
+      state: 'cached',
+      identity,
+      cacheKey: 'ck-resume-cached',
+      classification: sampleClassification(testCaseId),
+    });
+
+    const state = await store.loadRunState(runId);
+    const outcome = state?.terminalWorkItems[0];
+    expect(outcome?.state).toBe('cached');
+    if (outcome?.state !== 'cached') throw new Error('unreachable');
+    expect(outcome.classification).toEqual(sampleClassification(testCaseId));
+  });
+
+  it('reconstructs a failed work item\'s error kind and message', async () => {
+    databaseFile = await tempDatabaseFile();
+    store = await createSqliteAuditStore({ databaseFile });
+    const runId = await store.beginRun('/repo');
+    const testCaseId = 'tc:v1:resume-failed' as TestCaseId;
+    const identity = { testCaseId, repositoryRelativePath: 'a.test.ts', name: 'fails' };
+
+    await store.recordWorkItem(runId, { state: 'failed', identity, errorKind: 'rate-limit', errorMessage: 'Jev rate limit exceeded (429) after 4 attempt(s).' });
+
+    const state = await store.loadRunState(runId);
+    const outcome = state?.terminalWorkItems[0];
+    expect(outcome?.state).toBe('failed');
+    if (outcome?.state !== 'failed') throw new Error('unreachable');
+    expect(outcome.errorKind).toBe('rate-limit');
+    expect(outcome.errorMessage).toBe('Jev rate limit exceeded (429) after 4 attempt(s).');
+  });
+
+  it('reconstructs a skipped work item\'s reason', async () => {
+    databaseFile = await tempDatabaseFile();
+    store = await createSqliteAuditStore({ databaseFile });
+    const runId = await store.beginRun('/repo');
+    const testCaseId = 'tc:v1:resume-skipped' as TestCaseId;
+    const identity = { testCaseId, repositoryRelativePath: 'a.test.ts', name: 'todo test' };
+
+    await store.recordWorkItem(runId, { state: 'skipped', identity, reason: 'todo' });
+
+    const state = await store.loadRunState(runId);
+    const outcome = state?.terminalWorkItems[0];
+    expect(outcome?.state).toBe('skipped');
+    if (outcome?.state !== 'skipped') throw new Error('unreachable');
+    expect(outcome.reason).toBe('todo');
+  });
+
+  it('never leaks another run\'s work items into this run\'s terminalWorkItems', async () => {
+    databaseFile = await tempDatabaseFile();
+    store = await createSqliteAuditStore({ databaseFile });
+    const runA = await store.beginRun('/repo');
+    const runB = await store.beginRun('/repo');
+    await store.recordWorkItem(runA, { state: 'skipped', identity: { testCaseId: 'tc:v1:run-a' as TestCaseId, repositoryRelativePath: 'a.test.ts', name: 'a' }, reason: 'todo' });
+    await store.recordWorkItem(runB, { state: 'skipped', identity: { testCaseId: 'tc:v1:run-b' as TestCaseId, repositoryRelativePath: 'a.test.ts', name: 'b' }, reason: 'skip' });
+
+    const state: AuditStoreRunState | undefined = await store.loadRunState(runA);
+    expect(state?.terminalWorkItems).toHaveLength(1);
+    expect(state?.terminalWorkItems[0]?.identity.testCaseId).toBe('tc:v1:run-a');
   });
 });

@@ -279,6 +279,9 @@ export {
 
 export { runAudit, type RunAuditOptions } from './application/audit.js';
 export {
+  AuditResumeRootDirMismatchError,
+  AuditResumeRunNotFoundError,
+  AuditResumeUnavailableError,
   AuditStoreCorruptError,
   AuditStoreSchemaVersionError,
   WORK_ITEM_STATES,
@@ -298,11 +301,15 @@ export {
   type AuditPorts,
   type AuditRequest,
   type AuditResult,
+  type AuditResumeError,
+  type AuditResumeErrorCode,
+  type AuditResumeSummary,
   type AuditSourceReaderPort,
   type AuditStoreCachedJudgment,
   type AuditStoreError,
   type AuditStoreErrorCode,
   type AuditStorePort,
+  type AuditStoreRunState,
   type AuditStoreWorkItemIdentity,
   type AuditStoreWorkItemOutcome,
   type AuditTotals,

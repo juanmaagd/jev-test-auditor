@@ -1,15 +1,21 @@
-import type {
-  AuditCacheKeyPort,
-  AuditEvaluationPort,
-  AuditEvaluationResult,
-  AuditEvaluationTotals,
-  AuditPorts,
-  AuditRequest,
-  AuditResult,
-  AuditDiagnostic,
-  AuditFileResult,
-  AuditStorePort,
-  AuditStoreWorkItemIdentity,
+import {
+  AuditResumeRootDirMismatchError,
+  AuditResumeRunNotFoundError,
+  AuditResumeUnavailableError,
+  type AuditCacheKeyPort,
+  type AuditEvaluationPort,
+  type AuditEvaluationResult,
+  type AuditEvaluationTotals,
+  type AuditPorts,
+  type AuditRequest,
+  type AuditResult,
+  type AuditResumeSummary,
+  type AuditDiagnostic,
+  type AuditFileResult,
+  type AuditStorePort,
+  type AuditStoreRunState,
+  type AuditStoreWorkItemIdentity,
+  type AuditStoreWorkItemOutcome,
 } from '../domain/audit.js';
 import type { ClassificationResult, OverallClassificationStatus } from '../domain/classification.js';
 import { classifyTestCase, type DryRunSkippedReason } from '../domain/estimate.js';
@@ -150,10 +156,67 @@ interface EvaluationRunResult {
   readonly diagnostics: readonly AuditDiagnostic[];
   /** The same failures, grouped by owning file path, as plain `Diagnostic`s (no path field) for merging into that file's own `diagnostics` — parity with how `evidence-selection-failed` is merged. */
   readonly fileDiagnosticsByPath: ReadonlyMap<string, readonly Diagnostic[]>;
+  /** `undefined` unless resuming (Phase 5, task P5-4): how many currently evaluable items were outstanding (dispatched, or would have been) vs. already terminal and reused as-is. */
+  readonly resumeCounts?: { readonly outstanding: number; readonly reused: number };
 }
 
 function identityOf(testCase: TestCase): AuditStoreWorkItemIdentity {
   return { testCaseId: testCase.id, repositoryRelativePath: testCase.repositoryRelativePath, name: testCase.name };
+}
+
+/** A stable string key for a work-item identity (Phase 5, task P5-4), so a resumed run's `terminalWorkItems` (loaded by identity fields, not by array position) can be matched against the currently discovered evaluable/skippable items via a `Map`. */
+function identityKey(identity: AuditStoreWorkItemIdentity): string {
+  return JSON.stringify([identity.testCaseId, identity.repositoryRelativePath, identity.name]);
+}
+
+/**
+ * Reconstructs the exact `evaluation-failed` diagnostic a previously
+ * recorded `failed` work item would have produced (Phase 5, task P5-4):
+ * `messageOf` reads `.message` (an `Error` instance), and
+ * `evaluationErrorKind` duck-types `.code` — both satisfied here with the
+ * ORIGINAL `errorKind`/`errorMessage` a resumed run reuses rather than
+ * regenerates, so a reused failure's diagnostic reads identically to the
+ * one the interrupted attempt itself produced.
+ */
+class ResumedEvaluationFailure extends Error {
+  readonly code: string;
+
+  constructor(errorKind: string, errorMessage: string) {
+    super(errorMessage);
+    this.name = 'ResumedEvaluationFailure';
+    this.code = errorKind;
+  }
+}
+
+/**
+ * One evaluable item's already-terminal outcome from a resumed run's
+ * `AuditStoreRunState.terminalWorkItems` (Phase 5, task P5-4), narrowed to
+ * the three states that can ever apply to a currently-evaluable item — a
+ * `skipped` terminal record is never passed here (see `runEvaluation`'s own
+ * resume-partitioning comment for why: it would mean the source changed
+ * between the interrupted attempt and this resume, and that drift is
+ * handled by treating the item as outstanding instead, not by reuse).
+ */
+type ResumableTerminalOutcome = Extract<AuditStoreWorkItemOutcome, { readonly state: 'completed' | 'cached' | 'failed' }>;
+
+function isResumableTerminal(outcome: AuditStoreWorkItemOutcome): outcome is ResumableTerminalOutcome {
+  return outcome.state === 'completed' || outcome.state === 'cached' || outcome.state === 'failed';
+}
+
+/** Reconstructs the `EvaluationOutcome` a resumed run reuses in place of dispatching, from a previously recorded terminal work item — never a fresh provider request. */
+function outcomeFromTerminal(testCase: TestCase, terminal: ResumableTerminalOutcome): EvaluationOutcome {
+  if (terminal.state === 'completed') return { kind: 'success', testCase, classification: terminal.classification, evaluation: terminal.evaluation };
+  if (terminal.state === 'cached') return { kind: 'cached', testCase, classification: terminal.classification };
+  return { kind: 'failure', testCase, error: new ResumedEvaluationFailure(terminal.errorKind, terminal.errorMessage) };
+}
+
+/**
+ * `--resume <runId>` inputs (Phase 5, task P5-4), built once by `runAudit`
+ * from `AuditStorePort.loadRunState`'s `terminalWorkItems`, keyed by
+ * identity for O(1) lookup per currently evaluable/skippable item.
+ */
+interface EvaluationResumeOptions {
+  readonly terminalByIdentityKey: ReadonlyMap<string, AuditStoreWorkItemOutcome>;
 }
 
 /**
@@ -245,25 +308,63 @@ async function runEvaluation(
   store?: AuditStorePort,
   runId?: string,
   cache?: EvaluationCacheOptions,
+  resume?: EvaluationResumeOptions,
 ): Promise<EvaluationRunResult> {
   const { items, skippedByReason, skippedItems } = collectEvaluableItems(files);
   const cacheEnabled = store !== undefined && runId !== undefined && cache !== undefined;
   const controller = createAdaptiveConcurrencyController({ ceiling: concurrency, restoreWindow: DEFAULT_ADAPTIVE_CONCURRENCY_RESTORE_WINDOW });
   const budgetGate = createRequestTokenBudgetGate(scheduler.budget, scheduler.clock, scheduler.sleep);
 
+  // Phase 5, task P5-4: partition every currently evaluable item into "already terminal under
+  // this run id — reuse, never redispatch" and "outstanding — dispatch normally," using the
+  // resumed run's own last-recorded state per identity. A `skipped` terminal match is
+  // deliberately NOT reused here (only `completed`/`cached`/`failed` are, via
+  // `ResumableTerminalOutcome`): it can only mean the audited source changed between the
+  // interrupted attempt and this resume (a currently-evaluable item cannot have been correctly
+  // classified `skipped` before, since skip/evaluable status is a deterministic function of the
+  // test's own source) — the documented assumption is an unchanged repository, but drifting into
+  // "treat it as outstanding and dispatch it for real" degrades safely rather than silently
+  // losing coverage or crashing.
+  const preloadedOutcomes: (EvaluationOutcome | undefined)[] = new Array(items.length);
+  const outstandingIndices: number[] = [];
+  const outstandingItems: EvaluableItem[] = [];
+  items.forEach((item, index) => {
+    const terminal = resume?.terminalByIdentityKey.get(identityKey(identityOf(item.testCase)));
+    if (terminal !== undefined && isResumableTerminal(terminal)) {
+      preloadedOutcomes[index] = outcomeFromTerminal(item.testCase, terminal);
+      return;
+    }
+    outstandingIndices.push(index);
+    outstandingItems.push(item);
+  });
+
+  // A skipped item whose identity already carries a `skipped` terminal record under this run
+  // (the ordinary case: it was recorded before the interruption, or this is the run's very first
+  // pass) is never re-recorded — an honest, minimal append, not a duplicate checkpoint for work
+  // that was never dispatched in the first place. Any OTHER terminal state matched against a
+  // now-skipped identity (the source-drift case above) still gets a fresh `skipped` record, since
+  // none exists yet under that state.
+  const skippedToRecord = resume === undefined
+    ? skippedItems
+    : skippedItems.filter((skipped) => resume.terminalByIdentityKey.get(identityKey(identityOf(skipped.testCase)))?.state !== 'skipped');
+
   if (store !== undefined && runId !== undefined) {
-    for (const skipped of skippedItems) {
+    for (const skipped of skippedToRecord) {
       await store.recordWorkItem(runId, { state: 'skipped', identity: identityOf(skipped.testCase), reason: skipped.reason });
     }
     // Phase 5, task P5-3: every evaluable item's intended work is made durable BEFORE the
     // scheduler dispatches anything at all — see `AuditStoreWorkItemOutcome`'s own doc for why a
     // later phase's `--resume <runId>` needs this recorded up front, not only once an item starts.
-    for (const item of items) {
+    // Phase 5, task P5-4: only the OUTSTANDING items get this checkpoint on a resumed run — an
+    // already-terminal item is reused, never re-announced as pending. Appending another `pending`
+    // row for an item that already had one (e.g. it reached `running` before the interruption) is
+    // still honest, append-only history: "we are attempting this item again, as of now."
+    for (const item of outstandingItems) {
       await store.recordWorkItem(runId, { state: 'pending', identity: identityOf(item.testCase) });
     }
   }
 
-  const outcomes = await runAdaptiveSchedule<EvaluableItem, EvaluationOutcome>(items, controller, async (item) => {
+  const dispatchedOutcomes = await runAdaptiveSchedule<EvaluableItem, EvaluationOutcome>(outstandingItems, controller, async (item) => {
     if (store !== undefined && runId !== undefined) {
       await store.recordWorkItem(runId, { state: 'running', identity: identityOf(item.testCase) });
     }
@@ -320,6 +421,17 @@ async function runEvaluation(
       const signal: ThrottleSignal = isThrottleErrorKind(evaluationErrorKind(error)) ? 'throttled' : 'neutral';
       return { result: { kind: 'failure', testCase: item.testCase, error }, signal };
     }
+  });
+
+  // Merge dispatched results back into `items`' own deterministic order (Phase 5, task P5-4): a
+  // reused item's preloaded outcome, or an outstanding item's fresh dispatch result — every index
+  // is covered by exactly one of the two, since the partition above is exhaustive.
+  const outcomes: EvaluationOutcome[] = new Array(items.length);
+  outstandingIndices.forEach((originalIndex, dispatchedIndex) => {
+    outcomes[originalIndex] = dispatchedOutcomes[dispatchedIndex]!;
+  });
+  preloadedOutcomes.forEach((outcome, index) => {
+    if (outcome !== undefined) outcomes[index] = outcome;
   });
 
   const classifications: ClassificationResult[] = [];
@@ -380,7 +492,12 @@ async function runEvaluation(
     modelMismatches,
   };
 
-  return { evaluation: { classifications, totals }, diagnostics, fileDiagnosticsByPath };
+  return {
+    evaluation: { classifications, totals },
+    diagnostics,
+    fileDiagnosticsByPath,
+    ...(resume === undefined ? {} : { resumeCounts: { outstanding: outstandingItems.length, reused: items.length - outstandingItems.length } }),
+  };
 }
 
 /** Merges each failed evaluation's plain diagnostic into its owning file's own `diagnostics` array, exactly like `evidence-selection-failed` is merged — leaving every unaffected file's object reference untouched. */
@@ -423,6 +540,78 @@ export interface RunAuditOptions {
    */
   readonly clock?: SchedulerClock;
   readonly sleep?: SchedulerSleep;
+  /**
+   * Resumes a previously started, interrupted run (Phase 5, task P5-4,
+   * `--resume <runId>` at the CLI): reloads `runId`'s durable state
+   * (`AuditStorePort.loadRunState`) and completes only its outstanding
+   * work items — see `runAudit`'s own doc for the full preflight contract
+   * (not-found / root-dir-mismatch / already-finished) this triggers.
+   * Requires `ports.store` (and, transitively, `ports.evaluation` — the
+   * CLI itself only ever offers `--resume` alongside `--evaluate`).
+   * Has no effect on an offline audit; passing it without a store throws
+   * {@link AuditResumeUnavailableError} rather than silently starting a
+   * fresh run.
+   */
+  readonly resume?: string;
+}
+
+const EMPTY_AUDIT_TOTALS = {
+  files: 0,
+  excluded: 0,
+  testCases: 0,
+  dynamicMetadata: 0,
+  diagnostics: 0,
+  unsupportedFrameworkFiles: 0,
+  evidenceBundles: 0,
+  evidenceFragments: 0,
+  evidenceTruncatedFragments: 0,
+  evidenceOmitted: 0,
+  evidenceDenied: 0,
+  evidenceUnresolved: 0,
+};
+
+/**
+ * `runAudit`'s `--resume <runId>` preflight (Phase 5, task P5-4), run
+ * BEFORE any discovery/extraction/evidence work at all — mirroring the
+ * discovery-failure early return just below it: a resume-specific problem
+ * is diagnosed (or, for "already finished," honestly disclosed as nothing
+ * to do) without paying for a pipeline run whose result would just be
+ * discarded.
+ *
+ * Three named outcomes (Phase 5 Decisions, this task): `runId` does not
+ * exist at all (throws {@link AuditResumeRunNotFoundError}); `runId`
+ * belongs to a different root directory than `request.rootDir` (throws
+ * {@link AuditResumeRootDirMismatchError}); `runId` is already finished
+ * (`AuditStoreRunState.finished`) — NOT an error, `runAudit` returns
+ * immediately with `resume.nothingOutstanding: true` and an honest
+ * all-zero report, exactly like a fresh, empty run would look, never a
+ * fabricated evaluation of work that already happened. Every other case
+ * returns the loaded {@link AuditStoreRunState} for `runAudit` to continue
+ * with (reusing `runId` instead of minting a new one via `beginRun`).
+ */
+async function preflightResume(
+  request: AuditRequest,
+  ports: AuditPorts,
+  runId: string,
+): Promise<{ readonly earlyResult: AuditResult } | { readonly runState: AuditStoreRunState }> {
+  if (ports.store === undefined) throw new AuditResumeUnavailableError(runId);
+  const state = await ports.store.loadRunState(runId);
+  if (state === undefined) throw new AuditResumeRunNotFoundError(runId);
+  if (state.rootDir !== request.rootDir) throw new AuditResumeRootDirMismatchError(runId, state.rootDir, request.rootDir);
+  if (state.finished) {
+    return {
+      earlyResult: {
+        rootDir: request.rootDir,
+        files: [],
+        excluded: [],
+        diagnostics: [],
+        totals: EMPTY_AUDIT_TOTALS,
+        reportingOnly: true,
+        resume: { runId, outstanding: 0, reused: 0, nothingOutstanding: true },
+      },
+    };
+  }
+  return { runState: state };
 }
 
 export async function runAudit(
@@ -430,6 +619,13 @@ export async function runAudit(
   ports: AuditPorts,
   options: RunAuditOptions = {},
 ): Promise<AuditResult> {
+  let resumeState: AuditStoreRunState | undefined;
+  if (options.resume !== undefined) {
+    const preflight = await preflightResume(request, ports, options.resume);
+    if ('earlyResult' in preflight) return preflight.earlyResult;
+    resumeState = preflight.runState;
+  }
+
   let discovery;
   try {
     discovery = await ports.discovery.discover({
@@ -572,11 +768,18 @@ export async function runAudit(
   // no API key is read, nothing here reaches the network.
   let finalFiles: readonly AuditFileResult[] = results;
   let evaluation: AuditEvaluationResult | undefined;
+  let resumeSummary: AuditResumeSummary | undefined;
   if (ports.evaluation !== undefined) {
     // Phase 5, task P5-1: `ports.store` is opt-in exactly like `ports.evaluation` (see
     // `AuditStorePort`'s own doc) — `beginRun`/`finishRun` bracket this one run only when a store
     // is actually present, so an offline or store-less `--evaluate` run never touches it.
-    const runId = ports.store === undefined ? undefined : await ports.store.beginRun(request.rootDir);
+    // Phase 5, task P5-4: a resumed run CONTINUES `options.resume` rather than minting a fresh id
+    // via `beginRun` — the preflight above already confirmed it exists, belongs to this rootDir,
+    // and is not already finished, so `runs.finished_at` simply gets set (again, harmlessly) by
+    // `finishRun` below once this pass completes.
+    const runId = resumeState !== undefined
+      ? options.resume
+      : ports.store === undefined ? undefined : await ports.store.beginRun(request.rootDir);
     // Phase 5, task P5-2: caching is meaningful only alongside persistence (a lookup needs
     // somewhere to look things up in), so `cache` is built only when `ports.cacheKey` is present —
     // never independently of `ports.store`/`runId`, which `runEvaluation` itself also re-checks.
@@ -592,11 +795,20 @@ export async function runAudit(
       sleep: options.sleep ?? defaultSchedulerSleep,
       budget: request.schedule,
     };
-    const evaluationRun = await runEvaluation(results, ports.evaluation, request.concurrency, scheduler, ports.store, runId, cache);
+    // Phase 5, task P5-4: `resumeOptions` is built once here, keyed by identity, from the
+    // preflight's already-loaded `terminalWorkItems` — `runEvaluation` never re-queries the store.
+    const resumeOptions = resumeState === undefined
+      ? undefined
+      : { terminalByIdentityKey: new Map(resumeState.terminalWorkItems.map((outcome) => [identityKey(outcome.identity), outcome])) };
+    const evaluationRun = await runEvaluation(results, ports.evaluation, request.concurrency, scheduler, ports.store, runId, cache, resumeOptions);
     evaluation = evaluationRun.evaluation;
     diagnostics.push(...evaluationRun.diagnostics);
     finalFiles = withEvaluationDiagnostics(results, evaluationRun.fileDiagnosticsByPath);
     if (ports.store !== undefined && runId !== undefined) await ports.store.finishRun(runId);
+    if (options.resume !== undefined && evaluationRun.resumeCounts !== undefined) {
+      const { outstanding, reused } = evaluationRun.resumeCounts;
+      resumeSummary = { runId: options.resume, outstanding, reused, nothingOutstanding: outstanding === 0 };
+    }
   }
 
   const evidenceBundles = finalFiles.flatMap((file) => file.evidence);
@@ -624,5 +836,6 @@ export async function runAudit(
     totals,
     reportingOnly: true,
     ...(evaluation === undefined ? {} : { evaluation }),
+    ...(resumeSummary === undefined ? {} : { resume: resumeSummary }),
   };
 }

@@ -31,6 +31,9 @@ import { estimateDryRun, JEV_ESTIMATE_SNAPSHOT, type DryRunEstimate } from '../d
 import { JevConfigurationError } from '../domain/jev-gateway.js';
 import { JEV_MODEL_ID } from '../domain/rubric.js';
 import {
+  AuditResumeRootDirMismatchError,
+  AuditResumeRunNotFoundError,
+  AuditResumeUnavailableError,
   AuditStoreCorruptError,
   AuditStoreSchemaVersionError,
   type AuditCacheKeyPort,
@@ -147,6 +150,22 @@ Options:
                       classification policy version, test source, and evidence are unchanged from a
                       prior run is served from the local store at zero cost, reported as cached
                       rather than evaluated. Requires --evaluate.
+  --resume <runId>   Continues a previously started run instead of starting a new one: reloads that
+                      run's outstanding work items (anything that never reached completed/cached/
+                      failed/skipped) and completes only those, leaving every already-terminal item
+                      untouched and never re-dispatched. A run id that does not exist, or one
+                      recorded against a different --rootDir than the one being audited now, is a
+                      usage error (exit 1). A run that is already finished with nothing outstanding
+                      is not an error: it is reported honestly as nothing to resume. --resume is
+                      orthogonal to --fresh: --resume selects WHICH items run (only the outstanding
+                      ones); --fresh selects whether the ones that DO run consult the cache first.
+                      Combining them dispatches fresh requests only for the outstanding items;
+                      already-terminal items are always reused as-is, cache or no cache. Caution: an
+                      in-flight item that was interrupted mid-request may already have been billed
+                      by the provider even though its result was never recorded — resuming
+                      re-dispatches it, since there is no way to know whether the first attempt
+                      completed, so a resumed run can cost slightly more than the work it appears to
+                      redo. Requires --evaluate.
   --dry-run --json   Print the same dry-run preview as one machine-readable JSON line instead of
                       the human-readable text report. Requires --dry-run.
   --json             Requires --dry-run or --evaluate; --json alone is a usage error.
@@ -335,6 +354,10 @@ function evaluateJsonLine(result: AuditResult): string {
     totals: evaluation?.totals ?? ZERO_EVALUATION_TOTALS,
     classifications,
     diagnostics: diagnosticsJson(result.diagnostics),
+    // Phase 5, task P5-4: present only for `--resume <runId>` (never for an ordinary --evaluate
+    // run), and only reaches here at all when there WAS outstanding work — the nothing-outstanding
+    // case is reported separately by `runCli`, before this function is ever called.
+    ...(result.resume === undefined ? {} : { resume: { runId: result.resume.runId, outstanding: result.resume.outstanding, reused: result.resume.reused } }),
   });
 }
 
@@ -353,6 +376,9 @@ function evaluateTextReport(result: AuditResult): string {
     ];
   return [
     'Jev evaluation summary',
+    // Phase 5, task P5-4: present only for `--resume <runId>` with outstanding work — the
+    // nothing-outstanding case never reaches this function (see `evaluateJsonLine`'s own comment).
+    ...(result.resume === undefined ? [] : [`Resumed run ${result.resume.runId}: reused ${result.resume.reused} already-completed item(s), dispatched ${result.resume.outstanding} outstanding item(s).`]),
     `Model requested: ${JEV_MODEL_ID}`,
     `Model responded: ${totals.respondedModel ?? '(none — no evaluation succeeded)'}`,
     `Model mismatches: ${totals.modelMismatches}`,
@@ -375,6 +401,8 @@ interface ParsedAuditOptions {
   readonly evaluate: boolean;
   readonly fresh: boolean;
   readonly json: boolean;
+  /** `--resume <runId>` (Phase 5, task P5-4), parsed like `--rootDir` — consumes the next argument. `undefined` unless given. */
+  readonly resume?: string;
 }
 
 function parseAuditOptions(args: readonly string[]): ParsedAuditOptions | { readonly error: string } | { readonly help: true } {
@@ -384,6 +412,7 @@ function parseAuditOptions(args: readonly string[]): ParsedAuditOptions | { read
   let evaluate = false;
   let fresh = false;
   let json = false;
+  let resume: string | undefined;
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
     if (argument === '--help') return { help: true };
@@ -414,6 +443,13 @@ function parseAuditOptions(args: readonly string[]): ParsedAuditOptions | { read
       index += 1;
       continue;
     }
+    if (argument === '--resume') {
+      const runId = args[index + 1];
+      if (runId === undefined || runId.startsWith('--')) return { error: '--resume requires a run id' };
+      resume = runId;
+      index += 1;
+      continue;
+    }
     return { error: `Unknown option: ${argument ?? ''}` };
   }
   if (json && !dryRun && !evaluate) return { error: '--json requires --dry-run or --evaluate (audit --dry-run --json / audit --evaluate --json)' };
@@ -421,7 +457,8 @@ function parseAuditOptions(args: readonly string[]): ParsedAuditOptions | { read
   if (dryRun && evaluate) return { error: '--dry-run cannot be combined with --evaluate' };
   if (evaluate && inspectPayloads) return { error: '--evaluate cannot be combined with --inspect-payloads' };
   if (fresh && !evaluate) return { error: '--fresh requires --evaluate (audit --evaluate --fresh)' };
-  return { overrides, inspectPayloads, dryRun, evaluate, fresh, json };
+  if (resume !== undefined && !evaluate) return { error: '--resume requires --evaluate (audit --evaluate --resume <runId>)' };
+  return { overrides, inspectPayloads, dryRun, evaluate, fresh, json, ...(resume === undefined ? {} : { resume }) };
 }
 
 const NO_KEY_USAGE_MESSAGE = 'No TypeSafe API key is configured. Provide one with `jev-test-auditor auth login`, or set the TYPESAFE_API_KEY environment variable.';
@@ -644,9 +681,37 @@ export async function runCli(
   const cacheKeyPort: AuditCacheKeyPort | undefined = storePort === undefined ? undefined : createAuditCacheKeyPort();
 
   try {
-    const result = dependencies.audit === undefined
-      ? await runAudit(configuration, createProductionPorts(evaluationPort, storePort, cacheKeyPort), { fresh: parsed.fresh })
-      : await dependencies.audit(configuration);
+    let result: AuditResult;
+    try {
+      result = dependencies.audit === undefined
+        ? await runAudit(
+          configuration,
+          createProductionPorts(evaluationPort, storePort, cacheKeyPort),
+          { fresh: parsed.fresh, ...(parsed.resume === undefined ? {} : { resume: parsed.resume }) },
+        )
+        : await dependencies.audit(configuration);
+    } catch (error) {
+      // Phase 5, task P5-4: `--resume <runId>`'s own named, visible preflight failures — a run id
+      // that does not exist, one recorded against a different --rootDir, or (defensively) resume
+      // requested with no store at all — follow the exact same convention as every other `runAudit`
+      // usage error above: a readable message on `io`, exit code 1, no stack trace. "Already
+      // finished, nothing outstanding" is NOT an error and never reaches this catch — `runAudit`
+      // reports it via `result.resume.nothingOutstanding` instead (handled below).
+      if (
+        error instanceof AuditResumeRunNotFoundError
+        || error instanceof AuditResumeRootDirMismatchError
+        || error instanceof AuditResumeUnavailableError
+      ) {
+        io.writeLine(error.message);
+        return 1;
+      }
+      throw error;
+    }
+
+    if (result.resume?.nothingOutstanding === true) {
+      io.writeLine(`Nothing to resume: run ${result.resume.runId} has no outstanding work items.`);
+      return 0;
+    }
 
     if (parsed.dryRun) {
       const estimate = estimateDryRun(JEV_ESTIMATE_SNAPSHOT, result.files);

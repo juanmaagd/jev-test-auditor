@@ -672,11 +672,16 @@ interface FakeStore extends AuditStorePort {
   readonly closeCalls: number;
 }
 
+function identityKeyFor(identity: { readonly testCaseId: TestCaseId; readonly repositoryRelativePath: string; readonly name: string }): string {
+  return JSON.stringify([identity.testCaseId, identity.repositoryRelativePath, identity.name]);
+}
+
 function fakeStore(): FakeStore {
   const beginRunCalls: string[] = [];
   const workItemCalls: FakeStoreCall[] = [];
   const lookupCalls: string[] = [];
   const finishRunCalls: string[] = [];
+  const rootDirByRunId = new Map<string, string>();
   let closeCalls = 0;
   let nextRunId = 0;
 
@@ -689,7 +694,9 @@ function fakeStore(): FakeStore {
     async beginRun(rootDir: string): Promise<string> {
       beginRunCalls.push(rootDir);
       nextRunId += 1;
-      return `run-${nextRunId}`;
+      const runId = `run-${nextRunId}`;
+      rootDirByRunId.set(runId, rootDir);
+      return runId;
     },
     async recordWorkItem(runId: string, outcome: AuditStoreWorkItemOutcome): Promise<void> {
       workItemCalls.push({ runId, outcome });
@@ -712,6 +719,24 @@ function fakeStore(): FakeStore {
     },
     async finishRun(runId: string): Promise<void> {
       finishRunCalls.push(runId);
+    },
+    // Mirrors the real sqlite adapter's `loadRunState` (Phase 5, task P5-4): `undefined` when
+    // `beginRun` was never called for `runId`; otherwise the LAST recorded outcome per identity
+    // (array order is insertion order, so a later `Map.set` for the same key overwrites an
+    // earlier one), filtered down to the four terminal states — a `pending`/`running` last row is
+    // never included, exactly like the real adapter's own `MAX(id)`-grouped query.
+    async loadRunState(runId: string): Promise<{ readonly rootDir: string; readonly finished: boolean; readonly terminalWorkItems: readonly AuditStoreWorkItemOutcome[] } | undefined> {
+      const rootDir = rootDirByRunId.get(runId);
+      if (rootDir === undefined) return undefined;
+      const lastByIdentity = new Map<string, AuditStoreWorkItemOutcome>();
+      for (const call of workItemCalls) {
+        if (call.runId !== runId) continue;
+        lastByIdentity.set(identityKeyFor(call.outcome.identity), call.outcome);
+      }
+      const terminalWorkItems = [...lastByIdentity.values()].filter(
+        (outcome) => outcome.state === 'completed' || outcome.state === 'cached' || outcome.state === 'failed' || outcome.state === 'skipped',
+      );
+      return { rootDir, finished: finishRunCalls.includes(runId), terminalWorkItems };
     },
     async close(): Promise<void> {
       closeCalls += 1;
