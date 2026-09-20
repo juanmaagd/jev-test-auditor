@@ -796,7 +796,17 @@ describe('--evaluate', () => {
         await writeStoredCredentials(paths, 'stored-secret-key');
         const output = captureOutput();
 
-        const exitCode = await runCli(['audit', '--evaluate'], output.io);
+        // Audit a small fixture, not the working directory. This test's claim is about key
+        // resolution — that the real gateway is constructed with the stored key — and auditing
+        // this repository was incidental to it. Without `--rootDir` the run discovers, extracts,
+        // and persists checkpoints for every test case this project has, so its cost grew with
+        // our own suite: it measured 3.33s against a 5000ms timeout and failed intermittently
+        // under full-suite parallel load. P5-3 hit the same test once and bought time with WAL;
+        // it came back as soon as the suite grew again. A fixed fixture makes the cost constant.
+        const root = await fixture({
+          'math.test.ts': "import { expect, test } from 'vitest';\ntest('adds', () => { expect(1 + 1).toBe(2); });\n",
+        });
+        const exitCode = await runCli(['audit', '--rootDir', root, '--evaluate'], output.io);
 
         expect(exitCode).toBe(0);
         expect(evaluateFetchSpy).toHaveBeenCalled();
