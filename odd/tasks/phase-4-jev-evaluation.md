@@ -42,6 +42,9 @@ This is the first end-to-end MVP: discovery → evidence → Jev → classificat
 - Follow-up requests are out of scope for this phase; a dimension lacking evidence stays `needs-review`.
 - Concurrency in this phase is a fixed bounded pool from existing `concurrency` configuration, with no adaptive throttling (Phase 5).
 - Fix the Phase 3 estimator snapshot model string to the exact `jev-1.13.0` and record the verified rate limits.
+- An answer for a question id that was never requested is a `JevResponseError`, not silently ignored (P4-2 choice, fail closed).
+- `createJevHttpGateway` validates the key eagerly, so P4-4 must construct the gateway only when `--evaluate` is requested; constructing it unconditionally would break the offline default.
+- Packaging: `package.json` `files: ["dist"]` replaced ignoring `odd/`/`docs/` in `.gitignore` (commit `c6093a4`); the published package is 94 files.
 
 ## Delivery
 
@@ -78,9 +81,10 @@ This is the first end-to-end MVP: discovery → evidence → Jev → classificat
   - Add the versioned seven-dimension rubric, its 14 question definitions, the bundle-to-state projection, canonical request serialization, and provider budget checks.
   - Verify exact request golden, stable question ids, pinned model, budget rejection, and no network.
   - Evidence: `5257be7` (`feat: version the jev rubric and compose requests`) on `feat/phase-4-rubric-requests`; 6 files, 1,665 additions and 2 deletions (1,667 authored changed lines). Suite 17 files/324 tests, typecheck, build, lint, and diff check passed. Observed RED before implementation. `RUBRIC_V1` carries the seven PRD dimensions with concrete four-level criteria, stable `<dimension>.applicable`/`.quality` ids, and a fail-closed pin on `jev-1.13.0`. State projection sends identity, modifiers, fragments, and denied/unresolved/omitted provenance, and deliberately omits hashes, spans, and byte counts. Review correction: quality questions now carry their own withheld-evidence rule so denied, unresolved, omitted, or truncated evidence can never worsen a score; applicability keeps its separate note. Mutations on dropping a dimension, reversing level order, unpinning the model, dropping provenance from state, non-deterministic question order, and dropping the quality provenance note turned RED. Literal golden request verified by hand at 543 bytes.
-- [ ] **P4-2 — Implement the TypeSafe HTTP gateway**
+- [x] **P4-2 — Implement the TypeSafe HTTP gateway**
   - Hand-rolled `fetch` client behind a port: auth from `TYPESAFE_API_KEY`, timeout, bounded retry for 429/529 honoring `retry-after`, typed normalization of noul/score answers and usage, typed errors.
   - Verify status handling, backoff bounds, key never logged or serialized, malformed/partial responses, model mismatch reporting, and abort behavior, all against a stubbed fetch.
+  - Evidence: `a7be1b3` (`feat: add typesafe jev http gateway`) on `feat/phase-4-jev-gateway`; 5 files, 1,330 authored lines (686 of them tests). Suite 18 files/357 tests, typecheck, build, lint, and diff check passed. Observed RED twice: missing modules, then a stub adapter failing 24 of 29 assertions. Defaults: 60s timeout, 3 retries, 500ms initial backoff, 30s cap, full jitter, `retry-after` honored as seconds or HTTP-date and always capped. Typed errors for configuration, auth, request, rate limit, overloaded, timeout, abort, and response; only 429/529 retry. The key lives in a closure, never on the object, and every server- or transport-derived string is redacted, including the network-error path found during review. Timeout covers the whole body read through two abort controllers. The architecture test now allows exactly one reviewed bare `fetch(` call site in this adapter and fails if it disappears or a second appears; the network-import ban still covers it. Mutations on retrying 401, dropping the retry-after cap, unredacted 422, skipping a missing answer, hardcoding the model match, and accepting a non-finite probability turned RED.
 - [ ] **P4-3 — Derive deterministic classification**
   - Pure non-compensatory policy over normalized judgments with versioned provisional thresholds, evidence gating, and per-dimension findings.
   - Verify every policy branch, threshold boundaries, unknown/low-confidence gating, and that no strong dimension can cancel a critical failure.
@@ -90,12 +94,13 @@ This is the first end-to-end MVP: discovery → evidence → Jev → classificat
 
 ## Progress
 
-- Current task: **P4-2**.
-- Completed tasks: **P4-1**.
-- Running authored count: **1,667**.
+- Current task: **P4-3**.
+- Completed tasks: **P4-1, P4-2**.
+- Running authored count: **2,997**.
 - Slice ledger:
   - `feat/phase-4-rubric-requests`: `5257be7` — versioned rubric, state projection, request composition, and budget checks.
+  - `feat/phase-4-jev-gateway`: `a7be1b3` — hand-rolled TypeSafe HTTP gateway behind a port.
 
 ## Next step
 
-Branch `feat/phase-4-jev-gateway` from `feat/phase-4-rubric-requests` and delegate P4-2 to one writer with strict TDD, then review before the work-unit commit.
+Branch `feat/phase-4-classification` from `feat/phase-4-jev-gateway` and delegate P4-3 to one writer with strict TDD, then review before the work-unit commit.
