@@ -65,19 +65,22 @@ Silence about an unsupported framework is the dishonesty the PRD forbids: operat
 
 ## Tasks
 
-- [ ] **B-1 — Report an unattributable framework instead of an empty result**
+- [x] **B-1 — Report an unattributable framework instead of an empty result**
   - Emit a per-file warning diagnostic with the attribution evidence found, count it in totals, and surface it in the CLI summary and JSON.
   - Verify a file with an unknown framework, a file with conflicting evidence, and that Jest/Vitest files emit nothing new.
+  - Evidence: `63daa3c` (`feat: report unattributable test frameworks`) on `feat/unsupported-framework-diagnostic`; 9 files, 222 additions and 6 deletions (228 authored changed lines). Suite 515 tests, typecheck, build, lint, and diff check passed. Observed RED before implementation. The check lives in extraction, which already knows both the attributed framework and the extracted count, and fires only when the framework is `unknown` and no case was extracted; a recognized framework with zero cases stays silent. `AuditTotals.unsupportedFrameworkFiles` counts affected files and the CLI needed no change because it serializes totals verbatim. The packed smoke fixture gained two expected warnings for its syntax-error and non-framework files. Mutations on dropping the warning, warning on recognized empty files, omitting the evidence, dropping the total, and firing when cases exist turned RED. Re-audit of `~/Desktop/pr-hero`: 173 files, 173 `unsupported-framework` warnings naming `bun:test`, where before it reported zero tests and zero diagnostics.
 - [ ] **B-2 — Extract bun:test**
   - Attribute `bun:test` as framework `bun`; support its suite/case API, modifiers including `test.serial`, hooks, mocks (`mock`, `spyOn`, `mock.module`, and `jest.*` from `bun:test`), assertions, and static parameter tables.
   - Verify against real fixtures plus a re-audit of `~/Desktop/pr-hero`, and confirm Jest and Vitest behavior is untouched.
 
 ## Progress
 
-- Current task: **B-1**.
-- Completed tasks: none.
-- Running authored count: 0.
+- Current task: **B-2**.
+- Completed tasks: **B-1**.
+- Running authored count: **228**.
+- Slice ledger:
+  - `feat/unsupported-framework-diagnostic`: `63daa3c` — honest unsupported-framework reporting.
 
 ## Next step
 
-Delegate B-1 to one writer with strict TDD, then review before the work-unit commit.
+Branch `feat/bun-test-extraction` from `feat/unsupported-framework-diagnostic` and delegate B-2 to one writer with strict TDD, then review before the work-unit commit.
