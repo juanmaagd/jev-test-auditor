@@ -35,7 +35,7 @@ The product's promise is that uncertainty is reported honestly. Reporting our ow
 
 ## Measured evidence (2026-09-20)
 
-- Discrimination fixture, 11 tests: 8 deliberately bad ones scored 0.00 to 1.28 and 3 good controls scored 2.24 to 2.87, with no overlap. Verdicts: 6 misleading, 2 weak, 2 needs-review, 1 healthy. Both `needs-review` verdicts were good tests blocked by the confidence gate.
+- Discrimination fixture, 11 tests: 8 deliberately bad ones scored 0.00 to 1.28 and 3 good controls scored 2.24 to 2.87, with no overlap. Verdicts under the original policy: 6 misleading, 2 weak, 3 needs-review, 0 healthy. **Correction (C-1):** an earlier summary in this session said 1 healthy and 2 needs-review; recomputing the shipped policy directly against the recorded answers gives 3 of 3 good controls as `needs-review`, because the third also carries a dimension the confidence gate blocked. The recorded JSON is the evidence of record.
 - pr-hero subset, 63 tests: 16 healthy, 6 weak, 0 misleading, 41 needs-review. 411 scored dimensions, median 2.88, minimum 1.43, none below 1.
 - Confidence is concentration, not `score - 2`: score 0.03 returned confidence 0.97, score 2.24 returned 0.47.
 
@@ -67,9 +67,10 @@ The product's promise is that uncertainty is reported honestly. Reporting our ow
 
 ## Tasks
 
-- [ ] **C-1 — Replace the confidence gate with a boundary-mass policy**
+- [x] **C-1 — Replace the confidence gate with a boundary-mass policy**
   - Decide a dimension from the probability distribution: deficient when the mass below the acceptable boundary clears its threshold, acceptable when the mass at or above it does, `needs-review` only when neither side does; keep a separate critical-level threshold for `misleading`. Expose per-level probabilities in the report.
   - Verify every branch and boundary, and replay the recorded 2026-09-20 answers as offline fixtures to prove the good controls become `healthy` and no bad test is absolved.
+  - Evidence: `2632152` (`feat: classify from probability mass instead of confidence`) on `feat/boundary-mass-policy`; 8 files, 1,261 additions and 114 deletions (1,375 authored changed lines). Suite 647 tests, typecheck, build, lint, and diff check passed. Observed RED before implementation. `CLASSIFICATION_POLICY_V2` decides from the distribution: deficient when the mass at or below `weak` clears `sideMin`, acceptable when the mass at or above `acceptable` clears it, `needs-review` only when the mass straddles that single boundary; `misleading` additionally requires `criticalMass >= criticalMin`. `V1` stays exported and its tests untouched. Thresholds come from the recording, not intuition: `sideMin 0.65` sits mid-gap between the highest straddling deficient mass (0.58) and the lowest decisive one (0.71), while every good control's acceptable mass was at least 0.81; `criticalMin 0.5` sits in the empty gap between critical masses of 0 to 0.26 and 0.78 to 1. A floating-point slack of 1e-9 was added after a boundary test exposed that `0.3 + 0.35` lands one ULP below `0.65`. Per-level probabilities and the three masses now appear per dimension in the report. The production port was switched to V2 in the same slice, because a policy the CLI never runs is not delivered; both CLI goldens were re-derived by hand and cross-checked against the compiled pipeline, and the mixed-run golden needed real redesign since its stub reused one distribution for every dimension. Replay over the recorded answers: 6 misleading, 2 weak, 0 needs-review, 3 healthy, against 6 / 2 / 3 / 0 before — no bad test was absolved. A live run of the shipped CLI over the fixture with the recorded answers replayed reproduced those counts exactly. Mutations on restoring the confidence gate, dropping the critical-mass check, removing the floating-point slack, letting the acceptable/strong distinction reach `needs-review`, skipping distribution validation, and reverting the port to V1 turned RED.
 - [ ] **C-2 — Repair the two self-excluding applicability questions**
   - Rewrite the `determinism-isolation` and `falsifiability` applicability questions so they ask whether the shown evidence supports a judgment; bump the rubric version.
   - Verify wording changes are reflected in the rubric tests, then prepare the live validation command; the orchestrator runs it.
@@ -79,10 +80,12 @@ The product's promise is that uncertainty is reported honestly. Reporting our ow
 
 ## Progress
 
-- Current task: **C-1**.
-- Completed tasks: none.
-- Running authored count: 0.
+- Current task: **C-2**.
+- Completed tasks: **C-1**.
+- Running authored count: **1,375**.
+- Slice ledger:
+  - `feat/boundary-mass-policy`: `2632152` — boundary-mass classification policy, wired into the shipped CLI.
 
 ## Next step
 
-Delegate C-1 to one writer with strict TDD, then review before the work-unit commit.
+Branch `feat/applicability-questions` from `feat/boundary-mass-policy` and delegate C-2 to one writer with strict TDD; the live validation run is the orchestrator's to execute afterwards.
