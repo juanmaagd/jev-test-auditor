@@ -79,11 +79,15 @@ The first real run measured roughly 72k input tokens for 11 test cases. Without 
 
 ## Tasks
 
-- [ ] **P5-1 — Persist runs and judgments in SQLite behind a port**
+- [x] **P5-1 — Persist runs and judgments in SQLite behind a port**
   - Define the store port in the domain, implement the `node:sqlite` adapter with versioned transactional migrations, and wire it lazily from the CLI.
   - Persist runs, work items with terminal states, attempts, raw answers, normalized judgments, usage, and errors as append-only records.
   - Bump `engines.node` to `>=22.13.0` and suppress only the sqlite `ExperimentalWarning`.
   - Verify: migration from empty, idempotent re-open, incompatible-version failure, transaction rollback on a mid-write error, no database file without `--evaluate`, and that no secret is ever stored.
+  - Evidence: `8330fe7` (`feat: persist audit runs and judgments in sqlite`) and `5934ab7` (`fix: reject foreign stores and cover persisted columns`) on `feat/phase-5-sqlite-store`; 14 files, 1,827 authored lines. Suite 25 files/709 tests (667 on `main` before the phase), typecheck, build, lint, and diff check passed. Schema version 1 creates `runs`, `work_items`, `attempts`, `judgments`, `errors`, `skips`, and an explicit `schema_meta` table — chosen over `PRAGMA user_version` so a foreign database reusing that pragma cannot be misread as ours. `node:sqlite` is loaded through a dynamic import inside a narrow suppression window, because a static import would emit the `ExperimentalWarning` before this module's own code could wrap it. `AuditEvaluationPort.evaluate` was widened to return `{ evaluation, classification }` because persisting raw answers, which the scope requires as distinct from normalized judgments, needs the raw `JevEvaluation`. Store construction is gated on a successful evaluation-port build, not merely on `--evaluate`, so a missing API key never creates a database file. `finishRun` performs the adapter's only row mutation, setting the run's own `finished_at`; it never rewrites a recorded fact about a test case.
+  - Independent verification found and fixed five confirmed defects, all originally green at 697 tests: persisted columns were swap-blind because the fixtures used identical values on both sides (`jev-1.13.0` for both model fields, `2` for both version fields), so swapping `requested_model`/`responded_model`, `policy_version`/`rubric_version`, or `attempts`/`output_tokens` changed nothing — the last of these would have silently corrupted the P5-2 cache key; a foreign SQLite database lacking `schema_meta` was silently adopted and had audit tables created inside it; raw `ERR_SQLITE_ERROR` escaped for a non-database file, a directory, and a read-only file instead of a named domain error; the malformed `schema_version` branch was entirely uncovered, and deleting it left a string value resolving successfully with the migration loop silently skipped; and `withSqliteExperimentalWarningSuppressed` leaked a warning and permanently installed a stale wrapper under overlapping concurrent calls, now fixed with a shared patch and depth counter.
+  - Orchestrator spot checks, run independently of both workers: suite 709/709; the built CLI without `--evaluate` emitted no `ExperimentalWarning` and created no database file or config directory; the compiled adapter was driven by hand against real SQLite, confirming schema version 1, a persisted run and terminal work item, and a non-destructive idempotent reopen; the `policy_version`/`rubric_version` swap was re-applied by hand and turned RED (`expected 6 to be 3`); and a real foreign database, a garbage file, and a directory were each rejected with `AuditStoreCorruptError` while a genuinely empty file still migrated.
+  - Reported honestly and accepted: the `migrate()` early-return guard at the top of the function is dead code no mutation can kill, since the loop bound already makes it a no-op, and the CLI's `evaluationPort !== undefined` guard before store construction is unreachable because the preceding catch already returns. Both are harmless and left in place as protection against a future refactor.
 - [ ] **P5-2 — Key, store, and reuse judgments by content**
   - Compose the complete cache key over normalized test source, evidence bundle, canonical request serialization, rubric version, model id, and classification policy version.
   - Look up before dispatch, record `cached` work items, and add `--fresh` as an append-only bypass.
@@ -101,11 +105,17 @@ The first real run measured roughly 72k input tokens for 11 test cases. Without 
 
 ## Progress
 
-- Current task: **P5-1 — not started**.
-- Completed tasks: none.
-- Running authored count: **0**, against a 3,000-line forecast.
-- Slice ledger: empty.
+- Current task: **P5-2 — not started**.
+- Completed tasks: **P5-1**.
+- Running authored count: **1,827**, against a 3,000-line forecast.
+- Slice ledger:
+  - `feat/phase-5-sqlite-store`: `8330fe7` + `5934ab7` — store port, `node:sqlite` adapter with versioned transactional migrations, per-item terminal-state persistence, and lazy CLI wiring.
+
+## Open questions carried forward
+
+- What produces the `uncertain` work-item state is still undefined. The schema's `CHECK` constraint and `WORK_ITEM_STATES` admit it for forward compatibility only; P5-2 must either define it as a cache-lookup outcome or say plainly that nothing produces it yet.
+- The store now persists error messages to disk, where Phase 4 kept them as in-memory diagnostics. That raises the stakes on the gateway's existing `redact()` and deserves a deliberate look during P5-2, even though this phase changed nothing about it.
 
 ## Next step
 
-Delegate P5-1 on a child branch off `feat/phase-5-persistence` with strict TDD, then review, verify, and commit before opening P5-2.
+Delegate P5-2 (content-addressed cache key, lookup, and `--fresh`) on a child branch off `feat/phase-5-sqlite-store`. Build the key on `canonicalizeJevRequest` plus the normalized full test source, rubric version, and classification policy version, and give each of those five inputs its own invalidation test.
