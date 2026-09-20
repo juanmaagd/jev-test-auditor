@@ -89,6 +89,17 @@ export {
   type EvidenceResolutionResult,
 } from './adapters/evidence-resolution.js';
 export {
+  resolveAliasConfig,
+  type AliasConfigRequest,
+} from './adapters/alias-config.js';
+export {
+  type AliasConfigRefusal,
+  type AliasConfigRefusalReason,
+  type AliasMappingEntry,
+  type AliasMappingSource,
+  type AliasMappings,
+} from './domain/alias-config.js';
+export {
   selectEvidence,
   type EvidenceSelectionRequest,
 } from './adapters/evidence-selection.js';
