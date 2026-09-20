@@ -26,6 +26,7 @@ This is the first end-to-end MVP: discovery → evidence → Jev → classificat
 
 - No new runtime dependency: the gateway is a hand-rolled `fetch` client (user decision, 2026-09-20; the official SDK uses `globalThis.fetch` too, so latency is identical and only typings and retry helpers are reimplemented). Keep the gateway behind a port so switching to `@typesafe-ai/sdk` later is a one-adapter change.
 - Evaluation is opt-in in this phase (`audit --evaluate`). Without it the CLI stays exactly as Phase 3 left it: offline, reporting-only, no API key required.
+- Local key storage is a per-user file scoped to this tool, not a global environment variable (user decision, 2026-09-20). `TYPESAFE_API_KEY` remains supported and takes precedence so CI keeps injecting GitHub secrets. A system keychain was considered and declined for now.
 - Never execute audited code. Evidence is the only thing sent; nothing else leaves the machine.
 - The API key comes from `TYPESAFE_API_KEY` only. Never log, print, serialize, or include it in reports or errors.
 - Requests pin the exact versioned model id `jev-1.13.0`; the response's `model` is recorded as the model that actually answered, and a mismatch is reported, never hidden.
@@ -89,20 +90,26 @@ This is the first end-to-end MVP: discovery → evidence → Jev → classificat
   - Pure non-compensatory policy over normalized judgments with versioned provisional thresholds, evidence gating, and per-dimension findings.
   - Verify every policy branch, threshold boundaries, unknown/low-confidence gating, and that no strong dimension can cancel a critical failure.
   - Evidence: `eed2d2a` (`feat: derive deterministic test classification`) on `feat/phase-4-classification`; 3 files, 1,111 authored lines (663 of them tests), 58 new tests. Suite 19 files/415 tests, typecheck, build, lint, and diff check passed. Observed RED before implementation. `CLASSIFICATION_POLICY_V1` is provisional and uncalibrated: applicability `noul >= 0.5`, confidence `>= 0.6`, cut points [1, 2, 3] with half-open intervals where a score exactly at a cut point belongs to the higher level, so reaching a level requires the weighted score to actually reach it. Non-applicable dimensions are excluded; low confidence, missing, or malformed answers force `needs-review`; a model-pin mismatch forces `needs-review` regardless of scores; `healthy` requires every applicable dimension acceptable or strong. Findings include `needs-review` dimensions so uncertainty stays visible. A rubric/policy version mismatch throws. Mutations on compensatory averaging, dropping the model-mismatch rule, skipping the confidence gate, bypassing applicability, shifting cut-point comparisons, and letting needs-review reach healthy turned RED.
-- [ ] **P4-4 — Wire evaluation into the audit and CLI**
+- [x] **P4-4 — Wire evaluation into the audit and CLI**
   - Add `audit --evaluate` with bounded concurrency, terminal summary, canonical JSON report including judgments, usage, and provenance, honest failure reporting, and documentation updates; align the estimator model string and README roadmap numbering.
   - Verify opt-in behavior, offline default, per-test failure isolation, deterministic JSON, exit codes, and packed-install smoke.
+  - Evidence: `b6bd435` (`feat: evaluate tests with jev behind an opt-in flag`) on `feat/phase-4-application-cli`; 13 files, 1,617 additions and 58 deletions (1,675 authored changed lines). Suite 20 files/439 tests, typecheck, build, lint, and diff check passed. Observed RED before each step. The evaluation port's presence is the only gate: the gateway is constructed only when `--evaluate` is parsed, so the default stays offline with no key. `--dry-run`, `--evaluate`, and `--inspect-payloads` are mutually exclusive; `--json` requires one of the first two. A bounded pool writes results by index, so ordering never depends on completion order. A failed evaluation yields one `evaluation-failed` diagnostic with the test case id and typed error code, never the key or request, and no verdict. Totals separate evaluated, failed, skipped by reason, status counts, usage, responded model, and model mismatches. Estimator snapshot now reuses `JEV_MODEL_ID` and records the verified rate limits; README roadmap renumbered. Review correction: the first golden pinned an all-not-applicable case that no regression could break, so a second literal golden pins a mixed run where one test is `misleading` despite a `strong` dimension and another is `healthy`; a cut-point mutation turns only that golden RED. Manual check: default run offline, `--evaluate` without a key exits 1 with no connection attempted.
+
+- [ ] **P4-5 — Store the API key locally without a global environment variable**
+  - Add `auth login`, `auth status`, and `auth logout`. Read the key from a no-echo prompt, never from an argument. Persist it in a per-user config file scoped to this tool with owner-only permissions. Resolve `TYPESAFE_API_KEY` first so CI keeps using GitHub secrets, then the stored file.
+  - Verify precedence, file permissions, absent and corrupt files, that the key never appears in output or errors, and that `--evaluate` reports both ways to provide a key.
 
 ## Progress
 
-- Current task: **P4-4**.
-- Completed tasks: **P4-1, P4-2, P4-3**.
-- Running authored count: **4,108**.
+- Current task: **P4-5**.
+- Completed tasks: **P4-1, P4-2, P4-3, P4-4**.
+- Running authored count: **5,783**.
 - Slice ledger:
   - `feat/phase-4-rubric-requests`: `5257be7` — versioned rubric, state projection, request composition, and budget checks.
   - `feat/phase-4-jev-gateway`: `a7be1b3` — hand-rolled TypeSafe HTTP gateway behind a port.
   - `feat/phase-4-classification`: `eed2d2a` — provisional non-compensatory classification policy and findings.
+  - `feat/phase-4-application-cli`: `b6bd435` — opt-in evaluation, bounded concurrency, terminal and JSON reporting, and documentation.
 
 ## Next step
 
-Branch `feat/phase-4-application-cli` from `feat/phase-4-classification` and delegate P4-4 to one writer with strict TDD, then review before the work-unit commit and phase close.
+Branch `feat/phase-4-auth-storage` from `feat/phase-4-application-cli` and delegate P4-5 to one writer with strict TDD, then review, commit, and close the phase.
