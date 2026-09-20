@@ -1,5 +1,5 @@
 /** The framework evidence attributed to a test file or case. */
-export type TestFramework = 'jest' | 'vitest' | 'unknown';
+export type TestFramework = 'jest' | 'vitest' | 'bun' | 'unknown';
 
 export interface SourcePosition {
   readonly line: number;
@@ -26,7 +26,20 @@ export type TestModifierKind =
   | 'fails'
   | 'shuffle'
   | 'runIf'
-  | 'skipIf';
+  | 'skipIf'
+  /**
+   * bun:test's `.todoIf(condition)` — a conditional todo. No existing kind
+   * covers both "todo" and "conditional" together, so it is its own kind
+   * rather than overloading `todo` or `skipIf` (B-2, bun-test-support.md).
+   */
+  | 'todoIf'
+  /**
+   * bun:test's `.serial` — forces sequential execution with no Jest or
+   * Vitest equivalent (verified provider fact). Kept as a first-class kind
+   * per the feature doc decision: ordering is evidence for the determinism
+   * dimension, so it must never be dropped (B-2).
+   */
+  | 'serial';
 
 export interface TestModifier {
   readonly kind: TestModifierKind;
@@ -74,7 +87,38 @@ export type MockApi =
   | 'vi.unmock'
   | 'vi.doUnmock'
   | 'vi.importActual'
-  | 'vi.importMock';
+  | 'vi.importMock'
+  /**
+   * bun:test naming scheme (B-2, bun-test-support.md): bun's own mock
+   * surface (`mock()`, `spyOn()`, and `mock`'s sub-properties) is recorded
+   * under a `bun.` prefix mirroring the existing `jest.`/`vi.` convention —
+   * `bun.mock` for the direct-call `mock(fn)` form (distinct from
+   * `bun.mock.module`, which is bun's module-mock form and the actual
+   * equivalent of `jest.mock`/`vi.mock`).
+   */
+  | 'bun.mock'
+  | 'bun.mock.module'
+  | 'bun.mock.clearAllMocks'
+  | 'bun.mock.restore'
+  | 'bun.spyOn'
+  /**
+   * The `jest` object re-exported from `bun:test` is Jest-compatible but
+   * bun-provenanced: recording it as plain `jest.*` would misattribute it as
+   * real Jest (the feature doc's explicit decision). `bun.jest.*` mirrors
+   * the full `jest.*` member set this extractor already recognizes so none
+   * of it is silently dropped when imported through bun.
+   */
+  | 'bun.jest.fn'
+  | 'bun.jest.mock'
+  | 'bun.jest.spyOn'
+  | 'bun.jest.doMock'
+  | 'bun.jest.unmock'
+  | 'bun.jest.deepUnmock'
+  | 'bun.jest.setMock'
+  | 'bun.jest.requireActual'
+  | 'bun.jest.requireMock'
+  | 'bun.jest.createMockFromModule'
+  | 'bun.jest.genMockFromModule';
 
 export interface MockRecord {
   readonly api: MockApi;

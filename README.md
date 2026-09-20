@@ -29,7 +29,7 @@ jev-test-auditor --help
 | Command / option | Behavior |
 | --- | --- |
 | `--help` | Prints usage and command information. |
-| `audit` | Discovers `.test`/`.spec` JavaScript and TypeScript files, extracts Jest/Vitest test cases, selects each test case's local evidence bundle, and prints a reporting-only JSON summary. Diagnostics do not change the zero exit status. |
+| `audit` | Discovers `.test`/`.spec` JavaScript and TypeScript files, extracts Jest/Vitest/bun:test test cases, selects each test case's local evidence bundle, and prints a reporting-only JSON summary. Diagnostics do not change the zero exit status. |
 | `audit --rootDir <path>` | Audits a configured repository root instead of the current directory. |
 | `audit --inspect-payloads` | Prints the same summary line first, then one JSON line per selected evidence bundle (`canonicalizeEvidenceBundle` output), ordered by file path then test-case order. This is the local evidence state selected on disk — fragments, provenance, denials, truncation — **not** the Jev wire request shape, and it makes no network call either way. Cannot be combined with `--dry-run` or `--evaluate`. |
 | `audit --dry-run` | Prints a no-network, no-write aggregate cost/call preview **instead of** the normal summary: exact discovered/evaluable/skipped-by-reason counts, exact initial Jev calls (one per evaluable test case), exact evidence bytes and exact real request bytes (the actual `state` plus every rubric question, measured by building each real request locally), plus clearly labeled *approximate* input-token and USD ranges converted from those request bytes via a versioned local pricing snapshot. Makes no network or provider call, requires no API key, and writes nothing to disk. Cannot be combined with `--inspect-payloads` or `--evaluate`. |
@@ -43,7 +43,9 @@ jev-test-auditor --help
 
 The default summary's `totals` include evidence counters (`evidenceBundles`, `evidenceFragments`, `evidenceTruncatedFragments`, `evidenceOmitted`, `evidenceDenied`, `evidenceUnresolved`), and each file entry carries `evidenceBundleCount`. Bundle *contents* — fragment text, spans, hashes — never appear in the default line; only `--inspect-payloads` prints them.
 
-**An unattributable framework is reported, never silently counted as zero tests.** A discovered, included test file whose framework cannot be attributed (no recognized import, or conflicting evidence — e.g. both Jest and Vitest imported) and that yields zero test cases produces one `unsupported-framework` warning diagnostic naming the test-framework-looking imports actually found (e.g. `bun:test`, `node:test`), or stating plainly that none were found. It is merged into both that file's own diagnostics and the root `diagnostics`, exactly like an extraction diagnostic, and `totals.unsupportedFrameworkFiles` counts how many files carry one — so a reader sees "we don't understand this framework" without reading every record, instead of a report that reads identical to a genuinely empty repository. A recognized framework with genuinely zero test cases (an empty Vitest helper file, say) never produces this warning — it is about silence, not about the framework alone, and it never invents a framework or a test case.
+**An unattributable framework is reported, never silently counted as zero tests.** A discovered, included test file whose framework cannot be attributed (no recognized import, or conflicting evidence — e.g. both Jest and Vitest imported) and that yields zero test cases produces one `unsupported-framework` warning diagnostic naming the test-framework-looking imports actually found (e.g. `node:test`), or stating plainly that none were found. It is merged into both that file's own diagnostics and the root `diagnostics`, exactly like an extraction diagnostic, and `totals.unsupportedFrameworkFiles` counts how many files carry one — so a reader sees "we don't understand this framework" without reading every record, instead of a report that reads identical to a genuinely empty repository. A recognized framework with genuinely zero test cases (an empty Vitest helper file, say) never produces this warning — it is about silence, not about the framework alone, and it never invents a framework or a test case.
+
+**`bun:test` is a fully supported V1 framework, not just recognized evidence.** A file that statically imports (or `require`s) `bun:test` attributes framework `bun` and extracts the same suite/case/modifier/hook/mock/assertion/parameter-table structures Jest and Vitest do, including `test.serial` (preserved as its own modifier kind — bun-only, no Jest/Vitest equivalent) and the `mock`/`spyOn`/`jest` surface bun re-exports (recorded under a `bun.`-prefixed `MockApi`, e.g. `bun.mock.module`, `bun.jest.fn`, so a bun-provenanced call is never confused with real Jest). Conflicting framework evidence in the same file (e.g. both `bun:test` and `vitest` imported) stays `unknown`, exactly like a Jest/Vitest conflict. Still deliberately out of scope: `*_test.*`/`*_spec.*` filename patterns and the `.mjs`/`.cjs`/`.mts`/`.cts` discovery extensions bun also supports — a file only reaches extraction once discovery's existing `.test`/`.spec` JS/JSX/TS/TSX pattern matches it.
 
 ## Local API key storage (`auth login` / `auth status` / `auth logout`)
 
@@ -89,7 +91,7 @@ The default summary's `totals` include evidence counters (`evidenceBundles`, `ev
 | Phase | Scope | Status |
 | --- | --- | --- |
 | 1. Foundation | One TypeScript package, inward dependency boundaries, configuration, and CLI entry point. | **Completed** |
-| 2. Test understanding | Discover and parse Jest/Vitest tests into deterministic structural test understanding (test cases, imports, mocks, assertions). | **Completed** |
+| 2. Test understanding | Discover and parse Jest/Vitest/bun:test tests into deterministic structural test understanding (test cases, imports, mocks, assertions). | **Completed** |
 | 3. Evidence and context | For every extracted test case, resolve its relative imports safely and select the smallest useful helper/production-seam evidence within configured budgets, exposed locally through `--inspect-payloads`, plus a no-network `--dry-run` cost/call estimate. | **Completed** |
 | 4. Jev evaluation MVP | Versioned rubric and request composition, a TypeSafe HTTP gateway, deterministic non-compensatory classification, opt-in `audit --evaluate` wiring with terminal and canonical JSON reporting, and local per-user API key storage (`auth login`/`status`/`logout`). | **Completed** |
 | 5. Persistence, caching, and resilience | SQLite run store and cache, `--fresh`/resume, adaptive scheduling, and provider-throttling resilience. | Planned; not implemented |
@@ -106,7 +108,7 @@ The default summary's `totals` include evidence counters (`evidenceBundles`, `ev
 
 ## Product boundaries
 
-- Supports JavaScript and TypeScript repositories, with Jest and Vitest as the V1 frameworks.
+- Supports JavaScript and TypeScript repositories, with Jest, Vitest, and bun:test as the V1 frameworks.
 - Findings target test files only; narrowly related production code is supporting evidence, not an independent finding target.
 - E2E frameworks, automatic test rewriting, general source review, and languages outside JavaScript/TypeScript are out of scope.
 - Discovery is repository-local and lexical. Generated/vendor/build paths, symlink escapes, and conservative E2E signals are excluded explicitly.

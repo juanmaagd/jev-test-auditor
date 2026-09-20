@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { extractTestCases, type TestExtractionResult } from '../src/index.js';
 
-function extract(sourceText: string, frameworkHint?: 'jest' | 'vitest' | 'unknown'): TestExtractionResult {
+function extract(sourceText: string, frameworkHint?: 'jest' | 'vitest' | 'bun' | 'unknown'): TestExtractionResult {
   return frameworkHint === undefined
     ? extractTestCases({ repositoryRelativePath: 'fixture.test.ts', sourceText })
     : extractTestCases({ repositoryRelativePath: 'fixture.test.ts', sourceText, frameworkHint });
@@ -790,16 +790,7 @@ describe('structural test extraction', () => {
 });
 
 describe('unsupported framework reporting (B-1)', () => {
-  it('warns naming bun:test when the framework cannot be attributed and nothing is extracted', () => {
-    const result = extract("import { test } from 'bun:test';\ntest('works', () => {});");
-
-    expect(result.testCases).toEqual([]);
-    expect(result.diagnostics).toHaveLength(1);
-    expect(result.diagnostics[0]).toMatchObject({ code: 'unsupported-framework', severity: 'warning' });
-    expect(result.diagnostics[0]?.message).toContain('bun:test');
-  });
-
-  it('warns naming node:test the same way', () => {
+  it('warns naming node:test when the framework cannot be attributed and nothing is extracted', () => {
     const result = extract("import { test } from 'node:test';\ntest('works', () => {});");
 
     expect(result.testCases).toEqual([]);
@@ -828,7 +819,7 @@ describe('unsupported framework reporting (B-1)', () => {
   });
 
   it('never invents a test case for an unattributable framework', () => {
-    const result = extract("import { test } from 'bun:test';\ntest.each([[1], [2]])('works', () => {});");
+    const result = extract("import { test } from 'node:test';\ntest.each([[1], [2]])('works', () => {});");
 
     expect(result.testCases).toEqual([]);
     expect(result.diagnostics.some((diagnostic) => diagnostic.code === 'unsupported-framework')).toBe(true);
@@ -856,5 +847,216 @@ describe('unsupported framework reporting (B-1)', () => {
 
     expect(result.testCases.map((testCase) => testCase.framework)).toEqual(['unknown', 'unknown']);
     expect(result.diagnostics).toEqual([]);
+  });
+});
+
+describe('bun:test extraction (B-2)', () => {
+  it('attributes framework bun from a static import and from require', () => {
+    const imported = extract("import { test } from 'bun:test';\ntest('works', () => {});");
+    const required = extract("const { test } = require('bun:test');\ntest('works', () => {});");
+
+    expect(imported.testCases).toMatchObject([{ name: 'works', framework: 'bun' }]);
+    expect(required.testCases).toMatchObject([{ name: 'works', framework: 'bun' }]);
+  });
+
+  it('stays unknown when bun:test conflicts with another framework import', () => {
+    const result = extract(
+      "import { test as a } from 'bun:test'; import { test as b } from 'vitest'; a('a', () => {}); b('b', () => {});",
+    );
+
+    expect(result.testCases.map((testCase) => testCase.framework)).toEqual(['unknown', 'unknown']);
+  });
+
+  it('no longer produces the unsupported-framework warning once bun:test is attributed', () => {
+    const result = extract("import { test } from 'bun:test';\ntest('works', () => {});");
+
+    expect(result.testCases).toHaveLength(1);
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it('extracts nested suites and cases the same way as jest/vitest', () => {
+    const result = extract(`
+      import { describe, test, it } from 'bun:test';
+      describe('outer', () => {
+        test('first', () => {});
+        it('second', () => {});
+      });
+    `, 'bun');
+
+    expect(result.testCases.map((testCase) => ({
+      name: testCase.name,
+      framework: testCase.framework,
+      ancestry: testCase.structuralAncestry,
+    }))).toEqual([
+      {
+        name: 'first',
+        framework: 'bun',
+        ancestry: [
+          { kind: 'suite', name: 'outer', ordinal: 0 },
+          { kind: 'test', name: 'first', ordinal: 0 },
+        ],
+      },
+      {
+        name: 'second',
+        framework: 'bun',
+        ancestry: [
+          { kind: 'suite', name: 'outer', ordinal: 0 },
+          { kind: 'test', name: 'second', ordinal: 0 },
+        ],
+      },
+    ]);
+  });
+
+  it('extracts every bun modifier, mapping .if to runIf and .failing to fails', () => {
+    const result = extract(`
+      import { test } from 'bun:test';
+      test.only('a', () => {});
+      test.skip('b', () => {});
+      test.todo('c');
+      test.failing('d', () => {});
+      test.if(condition)('e', () => {});
+      test.skipIf(condition)('f', () => {});
+      test.todoIf(condition)('g', () => {});
+      test.concurrent('h', () => {});
+      test.serial('i', () => {});
+    `, 'bun');
+
+    expect(result.testCases.map((testCase) => ({
+      name: testCase.name,
+      modifiers: testCase.modifiers.map((modifier) => modifier.kind),
+    }))).toEqual([
+      { name: 'a', modifiers: ['only'] },
+      { name: 'b', modifiers: ['skip'] },
+      { name: 'c', modifiers: ['todo'] },
+      { name: 'd', modifiers: ['fails'] },
+      { name: 'e', modifiers: ['runIf'] },
+      { name: 'f', modifiers: ['skipIf'] },
+      { name: 'g', modifiers: ['todoIf'] },
+      { name: 'h', modifiers: ['concurrent'] },
+      { name: 'i', modifiers: ['serial'] },
+    ]);
+  });
+
+  it('does not let bun-only modifier names leak into jest or vitest attribution', () => {
+    const jest = extract("test.if(condition)('e', () => {});", 'jest');
+    const vitest = extract("test.failing('d', () => {});", 'vitest');
+
+    // Neither `.if` nor `.failing` is a name this extractor maps for
+    // jest/vitest, so the modifier is silently absent (existing behavior,
+    // unchanged) rather than aliased the way it is for bun.
+    expect(jest.testCases[0]?.modifiers.map((modifier) => modifier.kind)).toEqual([]);
+    expect(vitest.testCases[0]?.modifiers.map((modifier) => modifier.kind)).toEqual([]);
+  });
+
+  it('extracts all four bun hooks with scope inheritance', () => {
+    const result = extract(`
+      import { describe, test, beforeAll, beforeEach, afterEach, afterAll } from 'bun:test';
+      beforeAll(() => {});
+      describe('outer', () => {
+        beforeEach(() => {});
+        afterEach(() => {});
+        afterAll(() => {});
+        test('works', () => {});
+      });
+    `, 'bun');
+
+    expect(result.testCases[0]?.hooks.map((hook) => hook.kind)).toEqual([
+      'beforeAll', 'beforeEach', 'afterEach', 'afterAll',
+    ]);
+  });
+
+  it('records mock(), spyOn(), mock.module(), mock.clearAllMocks(), mock.restore(), and jest.fn() with bun provenance', () => {
+    const result = extract(`
+      import { test, mock, spyOn, jest } from 'bun:test';
+      mock.module('./module', () => ({}));
+      test('works', () => {
+        mock(() => 1);
+        spyOn(object, 'method');
+        mock.clearAllMocks();
+        mock.restore();
+        jest.fn();
+      });
+    `, 'bun');
+
+    expect(result.testCases[0]?.mocks.map((mock) => ({
+      api: mock.api,
+      moduleSpecifier: mock.moduleSpecifier,
+      static: mock.static,
+    }))).toEqual([
+      { api: 'bun.mock.module', moduleSpecifier: './module', static: true },
+      { api: 'bun.mock', moduleSpecifier: undefined, static: true },
+      { api: 'bun.spyOn', moduleSpecifier: undefined, static: true },
+      { api: 'bun.mock.clearAllMocks', moduleSpecifier: undefined, static: true },
+      { api: 'bun.mock.restore', moduleSpecifier: undefined, static: true },
+      { api: 'bun.jest.fn', moduleSpecifier: undefined, static: true },
+    ]);
+  });
+
+  it('resolves aliased bun mock and jest bindings', () => {
+    const result = extract(`
+      import { test, mock as m, jest as j } from 'bun:test';
+      m.module('./module');
+      test('works', () => {
+        m();
+        j.fn();
+      });
+    `, 'bun');
+
+    expect(result.testCases[0]?.mocks.map((mock) => mock.api)).toEqual([
+      'bun.mock.module', 'bun.mock', 'bun.jest.fn',
+    ]);
+  });
+
+  it('does not attribute a shadowing local named mock to bun', () => {
+    const result = extract(`
+      import { test, mock } from 'bun:test';
+      function helper(mock) {
+        mock('shadowed');
+      }
+      test('works', () => {
+        const mock = localMock;
+        mock('also-shadowed');
+      });
+    `, 'bun');
+
+    expect(result.testCases[0]?.mocks).toEqual([]);
+  });
+
+  it('recognizes expect from bun:test with matchers and negation', () => {
+    const result = extract(`
+      import { test, expect } from 'bun:test';
+      test('works', () => {
+        expect(value).not.toBe(false);
+        expect(value).toEqual(true);
+      });
+    `, 'bun');
+
+    expect(result.testCases[0]?.assertions.map((assertion) => ({
+      api: assertion.api,
+      matcher: assertion.matcher,
+      negated: assertion.negated,
+    }))).toEqual([
+      { api: 'expect', matcher: 'toBe', negated: true },
+      { api: 'expect', matcher: 'toEqual', negated: false },
+    ]);
+  });
+
+  it('expands a static .each table for bun:test, including an "as const" table', () => {
+    const bare = extract("import { test } from 'bun:test'; test.each([[1, 2], [3, 4]])('case', () => {});", 'bun');
+    const asConst = extract(
+      "import { test } from 'bun:test'; test.each([[1, 2], [3, 4]] as const)('case', () => {});",
+      'bun',
+    );
+
+    expect(bare.testCases).toHaveLength(2);
+    expect(asConst.dynamicMetadata).toEqual([]);
+    expect(asConst.testCases).toHaveLength(2);
+  });
+
+  it('records a dynamic registration for bun:test without inventing a case', () => {
+    const result = extract("import { test } from 'bun:test'; test(getName(), () => {});", 'bun');
+
+    expect(result.testCases).toEqual([]);
+    expect(result.dynamicMetadata.map((metadata) => metadata.reason)).toEqual(['dynamic-test-name']);
   });
 });

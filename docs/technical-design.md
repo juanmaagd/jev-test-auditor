@@ -2,7 +2,7 @@
 
 ## Decision
 
-Build one TypeScript CLI with a framework-neutral domain, Jest/Vitest evidence adapters, a TypeSafe Jev gateway, append-only SQLite persistence, and deterministic JSON/HTML reporting. The system scans only tests; production source is supporting evidence.
+Build one TypeScript CLI with a framework-neutral domain, Jest/Vitest/bun:test evidence adapters, a TypeSafe Jev gateway, append-only SQLite persistence, and deterministic JSON/HTML reporting. The system scans only tests; production source is supporting evidence.
 
 ## Architecture
 
@@ -10,7 +10,7 @@ Build one TypeScript CLI with a framework-neutral domain, Jest/Vitest evidence a
 CLI
  └─ Audit application
      ├─ Repository discovery
-     ├─ Jest/Vitest test-case extraction
+     ├─ Jest/Vitest/bun:test test-case extraction
      ├─ Context resolver
      ├─ Evaluation scheduler ── TypeSafe Jev
      ├─ Classification policy
@@ -44,10 +44,10 @@ Identifiers use normalized repository-relative paths plus structural test ancest
 
 1. Discover repository-local `.test`/`.spec` JavaScript, JSX, TypeScript, and TSX files with lexical ordering, default/configured exclusions, symlink containment, and conservative E2E signals.
 2. Read source through a root-contained filesystem adapter. Discovery and reading inspect text only; they never execute audited files, package scripts, test runners, or configuration modules.
-3. Attribute Jest/Vitest from syntax-aware static imports and package metadata. Conflicting evidence remains `unknown` and is preserved in the discovery record.
+3. Attribute Jest/Vitest/bun:test from syntax-aware static imports (and, for bun:test, `require`) and package metadata (Jest/Vitest only — bun is a runtime, not an npm dependency, so it has no package.json evidence source). Conflicting evidence remains `unknown` and is preserved in the discovery record.
 4. Parse JavaScript, JSX, TypeScript, and TSX with the TypeScript compiler API.
 5. Extract `describe`, `test`, `it`, parameterized variants, modifiers, hooks, imports, mocks, and assertion calls.
-6. Emit one `TestCase` per statically identifiable case. Dynamic cases that cannot be enumerated receive explicit extraction metadata rather than invented identities. A file whose framework cannot be attributed (including conflicting evidence) and that yields zero test cases emits one `unsupported-framework` warning diagnostic naming the test-framework-looking imports actually found (e.g. `bun:test`, `node:test`), or stating plainly that none were found — never a silent empty result, and never a warning for a recognized framework's genuinely empty file.
+6. Emit one `TestCase` per statically identifiable case. Dynamic cases that cannot be enumerated receive explicit extraction metadata rather than invented identities. A file whose framework cannot be attributed (including conflicting evidence) and that yields zero test cases emits one `unsupported-framework` warning diagnostic naming the test-framework-looking imports actually found (e.g. `node:test`), or stating plainly that none were found — never a silent empty result, and never a warning for a recognized framework's genuinely empty file. `bun:test` is a fully supported framework (not merely recognized evidence): it attributes `bun` and extracts suites, cases, modifiers (including bun-only `test.serial`, preserved as its own kind with no Jest/Vitest equivalent, and `.if`/`.failing` mapped onto the existing `runIf`/`fails` kinds), hooks, mocks (`mock`, `spyOn`, `mock.module`, and the re-exported `jest` object — recorded under a `bun.`-prefixed `MockApi` so bun provenance is never mistaken for real Jest), assertions, and static parameter tables exactly like Jest/Vitest. Deliberately deferred: `*_test.*`/`*_spec.*` filename patterns and the `.mjs`/`.cjs`/`.mts`/`.cts` extensions bun also recognizes — discovery's existing `.test`/`.spec` JS/JSX/TS/TSX pattern is unchanged.
 7. The application service composes discovery, safe source reading, and extraction through injected ports. It processes included files sequentially in repository-relative lexical order and returns per-file lineage, exclusions, root diagnostics, and `reportingOnly: true`.
 
 `jev-test-auditor audit` projects this result to one deterministic JSON line containing the configured `rootDir`, included file path/framework/count summaries, excluded paths/reasons, totals (including `unsupportedFrameworkFiles`, the count of files carrying an `unsupported-framework` diagnostic), and diagnostics. Parser, read, and discovery diagnostics are informational for CLI policy: `audit` exits zero after emitting the summary; usage errors exit one.

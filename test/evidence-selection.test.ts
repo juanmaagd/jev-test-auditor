@@ -394,6 +394,34 @@ describe('mock targets', () => {
     expect(fragmentAt(bundle, 'src/worker.ts')).toMatchObject({ kind: 'mock-target' });
   });
 
+  it('marks a module mocked via bun mock.module as mock-target (B-2)', async () => {
+    const root = await fixture({
+      'src/feature.test.ts': dedent(`
+        import { it, expect, mock } from 'bun:test';
+        import { doWork } from './worker.js';
+
+        mock.module('./worker.js', () => ({ doWork: () => 'mocked' }));
+
+        it('calls the worker', () => {
+          expect(doWork()).toBeDefined();
+        });
+      `),
+      'src/worker.ts': dedent(`
+        export function doWork(): string {
+          return 'done';
+        }
+      `),
+    });
+
+    const { bundle } = await runSelection(root, 'src/feature.test.ts');
+
+    expect(fragmentAt(bundle, 'src/worker.ts')).toMatchObject({
+      kind: 'mock-target',
+      selectionReason: 'mock-target-module',
+      symbol: 'doWork',
+    });
+  });
+
   it('does not mark an import as mock-target when a different module is mocked', async () => {
     const root = await fixture({
       'src/feature.test.ts': dedent(`

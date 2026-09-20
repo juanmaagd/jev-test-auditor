@@ -38,6 +38,13 @@ const FRAMEWORK_MODULES: readonly {
 }[] = [
   { framework: 'jest', matches: (specifier) => specifier === 'jest' || specifier.startsWith('@jest/') },
   { framework: 'vitest', matches: (specifier) => specifier === 'vitest' || specifier.startsWith('@vitest/') },
+  // B-2 (bun-test-support.md): `bun:test` is a single fixed module
+  // specifier (not a package with a scope prefix), attributed the same way
+  // as import/require evidence for jest/vitest via `frameworkFromSource`
+  // below. No `PACKAGE_FRAMEWORKS` entry: bun is a runtime, not an npm
+  // dependency named `bun`/`@bun/*`, so there is no equivalent
+  // package.json evidence source for it.
+  { framework: 'bun', matches: (specifier) => specifier === 'bun:test' },
 ];
 const PACKAGE_FRAMEWORKS: readonly {
   readonly framework: Exclude<TestFramework, 'unknown'>;

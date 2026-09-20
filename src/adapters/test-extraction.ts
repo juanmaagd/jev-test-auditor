@@ -28,6 +28,30 @@ const modifierKinds = new Set<TestModifierKind>([
   'shuffle',
   'runIf',
   'skipIf',
+  // bun:test literal method names that map 1:1 onto their own kind (B-2).
+  'todoIf',
+  'serial',
+]);
+/**
+ * bun:test names two modifiers differently from the existing, semantically
+ * equivalent kind: `.if(condition)` is the same "run only if" concept as
+ * Vitest's `.runIf`, and `.failing` is the same "test expected to fail"
+ * concept as Vitest's `.fails`. Rather than adding redundant kinds that
+ * duplicate an existing semantic category, the bun-specific method name is
+ * mapped onto the existing kind (B-2, bun-test-support.md).
+ *
+ * Deliberately gated to `framework === 'bun'` at the call site in
+ * {@link analyzeCallee} (not a framework-agnostic table like `modifierKinds`
+ * itself): `failing` is also a real Jest 28+ modifier name this extractor
+ * does not otherwise recognize, so resolving this alias for every framework
+ * would silently add a `fails` modifier to existing Jest test cases that use
+ * `test.failing` — a behavior change outside this task's authorized scope.
+ * Applying the alias only for bun-attributed files keeps Jest/Vitest
+ * extraction byte-for-byte unchanged.
+ */
+const BUN_MODIFIER_NAME_ALIASES = new Map<string, TestModifierKind>([
+  ['if', 'runIf'],
+  ['failing', 'fails'],
 ]);
 const hookKinds = new Set<HookKind>([
   'beforeAll',
@@ -60,6 +84,10 @@ interface BindingTable {
   readonly importLocals: ReadonlySet<string>;
   readonly frameworkBindingLocals: ReadonlySet<string>;
   readonly frameworks: readonly Exclude<TestFramework, 'unknown'>[];
+  /** Locals bound to bun:test's `mock` (direct import or CommonJS destructure, aliased or not), for `.module`/`.clearAllMocks`/`.restore` sub-property resolution (B-2). */
+  readonly bunMockLocals: ReadonlySet<string>;
+  /** Locals bound to bun:test's re-exported `jest` object, for `.fn`/`.mock`/… sub-property resolution (B-2). */
+  readonly bunJestLocals: ReadonlySet<string>;
 }
 
 interface HookEntry {
@@ -93,21 +121,24 @@ interface ExtractionContext {
 function frameworkForModule(specifier: string): Exclude<TestFramework, 'unknown'> | undefined {
   if (specifier === 'vitest' || specifier.startsWith('@vitest/')) return 'vitest';
   if (specifier === '@jest/globals' || specifier === 'jest' || specifier.startsWith('@jest/')) return 'jest';
+  // B-2 (bun-test-support.md): `bun:test` is now a fully attributable and
+  // extractable framework, no longer just unsupported-framework evidence.
+  if (specifier === 'bun:test') return 'bun';
   return undefined;
 }
 
 /**
- * Module specifiers that are not (yet) an attributable framework here but
- * are still recognizable test-runner evidence worth naming in the
+ * Module specifiers that are not an attributable framework here but are
+ * still recognizable test-runner evidence worth naming in the
  * `unsupported-framework` diagnostic (see {@link unsupportedFrameworkDiagnostic}).
- * `bun:test` and `node:test` are the two verified provider facts named by
- * the B-1 task (bun-test-support.md); this list is deliberately narrow —
- * it never attributes a framework or extracts a case, it only names
- * evidence in a warning message, so it carries no scope creep toward
- * implementing support for these runners (that is B-2's job for `bun:test`,
- * and out of scope entirely for `node:test`).
+ * `node:test` is the one remaining verified provider fact named by the B-1
+ * task (bun-test-support.md) that stays out of scope entirely: `bun:test`
+ * graduated to a real framework in B-2 and is now handled by
+ * {@link frameworkForModule} instead. This list never attributes a
+ * framework or extracts a case, it only names evidence in a warning
+ * message.
  */
-const OTHER_TEST_RUNNER_LOOKING_SPECIFIERS = new Set(['bun:test', 'node:test']);
+const OTHER_TEST_RUNNER_LOOKING_SPECIFIERS = new Set(['node:test']);
 
 /** Whether `specifier` looks like a test-framework import — either one this extractor already recognizes (`frameworkForModule`) or one of `OTHER_TEST_RUNNER_LOOKING_SPECIFIERS` — for naming attribution evidence in {@link unsupportedFrameworkDiagnostic}. Never used to attribute a framework or extract a case. */
 function looksLikeTestFrameworkSpecifier(specifier: string): boolean {
@@ -146,18 +177,61 @@ function semanticForName(name: string): SemanticName | undefined {
   return undefined;
 }
 
+/**
+ * The full member set the `jest` object exposes, shared by real Jest
+ * attribution ({@link mockApiForFramework}) and by the bun-provenanced
+ * `jest.*` surface re-exported from `bun:test` ({@link bunJestSubApi}) so
+ * neither list can drift from the other.
+ */
+const JEST_API_NAMES = new Set(['fn', 'mock', 'spyOn', 'doMock', 'unmock', 'deepUnmock', 'setMock', 'requireActual', 'requireMock', 'createMockFromModule', 'genMockFromModule']);
+const VITEST_API_NAMES = new Set(['fn', 'mock', 'spyOn', 'doMock', 'unmock', 'doUnmock', 'importActual', 'importMock']);
+
 function mockApiForFramework(
   framework: Exclude<TestFramework, 'unknown'>,
   name: string,
 ): MockApi | undefined {
-  const jestApis = new Set(['fn', 'mock', 'spyOn', 'doMock', 'unmock', 'deepUnmock', 'setMock', 'requireActual', 'requireMock', 'createMockFromModule', 'genMockFromModule']);
-  const vitestApis = new Set(['fn', 'mock', 'spyOn', 'doMock', 'unmock', 'doUnmock', 'importActual', 'importMock']);
-  if (framework === 'jest' && jestApis.has(name)) return `jest.${name}` as MockApi;
-  if (framework === 'vitest' && vitestApis.has(name)) {
-    return `vi.${name}` as MockApi;
-  }
+  if (framework === 'jest' && JEST_API_NAMES.has(name)) return `jest.${name}` as MockApi;
+  if (framework === 'vitest' && VITEST_API_NAMES.has(name)) return `vi.${name}` as MockApi;
+  // bun:test's own top-level mock surface (flat, one level): the direct-call
+  // `mock(fn)` form and `spyOn(object, method)`. `mock`'s sub-properties
+  // (`.module`/`.clearAllMocks`/`.restore`) are resolved separately by
+  // {@link bunMockSubApi} since they need the local's `bunMockLocals`
+  // registration, not this generic per-framework dispatch (B-2).
+  if (framework === 'bun' && name === 'mock') return 'bun.mock';
+  if (framework === 'bun' && name === 'spyOn') return 'bun.spyOn';
   return undefined;
 }
+
+/** `mock`'s sub-properties when the local is bun:test's `mock` (B-2). */
+function bunMockSubApi(name: string): MockApi | undefined {
+  if (name === 'module') return 'bun.mock.module';
+  if (name === 'clearAllMocks') return 'bun.mock.clearAllMocks';
+  if (name === 'restore') return 'bun.mock.restore';
+  return undefined;
+}
+
+/** `jest`'s sub-properties when the local is bun:test's re-exported `jest` object (B-2). */
+function bunJestSubApi(name: string): MockApi | undefined {
+  return JEST_API_NAMES.has(name) ? `bun.jest.${name}` as MockApi : undefined;
+}
+
+/**
+ * `MockApi` values whose call takes a module specifier as its first
+ * argument (`jest.mock('./x')`-shaped), used by {@link mockRecordForCall} to
+ * decide whether to read `moduleSpecifier`/`static` from `arguments[0]`.
+ * Explicit rather than a suffix heuristic (e.g. "does the name end in
+ * `.mock`") because `'bun.mock'` (bun's direct-call `mock(fn)`, no module
+ * specifier) and `'bun.mock.module'` (bun's actual module-mock form) would
+ * otherwise collide on an `endsWith('.mock')`-style check (B-2).
+ */
+const MODULE_SPECIFIER_MOCK_APIS = new Set<MockApi>([
+  'jest.mock', 'jest.doMock', 'jest.unmock', 'jest.deepUnmock', 'jest.setMock',
+  'jest.requireActual', 'jest.requireMock', 'jest.createMockFromModule', 'jest.genMockFromModule',
+  'vi.mock', 'vi.doMock', 'vi.unmock', 'vi.doUnmock', 'vi.importActual', 'vi.importMock',
+  'bun.mock.module',
+  'bun.jest.mock', 'bun.jest.doMock', 'bun.jest.unmock', 'bun.jest.deepUnmock', 'bun.jest.setMock',
+  'bun.jest.requireActual', 'bun.jest.requireMock', 'bun.jest.createMockFromModule', 'bun.jest.genMockFromModule',
+]);
 
 function frameworkNamespaceName(framework: Exclude<TestFramework, 'unknown'>, name: string): boolean {
   return (framework === 'vitest' && name === 'vi') || (framework === 'jest' && name === 'jest');
@@ -178,12 +252,55 @@ function staticRequireSpecifier(expression: ts.Expression | undefined): string |
   return staticModuleSpecifier(expression.arguments[0]);
 }
 
+interface MutableBindingTable {
+  readonly aliases: Map<string, SemanticName>;
+  readonly namespaces: Set<string>;
+  readonly namespaceFrameworks: Map<string, Exclude<TestFramework, 'unknown'>>;
+  readonly mockAliases: Map<string, MockApi>;
+  readonly assertionAliases: Map<string, 'expect' | 'assert'>;
+  readonly bunMockLocals: Set<string>;
+  readonly bunJestLocals: Set<string>;
+}
+
+/**
+ * Registers everything a single imported/destructured name can mean once its
+ * source framework is known: a suite/test/hook/modifier alias, a mock alias,
+ * an assertion alias, a jest/vitest "namespace object" local (`vi`/`jest`),
+ * and — new in B-2 — bun:test's `mock` and `jest` locals, which get their own
+ * registration since bun's mock API is split across two differently-shaped
+ * objects rather than one framework namespace. Shared by both the
+ * import-declaration loop and the CommonJS `require(...)` destructure loop
+ * in {@link bindingsFor} so the two forms can never drift apart.
+ */
+function registerFrameworkBinding(
+  table: MutableBindingTable,
+  framework: Exclude<TestFramework, 'unknown'>,
+  importedName: string,
+  localName: string,
+): void {
+  const semantic = semanticForName(importedName);
+  if (semantic !== undefined) table.aliases.set(localName, semantic);
+  const mockApi = mockApiForFramework(framework, importedName);
+  if (mockApi !== undefined) table.mockAliases.set(localName, mockApi);
+  if (importedName === 'expect' || importedName === 'assert') table.assertionAliases.set(localName, importedName);
+  if (frameworkNamespaceName(framework, importedName)) {
+    table.namespaces.add(localName);
+    table.namespaceFrameworks.set(localName, framework);
+  }
+  if (framework === 'bun' && importedName === 'mock') table.bunMockLocals.add(localName);
+  if (framework === 'bun' && importedName === 'jest') table.bunJestLocals.add(localName);
+}
+
 function bindingsFor(sourceFile: ts.SourceFile): BindingTable {
-  const aliases = new Map<string, SemanticName>();
-  const namespaces = new Set<string>();
-  const namespaceFrameworks = new Map<string, Exclude<TestFramework, 'unknown'>>();
-  const mockAliases = new Map<string, MockApi>();
-  const assertionAliases = new Map<string, 'expect' | 'assert'>();
+  const table: MutableBindingTable = {
+    aliases: new Map(),
+    namespaces: new Set(),
+    namespaceFrameworks: new Map(),
+    mockAliases: new Map(),
+    assertionAliases: new Map(),
+    bunMockLocals: new Set(),
+    bunJestLocals: new Set(),
+  };
   const importLocals = new Set<string>();
   const frameworkBindingLocals = new Set<string>();
   const frameworks: Exclude<TestFramework, 'unknown'>[] = [];
@@ -200,8 +317,8 @@ function bindingsFor(sourceFile: ts.SourceFile): BindingTable {
     if (ts.isNamespaceImport(namedBindings)) {
       importLocals.add(namedBindings.name.text);
       if (framework !== undefined) {
-        namespaces.add(namedBindings.name.text);
-        namespaceFrameworks.set(namedBindings.name.text, framework);
+        table.namespaces.add(namedBindings.name.text);
+        table.namespaceFrameworks.set(namedBindings.name.text, framework);
       }
       continue;
     }
@@ -209,17 +326,7 @@ function bindingsFor(sourceFile: ts.SourceFile): BindingTable {
       importLocals.add(element.name.text);
       if (framework === undefined) continue;
       const importedName = element.propertyName?.text ?? element.name.text;
-      const semantic = semanticForName(importedName);
-      if (semantic !== undefined) aliases.set(element.name.text, semantic);
-      if (framework !== undefined) {
-        const mockApi = mockApiForFramework(framework, importedName);
-        if (mockApi !== undefined) mockAliases.set(element.name.text, mockApi);
-        if (importedName === 'expect' || importedName === 'assert') assertionAliases.set(element.name.text, importedName);
-        if (frameworkNamespaceName(framework, importedName)) {
-          namespaces.add(element.name.text);
-          namespaceFrameworks.set(element.name.text, framework);
-        }
-      }
+      registerFrameworkBinding(table, framework, importedName, element.name.text);
     }
   }
 
@@ -231,8 +338,8 @@ function bindingsFor(sourceFile: ts.SourceFile): BindingTable {
       if (framework === undefined) continue;
       frameworks.push(framework);
       if (ts.isIdentifier(declaration.name)) {
-        namespaces.add(declaration.name.text);
-        namespaceFrameworks.set(declaration.name.text, framework);
+        table.namespaces.add(declaration.name.text);
+        table.namespaceFrameworks.set(declaration.name.text, framework);
         importLocals.add(declaration.name.text);
         frameworkBindingLocals.add(declaration.name.text);
         continue;
@@ -245,28 +352,22 @@ function bindingsFor(sourceFile: ts.SourceFile): BindingTable {
           : element.name.text;
         importLocals.add(element.name.text);
         frameworkBindingLocals.add(element.name.text);
-        const semantic = semanticForName(importedName);
-        if (semantic !== undefined) aliases.set(element.name.text, semantic);
-        const mockApi = mockApiForFramework(framework, importedName);
-        if (mockApi !== undefined) mockAliases.set(element.name.text, mockApi);
-        if (importedName === 'expect' || importedName === 'assert') assertionAliases.set(element.name.text, importedName);
-        if (frameworkNamespaceName(framework, importedName)) {
-          namespaces.add(element.name.text);
-          namespaceFrameworks.set(element.name.text, framework);
-        }
+        registerFrameworkBinding(table, framework, importedName, element.name.text);
       }
     }
   }
 
   return {
-    aliases,
-    namespaces,
-    namespaceFrameworks,
-    mockAliases,
-    assertionAliases,
+    aliases: table.aliases,
+    namespaces: table.namespaces,
+    namespaceFrameworks: table.namespaceFrameworks,
+    mockAliases: table.mockAliases,
+    assertionAliases: table.assertionAliases,
     importLocals,
     frameworkBindingLocals,
     frameworks,
+    bunMockLocals: table.bunMockLocals,
+    bunJestLocals: table.bunJestLocals,
   };
 }
 
@@ -301,17 +402,18 @@ function analyzeCallee(
   expression: ts.Expression,
   sourceFile: ts.SourceFile,
   bindings: BindingTable,
+  framework: TestFramework,
   shadowed: ReadonlySet<string>,
   localShadowed: ReadonlySet<string>,
 ): CalleeInfo {
   if (ts.isCallExpression(expression)) {
-    const parent = analyzeCallee(expression.expression, sourceFile, bindings, shadowed, localShadowed);
+    const parent = analyzeCallee(expression.expression, sourceFile, bindings, framework, shadowed, localShadowed);
     return parent.dynamicReason === 'dynamic-parameter-table' && parent.parameterTable === undefined && expression.arguments[0] !== undefined
       ? { ...parent, parameterTable: expression.arguments[0] }
       : parent;
   }
   if (ts.isTaggedTemplateExpression(expression)) {
-    const parent = analyzeCallee(expression.tag, sourceFile, bindings, shadowed, localShadowed);
+    const parent = analyzeCallee(expression.tag, sourceFile, bindings, framework, shadowed, localShadowed);
     return parent.dynamicReason === 'dynamic-parameter-table' && parent.parameterTable === undefined
       ? { ...parent, parameterTable: expression.template }
       : parent;
@@ -327,7 +429,7 @@ function analyzeCallee(
       if (localShadowed.has(expression.expression.text)) return { modifiers: [] };
       return semanticInfo(semanticForName(name ?? ''), []);
     }
-    const parent = analyzeCallee(expression.expression, sourceFile, bindings, shadowed, localShadowed);
+    const parent = analyzeCallee(expression.expression, sourceFile, bindings, framework, shadowed, localShadowed);
     if (name === undefined) {
       return { ...parent, dynamicReason: 'unsupported-syntax' };
     }
@@ -338,10 +440,19 @@ function analyzeCallee(
         parameterForm: name,
       };
     }
-    if (modifierKinds.has(name as TestModifierKind) && parent.kind !== undefined) {
+    // B-2: a literal-name modifier match applies to every framework
+    // (`.skip`/`.only`/…, including bun's own `.todoIf`/`.serial`, which
+    // share no name with any Jest/Vitest method). A bun-specific alias
+    // (`.if` → `runIf`, `.failing` → `fails`) only applies when this file is
+    // attributed to bun, so it never changes Jest/Vitest extraction — see
+    // {@link BUN_MODIFIER_NAME_ALIASES}.
+    const modifierKind = modifierKinds.has(name as TestModifierKind)
+      ? name as TestModifierKind
+      : (framework === 'bun' ? BUN_MODIFIER_NAME_ALIASES.get(name) : undefined);
+    if (modifierKind !== undefined && parent.kind !== undefined) {
       const result: CalleeInfo = {
         kind: parent.kind,
-        modifiers: [...parent.modifiers, { kind: name as TestModifierKind, span: sourceSpan(sourceFile, expression) }],
+        modifiers: [...parent.modifiers, { kind: modifierKind, span: sourceSpan(sourceFile, expression) }],
         ...(parent.parameterTable === undefined ? {} : { parameterTable: parent.parameterTable }),
         ...(parent.parameterForm === undefined ? {} : { parameterForm: parent.parameterForm }),
       };
@@ -403,7 +514,7 @@ function callInfo(
   localShadowed: ReadonlySet<string>,
 ): CalleeInfo | undefined {
   return ts.isCallExpression(node)
-    ? analyzeCallee(node.expression, context.sourceFile, context.bindings, shadowed, localShadowed)
+    ? analyzeCallee(node.expression, context.sourceFile, context.bindings, context.framework, shadowed, localShadowed)
     : undefined;
 }
 
@@ -841,6 +952,16 @@ function mockApiForExpression(
   if (!ts.isIdentifier(expression.expression)) return undefined;
   const namespace = expression.expression.text;
   if (localShadowed.has(namespace)) return undefined;
+  const name = propertyName(expression);
+  if (name === undefined) return undefined;
+  // bun:test's `mock` and `jest` locals resolve their sub-properties
+  // (`mock.module`, `jest.fn`, …) through their own dedicated binding-table
+  // registration rather than the generic namespace/framework dispatch
+  // below, since bun has two distinct "namespace-like" imported locals
+  // (`mock` and `jest`) with different member sets, not one framework
+  // global object (B-2).
+  if (bindings.bunMockLocals.has(namespace)) return bunMockSubApi(name);
+  if (bindings.bunJestLocals.has(namespace)) return bunJestSubApi(name);
   const verifiedFramework = bindings.namespaces.has(namespace)
     ? bindings.namespaceFrameworks.get(namespace)
     : (shadowed.has(namespace)
@@ -848,9 +969,7 @@ function mockApiForExpression(
       || !frameworkNamespaceName(framework, namespace)
       ? undefined
       : framework);
-  if (verifiedFramework === undefined) return undefined;
-  const name = propertyName(expression);
-  return name === undefined ? undefined : mockApiForFramework(verifiedFramework, name);
+  return verifiedFramework === undefined ? undefined : mockApiForFramework(verifiedFramework, name);
 }
 
 function mockRecordForCall(
@@ -861,7 +980,7 @@ function mockRecordForCall(
 ): MockRecord | undefined {
   const api = mockApiForExpression(call.expression, context.bindings, context.framework, shadowed, localShadowed);
   if (api === undefined) return undefined;
-  const needsModule = !api.endsWith('.fn') && !api.endsWith('.spyOn');
+  const needsModule = MODULE_SPECIFIER_MOCK_APIS.has(api);
   const moduleSpecifier = needsModule ? staticModuleSpecifier(call.arguments[0]) : undefined;
   return {
     api,

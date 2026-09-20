@@ -462,7 +462,13 @@ function findExportedDeclaration(sourceFile: ts.SourceFile, exportedName: string
 // ---------------------------------------------------------------------------
 
 function isMockRegistrationApi(api: MockApi): boolean {
-  return api === 'jest.mock' || api === 'jest.doMock' || api === 'vi.mock' || api === 'vi.doMock';
+  return api === 'jest.mock' || api === 'jest.doMock' || api === 'vi.mock' || api === 'vi.doMock'
+    // B-2 (bun-test-support.md): bun's `mock.module(...)` is the actual
+    // equivalent of `jest.mock`/`vi.mock` (bun's direct-call `mock(fn)` is
+    // not — that one creates a mock function, like `.fn`, so it is
+    // deliberately excluded here). `bun.jest.mock`/`bun.jest.doMock` are the
+    // same Jest-compatible module-mock calls, re-exported through bun.
+    || api === 'bun.mock.module' || api === 'bun.jest.mock' || api === 'bun.jest.doMock';
 }
 
 /**

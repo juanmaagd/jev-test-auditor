@@ -227,6 +227,47 @@ describe('repository-local test discovery', () => {
     ]);
   });
 
+  it('attributes bun:test import and require the same way as jest/vitest (B-2)', async () => {
+    const root = await fixture({
+      'bun.test.ts': "import { test } from 'bun:test';",
+      'bun-require.test.ts': "const { test } = require('bun:test');",
+    });
+
+    const result = await discoverTestFiles({ rootDir: root });
+
+    expect(result.files).toEqual([
+      {
+        repositoryRelativePath: 'bun-require.test.ts',
+        framework: 'bun',
+        frameworkEvidence: [{ framework: 'bun', source: 'import', detail: 'bun:test' }],
+      },
+      {
+        repositoryRelativePath: 'bun.test.ts',
+        framework: 'bun',
+        frameworkEvidence: [{ framework: 'bun', source: 'import', detail: 'bun:test' }],
+      },
+    ]);
+  });
+
+  it('returns unknown when bun:test conflicts with another framework import (B-2)', async () => {
+    const root = await fixture({
+      'conflict.test.ts': "import { test as a } from 'bun:test'; import { test as b } from 'vitest';",
+    });
+
+    const result = await discoverTestFiles({ rootDir: root });
+
+    expect(result.files).toEqual([
+      {
+        repositoryRelativePath: 'conflict.test.ts',
+        framework: 'unknown',
+        frameworkEvidence: [
+          { framework: 'bun', source: 'import', detail: 'bun:test' },
+          { framework: 'vitest', source: 'import', detail: 'vitest' },
+        ],
+      },
+    ]);
+  });
+
   it('returns unknown when static framework evidence is ambiguous', async () => {
     const root = await fixture({
       'package.json': JSON.stringify({ devDependencies: { jest: '^1.0.0', vitest: '^1.0.0' } }),
