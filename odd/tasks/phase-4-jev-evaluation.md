@@ -95,21 +95,23 @@ This is the first end-to-end MVP: discovery → evidence → Jev → classificat
   - Verify opt-in behavior, offline default, per-test failure isolation, deterministic JSON, exit codes, and packed-install smoke.
   - Evidence: `b6bd435` (`feat: evaluate tests with jev behind an opt-in flag`) on `feat/phase-4-application-cli`; 13 files, 1,617 additions and 58 deletions (1,675 authored changed lines). Suite 20 files/439 tests, typecheck, build, lint, and diff check passed. Observed RED before each step. The evaluation port's presence is the only gate: the gateway is constructed only when `--evaluate` is parsed, so the default stays offline with no key. `--dry-run`, `--evaluate`, and `--inspect-payloads` are mutually exclusive; `--json` requires one of the first two. A bounded pool writes results by index, so ordering never depends on completion order. A failed evaluation yields one `evaluation-failed` diagnostic with the test case id and typed error code, never the key or request, and no verdict. Totals separate evaluated, failed, skipped by reason, status counts, usage, responded model, and model mismatches. Estimator snapshot now reuses `JEV_MODEL_ID` and records the verified rate limits; README roadmap renumbered. Review correction: the first golden pinned an all-not-applicable case that no regression could break, so a second literal golden pins a mixed run where one test is `misleading` despite a `strong` dimension and another is `healthy`; a cut-point mutation turns only that golden RED. Manual check: default run offline, `--evaluate` without a key exits 1 with no connection attempted.
 
-- [ ] **P4-5 — Store the API key locally without a global environment variable**
+- [x] **P4-5 — Store the API key locally without a global environment variable**
   - Add `auth login`, `auth status`, and `auth logout`. Read the key from a no-echo prompt, never from an argument. Persist it in a per-user config file scoped to this tool with owner-only permissions. Resolve `TYPESAFE_API_KEY` first so CI keeps using GitHub secrets, then the stored file.
   - Verify precedence, file permissions, absent and corrupt files, that the key never appears in output or errors, and that `--evaluate` reports both ways to provide a key.
+  - Evidence: `9cc6221` (`feat: store the typesafe api key locally`) on `feat/phase-4-auth-storage`; 9 files, 1,484 authored lines. Suite 21 files/487 tests, typecheck, build, lint, and diff check passed. `auth login` reads a hidden line on a TTY and one plain line otherwise, never an argument; `auth status` names the winning source and the file's permission state without ever printing the key; `auth logout` deletes it. Storage writes a temp file with mode 0600 and renames it, so the secret is never briefly world-readable, and a file with looser POSIX permissions is refused rather than used. Resolution prefers `TYPESAFE_API_KEY` so CI keeps injecting a GitHub secret, then the stored file; the no-key error names both. Mutations on write-then-rename removal, reversed precedence, printing the last four characters, accepting a blank key, ignoring loose permissions, and forcing hidden input turned RED. Manual check on a temp config home: file mode `.rw-------`, status and logout output carried no key. Noted gap: the storage and prompt adapters were verified by mutation rather than a literal missing-module RED.
 
 ## Progress
 
-- Current task: **P4-5**.
-- Completed tasks: **P4-1, P4-2, P4-3, P4-4**.
-- Running authored count: **5,783**.
+- Current task: **none — Phase 4 complete**.
+- Completed tasks: **P4-1, P4-2, P4-3, P4-4, P4-5**.
+- Running authored count: **7,267**, against a 2,000-line forecast; every slice carries its tests and docs, and P4-5 was added mid-phase by user decision.
 - Slice ledger:
   - `feat/phase-4-rubric-requests`: `5257be7` — versioned rubric, state projection, request composition, and budget checks.
   - `feat/phase-4-jev-gateway`: `a7be1b3` — hand-rolled TypeSafe HTTP gateway behind a port.
   - `feat/phase-4-classification`: `eed2d2a` — provisional non-compensatory classification policy and findings.
   - `feat/phase-4-application-cli`: `b6bd435` — opt-in evaluation, bounded concurrency, terminal and JSON reporting, and documentation.
+  - `feat/phase-4-auth-storage`: `9cc6221` — local API key storage, auth commands, and key resolution.
 
 ## Next step
 
-Branch `feat/phase-4-auth-storage` from `feat/phase-4-application-cli` and delegate P4-5 to one writer with strict TDD, then review, commit, and close the phase.
+Integrating the Phase 4 chain into `main` is the user's decision. Then run the first real evaluation against a small repository with a real key and read the judgments before planning Phase 5 (persistence, caching, `--fresh`, resume, adaptive scheduling). No Jev call has ever been made yet: every test uses a stubbed gateway.
