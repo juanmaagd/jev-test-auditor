@@ -85,22 +85,24 @@ This is the first end-to-end MVP: discovery → evidence → Jev → classificat
   - Hand-rolled `fetch` client behind a port: auth from `TYPESAFE_API_KEY`, timeout, bounded retry for 429/529 honoring `retry-after`, typed normalization of noul/score answers and usage, typed errors.
   - Verify status handling, backoff bounds, key never logged or serialized, malformed/partial responses, model mismatch reporting, and abort behavior, all against a stubbed fetch.
   - Evidence: `a7be1b3` (`feat: add typesafe jev http gateway`) on `feat/phase-4-jev-gateway`; 5 files, 1,330 authored lines (686 of them tests). Suite 18 files/357 tests, typecheck, build, lint, and diff check passed. Observed RED twice: missing modules, then a stub adapter failing 24 of 29 assertions. Defaults: 60s timeout, 3 retries, 500ms initial backoff, 30s cap, full jitter, `retry-after` honored as seconds or HTTP-date and always capped. Typed errors for configuration, auth, request, rate limit, overloaded, timeout, abort, and response; only 429/529 retry. The key lives in a closure, never on the object, and every server- or transport-derived string is redacted, including the network-error path found during review. Timeout covers the whole body read through two abort controllers. The architecture test now allows exactly one reviewed bare `fetch(` call site in this adapter and fails if it disappears or a second appears; the network-import ban still covers it. Mutations on retrying 401, dropping the retry-after cap, unredacted 422, skipping a missing answer, hardcoding the model match, and accepting a non-finite probability turned RED.
-- [ ] **P4-3 — Derive deterministic classification**
+- [x] **P4-3 — Derive deterministic classification**
   - Pure non-compensatory policy over normalized judgments with versioned provisional thresholds, evidence gating, and per-dimension findings.
   - Verify every policy branch, threshold boundaries, unknown/low-confidence gating, and that no strong dimension can cancel a critical failure.
+  - Evidence: `eed2d2a` (`feat: derive deterministic test classification`) on `feat/phase-4-classification`; 3 files, 1,111 authored lines (663 of them tests), 58 new tests. Suite 19 files/415 tests, typecheck, build, lint, and diff check passed. Observed RED before implementation. `CLASSIFICATION_POLICY_V1` is provisional and uncalibrated: applicability `noul >= 0.5`, confidence `>= 0.6`, cut points [1, 2, 3] with half-open intervals where a score exactly at a cut point belongs to the higher level, so reaching a level requires the weighted score to actually reach it. Non-applicable dimensions are excluded; low confidence, missing, or malformed answers force `needs-review`; a model-pin mismatch forces `needs-review` regardless of scores; `healthy` requires every applicable dimension acceptable or strong. Findings include `needs-review` dimensions so uncertainty stays visible. A rubric/policy version mismatch throws. Mutations on compensatory averaging, dropping the model-mismatch rule, skipping the confidence gate, bypassing applicability, shifting cut-point comparisons, and letting needs-review reach healthy turned RED.
 - [ ] **P4-4 — Wire evaluation into the audit and CLI**
   - Add `audit --evaluate` with bounded concurrency, terminal summary, canonical JSON report including judgments, usage, and provenance, honest failure reporting, and documentation updates; align the estimator model string and README roadmap numbering.
   - Verify opt-in behavior, offline default, per-test failure isolation, deterministic JSON, exit codes, and packed-install smoke.
 
 ## Progress
 
-- Current task: **P4-3**.
-- Completed tasks: **P4-1, P4-2**.
-- Running authored count: **2,997**.
+- Current task: **P4-4**.
+- Completed tasks: **P4-1, P4-2, P4-3**.
+- Running authored count: **4,108**.
 - Slice ledger:
   - `feat/phase-4-rubric-requests`: `5257be7` — versioned rubric, state projection, request composition, and budget checks.
   - `feat/phase-4-jev-gateway`: `a7be1b3` — hand-rolled TypeSafe HTTP gateway behind a port.
+  - `feat/phase-4-classification`: `eed2d2a` — provisional non-compensatory classification policy and findings.
 
 ## Next step
 
-Branch `feat/phase-4-classification` from `feat/phase-4-jev-gateway` and delegate P4-3 to one writer with strict TDD, then review before the work-unit commit.
+Branch `feat/phase-4-application-cli` from `feat/phase-4-classification` and delegate P4-4 to one writer with strict TDD, then review before the work-unit commit and phase close.
