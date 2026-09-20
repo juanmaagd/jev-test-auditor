@@ -189,7 +189,95 @@ describe('createSqliteAuditStore migrations', () => {
         .map((row) => (row as { readonly name: string }).name);
       expect(tables).toEqual(expect.arrayContaining(['runs', 'work_items', 'attempts', 'judgments', 'errors', 'skips', 'schema_meta']));
       const version = (db.prepare('SELECT schema_version FROM schema_meta WHERE id = 1').get() as { readonly schema_version: number }).schema_version;
-      expect(version).toBe(1);
+      // Phase 5, task P5-2 bumps the schema to version 2 (adds `work_items.cache_key`) — see the
+      // "upgrades a v1 database to v2" test below for the migration-as-upgrade path.
+      expect(version).toBe(2);
+    } finally {
+      db.close();
+    }
+  });
+
+  // The only test that exercises MIGRATIONS[1] as an actual upgrade (version 1 -> 2), rather than
+  // from-empty (version 0 -> 2 in one pass, which the "creates the schema from an empty file" test
+  // above already covers but which alone could never distinguish "ran both migrations" from "only
+  // ever knew how to create the newest schema directly").
+  it('upgrades a hand-built v1 database to v2, adding work_items.cache_key without disturbing an already-written row', async () => {
+    const databaseFile = await tempDatabaseFile();
+    await mkdir(dirname(databaseFile), { recursive: true });
+
+    // Recreate exactly what MIGRATIONS[0] produces, plus a schema_meta row pinned at 1 — a
+    // faithful stand-in for a real database written by a pre-P5-2 build.
+    const v1Db = new DatabaseSync(databaseFile);
+    v1Db.exec(`
+      CREATE TABLE runs (
+        id TEXT PRIMARY KEY,
+        root_dir TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        finished_at TEXT
+      ) STRICT;
+    `);
+    v1Db.exec(`
+      CREATE TABLE work_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id TEXT NOT NULL REFERENCES runs(id),
+        test_case_id TEXT NOT NULL,
+        repository_relative_path TEXT NOT NULL,
+        name TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('pending','running','completed','cached','uncertain','skipped','failed')),
+        recorded_at TEXT NOT NULL
+      ) STRICT;
+    `);
+    v1Db.exec(`
+      CREATE TABLE attempts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        work_item_id INTEGER NOT NULL REFERENCES work_items(id),
+        requested_model TEXT NOT NULL,
+        responded_model TEXT NOT NULL,
+        model_matches_pin INTEGER NOT NULL CHECK (model_matches_pin IN (0, 1)),
+        attempts INTEGER NOT NULL,
+        raw_answers TEXT NOT NULL,
+        input_tokens INTEGER NOT NULL,
+        output_tokens INTEGER NOT NULL
+      ) STRICT;
+    `);
+    v1Db.exec(`
+      CREATE TABLE judgments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        work_item_id INTEGER NOT NULL REFERENCES work_items(id),
+        status TEXT NOT NULL,
+        policy_version INTEGER NOT NULL,
+        rubric_version INTEGER NOT NULL,
+        classification TEXT NOT NULL
+      ) STRICT;
+    `);
+    v1Db.exec(`CREATE TABLE errors (id INTEGER PRIMARY KEY AUTOINCREMENT, work_item_id INTEGER NOT NULL REFERENCES work_items(id), kind TEXT NOT NULL, message TEXT NOT NULL) STRICT;`);
+    v1Db.exec(`CREATE TABLE skips (id INTEGER PRIMARY KEY AUTOINCREMENT, work_item_id INTEGER NOT NULL REFERENCES work_items(id), reason TEXT NOT NULL) STRICT;`);
+    v1Db.exec(`CREATE TABLE schema_meta (id INTEGER PRIMARY KEY CHECK (id = 1), schema_version INTEGER NOT NULL) STRICT;`);
+    v1Db.exec('INSERT INTO schema_meta (id, schema_version) VALUES (1, 1)');
+    v1Db.prepare('INSERT INTO runs (id, root_dir, started_at) VALUES (?, ?, ?)').run('pre-existing-run', '/repo', '2026-01-01T00:00:00.000Z');
+    v1Db.prepare(
+      'INSERT INTO work_items (run_id, test_case_id, repository_relative_path, name, state, recorded_at) VALUES (?, ?, ?, ?, ?, ?)',
+    ).run('pre-existing-run', 'tc:v1:pre-existing', 'a.test.ts', 'pre-existing test', 'skipped', '2026-01-01T00:00:00.000Z');
+    v1Db.close();
+
+    const store = await createSqliteAuditStore({ databaseFile });
+    await store.close();
+
+    const db = new DatabaseSync(databaseFile);
+    try {
+      const version = (db.prepare('SELECT schema_version FROM schema_meta WHERE id = 1').get() as { readonly schema_version: number }).schema_version;
+      expect(version).toBe(2);
+
+      const columns = db.prepare('PRAGMA table_info(work_items)').all().map((row) => (row as { readonly name: string }).name);
+      expect(columns).toContain('cache_key');
+
+      const preExisting = db.prepare('SELECT * FROM work_items WHERE test_case_id = ?').get('tc:v1:pre-existing') as Record<string, unknown>;
+      expect(preExisting['state']).toBe('skipped');
+      expect(preExisting['repository_relative_path']).toBe('a.test.ts');
+      expect(preExisting['cache_key']).toBeNull();
+
+      const run = db.prepare('SELECT * FROM runs WHERE id = ?').get('pre-existing-run') as Record<string, unknown>;
+      expect(run['root_dir']).toBe('/repo');
     } finally {
       db.close();
     }
@@ -227,7 +315,7 @@ describe('createSqliteAuditStore migrations', () => {
     db.close();
 
     await expect(createSqliteAuditStore({ databaseFile })).rejects.toThrow(AuditStoreSchemaVersionError);
-    await expect(createSqliteAuditStore({ databaseFile })).rejects.toMatchObject({ foundVersion: 999, supportedVersion: 1 });
+    await expect(createSqliteAuditStore({ databaseFile })).rejects.toMatchObject({ foundVersion: 999, supportedVersion: 2 });
   });
 
   it('fails with a named, visible error when schema_meta exists but its row is missing or malformed, rather than silently recreating the database', async () => {
@@ -308,7 +396,7 @@ describe('createSqliteAuditStore foreign database protection', () => {
     const db = new DatabaseSync(databaseFile);
     try {
       const version = (db.prepare('SELECT schema_version FROM schema_meta WHERE id = 1').get() as { readonly schema_version: number }).schema_version;
-      expect(version).toBe(1);
+      expect(version).toBe(2);
     } finally {
       db.close();
     }
@@ -464,6 +552,7 @@ describe('createSqliteAuditStore work-item persistence', () => {
     await store.recordWorkItem(runId, {
       state: 'completed',
       identity: { testCaseId, repositoryRelativePath: 'a.test.ts', name: 'adds numbers' },
+      cacheKey: 'ck-completed-fixture',
       evaluation: sampleEvaluation(),
       classification: sampleClassification(testCaseId),
     });
@@ -473,6 +562,7 @@ describe('createSqliteAuditStore work-item persistence', () => {
       const workItem = db.prepare('SELECT * FROM work_items WHERE run_id = ?').get(runId) as Record<string, unknown>;
       expect(workItem['state']).toBe('completed');
       expect(workItem['test_case_id']).toBe(testCaseId);
+      expect(workItem['cache_key']).toBe('ck-completed-fixture');
 
       const attempt = db.prepare('SELECT * FROM attempts WHERE work_item_id = ?').get(workItem['id'] as number) as Record<string, unknown>;
       // Every assertion below targets a fixture value that is unique across the whole row (see
@@ -576,5 +666,220 @@ describe('createSqliteAuditStore work-item persistence', () => {
     store = await createSqliteAuditStore({ databaseFile });
 
     await expect(stat(databaseFile)).resolves.toBeDefined();
+  });
+
+  it('persists a cached work item with its cache key and reused judgment, and inserts no attempt row (no provider request was made)', async () => {
+    databaseFile = await tempDatabaseFile();
+    store = await createSqliteAuditStore({ databaseFile });
+    const runId = await store.beginRun('/repo');
+    const testCaseId = 'tc:v1:cache-hit' as TestCaseId;
+
+    await store.recordWorkItem(runId, {
+      state: 'cached',
+      identity: { testCaseId, repositoryRelativePath: 'a.test.ts', name: 'adds numbers' },
+      cacheKey: 'ck-cache-hit-fixture',
+      classification: sampleClassification(testCaseId),
+    });
+
+    const db = new DatabaseSync(databaseFile);
+    try {
+      const workItem = db.prepare('SELECT * FROM work_items WHERE run_id = ?').get(runId) as Record<string, unknown>;
+      expect(workItem['state']).toBe('cached');
+      expect(workItem['cache_key']).toBe('ck-cache-hit-fixture');
+
+      const judgment = db.prepare('SELECT * FROM judgments WHERE work_item_id = ?').get(workItem['id'] as number) as Record<string, unknown>;
+      expect(JSON.parse(judgment['classification'] as string)).toEqual(sampleClassification(testCaseId));
+
+      const attemptCount = (db.prepare('SELECT COUNT(*) as count FROM attempts WHERE work_item_id = ?').get(workItem['id'] as number) as { readonly count: number }).count;
+      expect(attemptCount).toBe(0);
+    } finally {
+      db.close();
+    }
+  });
+});
+
+// --- lookup (Phase 5, task P5-2) -----------------------------------------------------------
+
+/** Same non-symmetric-fixture discipline as `sampleClassification` above: `status` is the field varied across fixtures below so a test can tell which of several stored judgments a `lookup` call actually returned. */
+function classificationWithStatus(testCaseId: TestCaseId, status: ClassificationResult['status']): ClassificationResult {
+  return { ...sampleClassification(testCaseId), status };
+}
+
+async function recordCompleted(
+  store: AuditStorePort,
+  runId: string,
+  testCaseId: TestCaseId,
+  cacheKey: string,
+  status: ClassificationResult['status'],
+  matchesPin: boolean,
+): Promise<void> {
+  // `lookup`'s pin filter reads `attempts.model_matches_pin` (populated from
+  // `evaluation.modelMatchesPin`), not the classification's own denormalized `model.matchesPin`
+  // copy — both must agree here, or this fixture would not exercise what it claims to.
+  await store.recordWorkItem(runId, {
+    state: 'completed',
+    identity: { testCaseId, repositoryRelativePath: 'a.test.ts', name: 'adds numbers' },
+    cacheKey,
+    evaluation: { ...sampleEvaluation(), modelMatchesPin: matchesPin },
+    classification: { ...classificationWithStatus(testCaseId, status), model: { requested: 'jev-eval-requested-model', responded: 'jev-eval-responded-model', matchesPin } },
+  });
+}
+
+describe('createSqliteAuditStore lookup', () => {
+  let store: AuditStorePort;
+  let databaseFile: string;
+
+  afterEach(async () => {
+    await store?.close();
+  });
+
+  it('returns undefined on a miss (no work item was ever recorded under this key)', async () => {
+    databaseFile = await tempDatabaseFile();
+    store = await createSqliteAuditStore({ databaseFile });
+
+    await expect(store.lookup('ck-never-recorded')).resolves.toBeUndefined();
+  });
+
+  it('returns the most recent completed judgment when several pin-matching completed judgments share one key', async () => {
+    databaseFile = await tempDatabaseFile();
+    store = await createSqliteAuditStore({ databaseFile });
+    const runId = await store.beginRun('/repo');
+    const testCaseId = 'tc:v1:lookup-newest' as TestCaseId;
+
+    await recordCompleted(store, runId, testCaseId, 'ck-shared', 'healthy', true);
+    await recordCompleted(store, runId, testCaseId, 'ck-shared', 'weak', true);
+
+    const hit = await store.lookup('ck-shared');
+    expect(hit?.classification.status).toBe('weak');
+  });
+
+  it('skips a newer pin-mismatched judgment and returns an older pin-matching one under the same key', async () => {
+    databaseFile = await tempDatabaseFile();
+    store = await createSqliteAuditStore({ databaseFile });
+    const runId = await store.beginRun('/repo');
+    const testCaseId = 'tc:v1:lookup-pin-skip' as TestCaseId;
+
+    await recordCompleted(store, runId, testCaseId, 'ck-pin-skip', 'healthy', true);
+    await recordCompleted(store, runId, testCaseId, 'ck-pin-skip', 'misleading', false);
+
+    const hit = await store.lookup('ck-pin-skip');
+    expect(hit?.classification.status).toBe('healthy');
+  });
+
+  it('returns undefined when every completed judgment under a key is pin-mismatched', async () => {
+    databaseFile = await tempDatabaseFile();
+    store = await createSqliteAuditStore({ databaseFile });
+    const runId = await store.beginRun('/repo');
+    const testCaseId = 'tc:v1:lookup-all-mismatched' as TestCaseId;
+
+    await recordCompleted(store, runId, testCaseId, 'ck-all-mismatched', 'healthy', false);
+    await recordCompleted(store, runId, testCaseId, 'ck-all-mismatched', 'weak', false);
+
+    await expect(store.lookup('ck-all-mismatched')).resolves.toBeUndefined();
+  });
+
+  it('never returns a cached work item\'s own judgment as a lookup source: a later cache hit recorded under the same key does not shadow the original completed judgment', async () => {
+    databaseFile = await tempDatabaseFile();
+    store = await createSqliteAuditStore({ databaseFile });
+    const runId = await store.beginRun('/repo');
+    const testCaseId = 'tc:v1:lookup-not-cached-source' as TestCaseId;
+
+    await recordCompleted(store, runId, testCaseId, 'ck-not-cached-source', 'healthy', true);
+    // Simulates a second run's cache hit against the same key: recorded with a HIGHER id than
+    // the completed row above. A `lookup` that forgot to filter on `state = 'completed'` would
+    // return this row's own judgment instead — it deliberately carries a different `status`
+    // (`misleading`) so that mistake is observable.
+    await store.recordWorkItem(runId, {
+      state: 'cached',
+      identity: { testCaseId, repositoryRelativePath: 'a.test.ts', name: 'adds numbers' },
+      cacheKey: 'ck-not-cached-source',
+      classification: classificationWithStatus(testCaseId, 'misleading'),
+    });
+
+    const hit = await store.lookup('ck-not-cached-source');
+    expect(hit?.classification.status).toBe('healthy');
+  });
+
+  // A `cached`/`failed`/`skipped` work item never gets its own `attempts` row through
+  // `recordWorkItem` (only `insertAttempt` for `completed` does), so the INNER JOIN to `attempts`
+  // in `lookup`'s query already excludes every non-completed row on its own — meaning the query's
+  // explicit `w.state = 'completed'` predicate is not otherwise exercised by any test above (it
+  // cannot turn RED by itself: removing it changes nothing while that join invariant holds). This
+  // test manufactures the one case where it matters — a non-completed row that somehow does have
+  // a matching `attempts`/`judgments` pair, bypassing `recordWorkItem` entirely via direct SQL, the
+  // same technique the schema-corruption tests above use to simulate a state the port itself would
+  // never produce.
+  it('excludes a non-completed work item even if it somehow carries a matching attempts/judgments pair (defensive; direct SQL, since recordWorkItem itself never produces this shape)', async () => {
+    databaseFile = await tempDatabaseFile();
+    store = await createSqliteAuditStore({ databaseFile });
+    const runId = await store.beginRun('/repo');
+    const testCaseId = 'tc:v1:lookup-defensive-state' as TestCaseId;
+
+    const db = new DatabaseSync(databaseFile);
+    try {
+      const inserted = db.prepare(
+        'INSERT INTO work_items (run_id, test_case_id, repository_relative_path, name, state, recorded_at, cache_key) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      ).run(runId, testCaseId, 'a.test.ts', 'adds numbers', 'failed', new Date().toISOString(), 'ck-defensive-state');
+      const workItemId = Number(inserted.lastInsertRowid);
+      db.prepare(
+        'INSERT INTO attempts (work_item_id, requested_model, responded_model, model_matches_pin, attempts, raw_answers, input_tokens, output_tokens) VALUES (?, ?, ?, 1, 1, \'{}\', 0, 0)',
+      ).run(workItemId, 'jev-eval-requested-model', 'jev-eval-responded-model');
+      db.prepare(
+        'INSERT INTO judgments (work_item_id, status, policy_version, rubric_version, classification) VALUES (?, ?, ?, ?, ?)',
+      ).run(workItemId, 'misleading', 3, 6, JSON.stringify(sampleClassification(testCaseId)));
+    } finally {
+      db.close();
+    }
+
+    await expect(store.lookup('ck-defensive-state')).resolves.toBeUndefined();
+  });
+
+  it('never returns a completed work item recorded with no cache key', async () => {
+    databaseFile = await tempDatabaseFile();
+    store = await createSqliteAuditStore({ databaseFile });
+    const runId = await store.beginRun('/repo');
+    const testCaseId = 'tc:v1:lookup-no-key' as TestCaseId;
+
+    // No `cacheKey` at all — the exact shape a pre-P5-2 caller (or a caller that never wires
+    // `AuditCacheKeyPort`) would still produce; see `AuditStoreWorkItemOutcome`'s own doc.
+    await store.recordWorkItem(runId, {
+      state: 'completed',
+      identity: { testCaseId, repositoryRelativePath: 'a.test.ts', name: 'adds numbers' },
+      evaluation: sampleEvaluation(),
+      classification: sampleClassification(testCaseId),
+    });
+
+    // Querying with an empty string must not accidentally match a stored NULL.
+    await expect(store.lookup('')).resolves.toBeUndefined();
+  });
+
+  it('a --fresh re-run appends a new completed judgment without mutating the prior one, and a later lookup returns the new one, never the old one', async () => {
+    databaseFile = await tempDatabaseFile();
+    store = await createSqliteAuditStore({ databaseFile });
+    const runId = await store.beginRun('/repo');
+    const testCaseId = 'tc:v1:lookup-fresh' as TestCaseId;
+
+    await recordCompleted(store, runId, testCaseId, 'ck-fresh', 'healthy', true);
+    const beforeFresh = await store.lookup('ck-fresh');
+    expect(beforeFresh?.classification.status).toBe('healthy');
+
+    // A `--fresh` dispatch bypasses lookup but still writes a new immutable completed result
+    // under the same key (see the domain port's own doc) — simulated here directly at the store
+    // layer, independent of the application-layer `--fresh` wiring exercised in `audit.test.ts`.
+    await recordCompleted(store, runId, testCaseId, 'ck-fresh', 'weak', true);
+
+    const afterFresh = await store.lookup('ck-fresh');
+    expect(afterFresh?.classification.status).toBe('weak');
+
+    const db = new DatabaseSync(databaseFile);
+    try {
+      const completedCount = (
+        db.prepare("SELECT COUNT(*) as count FROM work_items WHERE test_case_id = ? AND cache_key = ? AND state = 'completed'")
+          .get(testCaseId, 'ck-fresh') as { readonly count: number }
+      ).count;
+      expect(completedCount).toBe(2);
+    } finally {
+      db.close();
+    }
   });
 });

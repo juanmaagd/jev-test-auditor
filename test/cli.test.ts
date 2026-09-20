@@ -9,7 +9,7 @@ import { readStoredCredentials, resolveAuthStoragePaths, writeStoredCredentials 
 import { resolveAuditStorePaths } from '../src/adapters/sqlite-audit-store.js';
 import { AuthPromptCancelledError } from '../src/domain/auth.js';
 import { AuditStoreSchemaVersionError } from '../src/domain/audit.js';
-import type { AuditEvaluationPort, AuditFileResult, AuditPorts, AuditResult, AuditStorePort } from '../src/domain/audit.js';
+import type { AuditEvaluationPort, AuditFileResult, AuditPorts, AuditResult, AuditStorePort, AuditStoreWorkItemOutcome } from '../src/domain/audit.js';
 import { buildEvidenceBundle, DEFAULT_EVIDENCE_BUDGET, type EvidenceBundle } from '../src/domain/evidence.js';
 import { canonicalizeEvidenceBundle } from '../src/index.js';
 import type { JevAnswer, JevEvaluation, JevGatewayPort } from '../src/domain/jev-gateway.js';
@@ -675,6 +675,61 @@ describe('--evaluate', () => {
     expect(output.lines[0]).toContain('--evaluate');
   });
 
+  it('rejects --fresh without --evaluate as a usage error and never runs the audit seam', async () => {
+    const output = captureOutput();
+
+    const exitCode = await runCli(['audit', '--fresh'], output.io, {
+      audit: async () => { throw new Error('must not run'); },
+    });
+
+    expect(exitCode).toBe(1);
+    expect(output.lines[0]).toContain('--fresh');
+    expect(output.lines[0]).toContain('--evaluate');
+  });
+
+  it('rejects --fresh combined with --dry-run (no --evaluate) as a usage error', async () => {
+    const output = captureOutput();
+
+    const exitCode = await runCli(['audit', '--dry-run', '--fresh'], output.io, {
+      audit: async () => { throw new Error('must not run'); },
+    });
+
+    expect(exitCode).toBe(1);
+    expect(output.lines[0]).toContain('--fresh');
+    expect(output.lines[0]).toContain('--evaluate');
+  });
+
+  it('accepts --evaluate --fresh together and forwards fresh:true to the audit seam', async () => {
+    const output = captureOutput();
+    const audit: AuditResult = {
+      rootDir: '/workspace',
+      files: [],
+      excluded: [],
+      diagnostics: [],
+      totals: { files: 0, excluded: 0, testCases: 0, dynamicMetadata: 0, diagnostics: 0, ...zeroEvidenceTotals },
+      reportingOnly: true,
+      evaluation: {
+        classifications: [],
+        totals: {
+          evaluated: 0,
+          cached: 0,
+          failed: 0,
+          skipped: { total: 0, byReason: { skip: 0, todo: 0, 'evidence-unavailable': 0 } },
+          usage: { inputTokens: 0, outputTokens: 0 },
+          statusCounts: { healthy: 0, weak: 0, misleading: 0, 'needs-review': 0 },
+          respondedModel: undefined,
+          modelMismatches: 0,
+        },
+      },
+    };
+
+    const exitCode = await runCli(['audit', '--evaluate', '--fresh'], output.io, {
+      audit: async () => audit,
+    });
+
+    expect(exitCode).toBe(0);
+  });
+
   describe('key safety (real gateway construction path, no dependencies.audit override)', () => {
     let savedKey: string | undefined;
     let originalFetch: typeof fetch;
@@ -904,7 +959,7 @@ describe('--evaluate', () => {
         expect(output.lines).toHaveLength(1);
         expect(output.lines[0]).toBe(
           '{"evaluate":true,"reportingOnly":true,"rootDir":"/workspace","modelRequested":"jev-1.13.0",'
-          + '"totals":{"evaluated":1,"failed":0,"skipped":{"total":0,"byReason":{"skip":0,"todo":0,"evidence-unavailable":0}},'
+          + '"totals":{"evaluated":1,"cached":0,"failed":0,"skipped":{"total":0,"byReason":{"skip":0,"todo":0,"evidence-unavailable":0}},'
           + '"usage":{"inputTokens":100,"outputTokens":0},"statusCounts":{"healthy":0,"weak":0,"misleading":0,"needs-review":1},'
           + '"respondedModel":"jev-1.13.0","modelMismatches":0},'
           + '"classifications":[{"testCaseId":"tc:v1:abc","repositoryRelativePath":"abc.test.ts","name":"abc","status":"needs-review",'
@@ -1172,7 +1227,7 @@ describe('--evaluate', () => {
         expect(output.lines).toHaveLength(1);
         expect(output.lines[0]).toBe(
           '{"evaluate":true,"reportingOnly":true,"rootDir":"/workspace","modelRequested":"jev-1.13.0",'
-          + '"totals":{"evaluated":2,"failed":0,"skipped":{"total":0,"byReason":{"skip":0,"todo":0,"evidence-unavailable":0}},'
+          + '"totals":{"evaluated":2,"cached":0,"failed":0,"skipped":{"total":0,"byReason":{"skip":0,"todo":0,"evidence-unavailable":0}},'
           + '"usage":{"inputTokens":240,"outputTokens":3},"statusCounts":{"healthy":1,"weak":0,"misleading":1,"needs-review":0},'
           + '"respondedModel":"jev-1.13.0","modelMismatches":0},'
           + '"classifications":[{"testCaseId":"tc:v1:misleading-case","repositoryRelativePath":"mixed.test.ts","name":"misleading case","status":"misleading",'
@@ -1253,6 +1308,7 @@ describe('--evaluate', () => {
           classifications: [],
           totals: {
             evaluated: 0,
+            cached: 0,
             failed: 1,
             skipped: { total: 0, byReason: { skip: 0, todo: 0, 'evidence-unavailable': 0 } },
             usage: { inputTokens: 0, outputTokens: 0 },
@@ -1384,6 +1440,7 @@ describe('SQLite audit store (Phase 5, task P5-1)', () => {
     const fakeStore: AuditStorePort = {
       beginRun: async () => 'fake-run-1',
       recordWorkItem: async () => { workItems += 1; },
+      lookup: async () => undefined,
       finishRun: async () => undefined,
       close: async () => { closed = true; },
     };
@@ -1450,6 +1507,98 @@ describe('SQLite audit store (Phase 5, task P5-1)', () => {
       if (savedKey === undefined) delete process.env['TYPESAFE_API_KEY']; else process.env['TYPESAFE_API_KEY'] = savedKey;
       globalThis.fetch = originalFetch;
     }
+  });
+});
+
+/**
+ * Content-addressed caching wiring end-to-end through the real `runCli` pipeline (Phase 5, task
+ * P5-2): the real `createAuditCacheKeyPort()` (not overridable — it has no I/O to fake) computes
+ * an actual key from the real `math.test.ts` fixture below, and only the store is faked, so this
+ * exercises the genuine wiring in `createProductionPorts`/`runCli`, not a stand-in for it.
+ */
+describe('content-addressed caching wiring (Phase 5, task P5-2)', () => {
+  useIsolatedConfigHome();
+
+  const mathFixtureFiles = {
+    'math.test.ts': "import { expect, test } from 'vitest';\ntest('adds', () => { expect(1 + 1).toBe(2); });\n",
+  };
+
+  function trackedEvaluationPort(onEvaluate: () => void): AuditEvaluationPort {
+    return {
+      async evaluate(request) {
+        onEvaluate();
+        return {
+          evaluation: {
+            requestedModel: 'jev-1.13.0',
+            respondedModel: 'jev-1.13.0',
+            modelMatchesPin: true,
+            answers: {},
+            usage: { inputTokens: 10, outputTokens: 1 },
+            attempts: 1,
+          },
+          classification: {
+            testCaseId: request.testCase.id,
+            repositoryRelativePath: request.testCase.repositoryRelativePath,
+            name: request.testCase.name,
+            status: 'healthy',
+            dimensions: [],
+            findings: [],
+            policyVersion: 2,
+            rubricVersion: 2,
+            model: { requested: 'jev-1.13.0', responded: 'jev-1.13.0', matchesPin: true },
+            usage: { inputTokens: 10, outputTokens: 1 },
+          },
+        };
+      },
+    };
+  }
+
+  /** A stateful in-memory store, persisted ACROSS `runCli` calls by returning the same instance from `createStorePort` every time — simulating what a real on-disk SQLite file would do between two separate CLI invocations against the same root. */
+  function statefulStore(): AuditStorePort {
+    const workItems: AuditStoreWorkItemOutcome[] = [];
+    let runCount = 0;
+    return {
+      beginRun: async () => { runCount += 1; return `run-${runCount}`; },
+      recordWorkItem: async (_runId, outcome) => { workItems.push(outcome); },
+      lookup: async (cacheKey) => {
+        for (let index = workItems.length - 1; index >= 0; index -= 1) {
+          const outcome = workItems[index]!;
+          if (outcome.state === 'completed' && outcome.cacheKey === cacheKey && outcome.evaluation.modelMatchesPin) {
+            return { classification: outcome.classification };
+          }
+        }
+        return undefined;
+      },
+      finishRun: async () => undefined,
+      close: async () => undefined,
+    };
+  }
+
+  it('the second --evaluate run against an unchanged repository issues no provider request, and --fresh on a third run bypasses that reuse', async () => {
+    const root = await fixture(mathFixtureFiles);
+    let evaluateCalls = 0;
+    const store = statefulStore();
+
+    const first = await runCli(['audit', '--rootDir', root, '--evaluate'], captureOutput().io, {
+      createEvaluationPort: () => trackedEvaluationPort(() => { evaluateCalls += 1; }),
+      createStorePort: () => store,
+    });
+    expect(first).toBe(0);
+    expect(evaluateCalls).toBe(1);
+
+    const second = await runCli(['audit', '--rootDir', root, '--evaluate'], captureOutput().io, {
+      createEvaluationPort: () => trackedEvaluationPort(() => { evaluateCalls += 1; }),
+      createStorePort: () => store,
+    });
+    expect(second).toBe(0);
+    expect(evaluateCalls).toBe(1); // reused from the warm cache — no new request
+
+    const third = await runCli(['audit', '--rootDir', root, '--evaluate', '--fresh'], captureOutput().io, {
+      createEvaluationPort: () => trackedEvaluationPort(() => { evaluateCalls += 1; }),
+      createStorePort: () => store,
+    });
+    expect(third).toBe(0);
+    expect(evaluateCalls).toBe(2); // --fresh bypassed the warm cache
   });
 });
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { runAudit } from '../src/index.js';
+import { createAuditCacheKeyPort } from '../src/adapters/cache-key.js';
 import type {
   AuditEvaluationPort,
   AuditEvaluationRequest,
@@ -597,6 +598,7 @@ describe('evaluation wiring (--evaluate)', () => {
 
     expect(result.evaluation?.totals).toEqual({
       evaluated: 3,
+      cached: 0,
       failed: 0,
       skipped: { total: 0, byReason: { skip: 0, todo: 0, 'evidence-unavailable': 0 } },
       usage: { inputTokens: 600, outputTokens: 6 },
@@ -656,6 +658,7 @@ interface FakeStoreCall {
 interface FakeStore extends AuditStorePort {
   readonly beginRunCalls: string[];
   readonly workItemCalls: FakeStoreCall[];
+  readonly lookupCalls: string[];
   readonly finishRunCalls: string[];
   readonly closeCalls: number;
 }
@@ -663,6 +666,7 @@ interface FakeStore extends AuditStorePort {
 function fakeStore(): FakeStore {
   const beginRunCalls: string[] = [];
   const workItemCalls: FakeStoreCall[] = [];
+  const lookupCalls: string[] = [];
   const finishRunCalls: string[] = [];
   let closeCalls = 0;
   let nextRunId = 0;
@@ -670,6 +674,7 @@ function fakeStore(): FakeStore {
   return {
     beginRunCalls,
     workItemCalls,
+    lookupCalls,
     finishRunCalls,
     get closeCalls() { return closeCalls; },
     async beginRun(rootDir: string): Promise<string> {
@@ -679,6 +684,22 @@ function fakeStore(): FakeStore {
     },
     async recordWorkItem(runId: string, outcome: AuditStoreWorkItemOutcome): Promise<void> {
       workItemCalls.push({ runId, outcome });
+    },
+    // Mirrors the real sqlite adapter's documented lookup rule (`src/domain/audit.ts`,
+    // `AuditStorePort.lookup`'s own doc): the most recent (searched backward through insertion
+    // order) `completed` outcome under `cacheKey` whose evaluation's `modelMatchesPin` is `true`;
+    // a `cached` outcome is never itself eligible as a source. Records every call in
+    // `lookupCalls` so a test can assert `--fresh` skips the lookup entirely, not merely that it
+    // ignores whatever the lookup would have returned.
+    async lookup(cacheKey: string): Promise<{ readonly classification: ClassificationResult } | undefined> {
+      lookupCalls.push(cacheKey);
+      for (let index = workItemCalls.length - 1; index >= 0; index -= 1) {
+        const { outcome } = workItemCalls[index]!;
+        if (outcome.state === 'completed' && outcome.cacheKey === cacheKey && outcome.evaluation.modelMatchesPin) {
+          return { classification: outcome.classification };
+        }
+      }
+      return undefined;
     },
     async finishRun(runId: string): Promise<void> {
       finishRunCalls.push(runId);
@@ -833,5 +854,119 @@ describe('audit store persistence wiring (Phase 5, task P5-1)', () => {
     const states = new Map(store.workItemCalls.map(({ outcome }) => [outcome.identity.testCaseId, outcome.state]));
     expect(states.get(okCase.id)).toBe('completed');
     expect(states.get(failingCase.id)).toBe('failed');
+  });
+});
+
+// --- Content-addressed caching (Phase 5, task P5-2) -------------------------
+
+describe('content-addressed caching (Phase 5, task P5-2)', () => {
+  it('the second of two identical evaluations issues no provider request and reuses the same judgment via a cached work item', async () => {
+    const store = fakeStore();
+    const cacheKey = createAuditCacheKeyPort();
+    const evaluableCase = testCaseWithModifiers('tc:v1:cache-warm', [], 'cache-warm.test.ts');
+    const discovery: DiscoveryResult = { files: [discovered('cache-warm.test.ts')], excluded: [], diagnostics: [] };
+    let evaluateCalls = 0;
+    const evaluation = stubEvaluationPort(async (request) => {
+      evaluateCalls += 1;
+      return classificationFor(request.testCase.id, { status: 'healthy' });
+    });
+
+    const portsForRun: AuditPorts = {
+      discovery: { discover: async () => discovery },
+      sourceReader: { read: async () => 'source' },
+      extractor: { extract: () => ({ testCases: [evaluableCase], dynamicMetadata: [], diagnostics: [] }) },
+      evidence: { build: async (request) => ({ bundles: request.testCases.map((testCase) => emptyBundle(testCase.id)), diagnostics: [] }) },
+      evaluation,
+      store,
+      cacheKey,
+    };
+
+    const first = await runAudit(configuration, portsForRun);
+    expect(evaluateCalls).toBe(1);
+    expect(first.evaluation?.classifications.map((entry) => entry.testCaseId)).toEqual([evaluableCase.id]);
+    expect(first.evaluation?.totals).toMatchObject({ evaluated: 1, cached: 0, failed: 0 });
+
+    const second = await runAudit(configuration, portsForRun);
+    expect(evaluateCalls).toBe(1); // no new provider request on the warm second run
+    expect(second.evaluation?.classifications.map((entry) => entry.testCaseId)).toEqual([evaluableCase.id]);
+    expect(second.evaluation?.classifications[0]).toEqual(first.evaluation?.classifications[0]);
+    expect(second.evaluation?.totals).toMatchObject({ evaluated: 0, cached: 1, failed: 0 });
+    // A cache hit spends zero tokens this run: the reused classification's own `usage` (from
+    // `classificationFor`'s default `inputTokens: 10`) must NOT be folded into this run's totals.
+    expect(second.evaluation?.totals.usage).toEqual({ inputTokens: 0, outputTokens: 0 });
+
+    const cachedCall = store.workItemCalls.find(({ outcome }) => outcome.state === 'cached');
+    expect(cachedCall).toBeDefined();
+    expect(cachedCall?.outcome.state === 'cached' && cachedCall.outcome.classification.status).toBe('healthy');
+  });
+
+  it('never attempts a cache lookup, and issues a provider request every time, when ports.cacheKey is not provided — even with a store present (backward compatible with pre-P5-2 callers)', async () => {
+    const store = fakeStore();
+    const evaluableCase = testCaseWithModifiers('tc:v1:cache-absent-port', [], 'cache-absent.test.ts');
+    const discovery: DiscoveryResult = { files: [discovered('cache-absent.test.ts')], excluded: [], diagnostics: [] };
+    let evaluateCalls = 0;
+    const evaluation = stubEvaluationPort(async (request) => { evaluateCalls += 1; return classificationFor(request.testCase.id); });
+
+    const portsForRun: AuditPorts = {
+      discovery: { discover: async () => discovery },
+      sourceReader: { read: async () => 'source' },
+      extractor: { extract: () => ({ testCases: [evaluableCase], dynamicMetadata: [], diagnostics: [] }) },
+      evidence: { build: async (request) => ({ bundles: request.testCases.map((testCase) => emptyBundle(testCase.id)), diagnostics: [] }) },
+      evaluation,
+      store,
+    };
+
+    await runAudit(configuration, portsForRun);
+    await runAudit(configuration, portsForRun);
+
+    expect(evaluateCalls).toBe(2);
+    expect(store.workItemCalls.every(({ outcome }) => outcome.state === 'completed' && outcome.cacheKey === undefined)).toBe(true);
+  });
+
+  it('--fresh bypasses lookup and issues a new provider request despite a warm cache, appending a new immutable completed result without altering the prior one; a later plain run then reuses the newest, not the older, judgment', async () => {
+    const store = fakeStore();
+    const cacheKey = createAuditCacheKeyPort();
+    const evaluableCase = testCaseWithModifiers('tc:v1:cache-fresh', [], 'cache-fresh.test.ts');
+    const discovery: DiscoveryResult = { files: [discovered('cache-fresh.test.ts')], excluded: [], diagnostics: [] };
+    let evaluateCalls = 0;
+    const evaluation = stubEvaluationPort(async (request) => {
+      evaluateCalls += 1;
+      return classificationFor(request.testCase.id, { status: evaluateCalls === 1 ? 'healthy' : 'weak' });
+    });
+
+    const portsForRun: AuditPorts = {
+      discovery: { discover: async () => discovery },
+      sourceReader: { read: async () => 'source' },
+      extractor: { extract: () => ({ testCases: [evaluableCase], dynamicMetadata: [], diagnostics: [] }) },
+      evidence: { build: async (request) => ({ bundles: request.testCases.map((testCase) => emptyBundle(testCase.id)), diagnostics: [] }) },
+      evaluation,
+      store,
+      cacheKey,
+    };
+
+    await runAudit(configuration, portsForRun);
+    expect(evaluateCalls).toBe(1);
+
+    const lookupCallsBeforeFresh = store.lookupCalls.length;
+    const second = await runAudit(configuration, portsForRun, { fresh: true });
+    expect(evaluateCalls).toBe(2);
+    expect(second.evaluation?.classifications[0]?.status).toBe('weak');
+    expect(second.evaluation?.totals).toMatchObject({ evaluated: 1, cached: 0 });
+    // --fresh skips the lookup call itself, not merely its result: a later reordering to
+    // "look up, then ignore the result when fresh" would leave this assertion RED even though
+    // evaluateCalls above would still (correctly) read 2.
+    expect(store.lookupCalls.length).toBe(lookupCallsBeforeFresh);
+
+    const completedOutcomes = store.workItemCalls.filter(({ outcome }) => outcome.state === 'completed');
+    expect(completedOutcomes).toHaveLength(2);
+    expect(completedOutcomes[0]?.outcome.state === 'completed' ? completedOutcomes[0].outcome.classification.status : undefined).toBe('healthy');
+    expect(completedOutcomes[1]?.outcome.state === 'completed' ? completedOutcomes[1].outcome.classification.status : undefined).toBe('weak');
+
+    // A later plain (non-fresh) run must reuse the NEWEST completed judgment, never the older one
+    // that predates the --fresh dispatch.
+    const third = await runAudit(configuration, portsForRun);
+    expect(evaluateCalls).toBe(2); // still no new request
+    expect(third.evaluation?.classifications[0]?.status).toBe('weak');
+    expect(third.evaluation?.totals).toMatchObject({ evaluated: 0, cached: 1 });
   });
 });

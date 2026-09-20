@@ -6,6 +6,7 @@ import { runAudit } from '../application/audit.js';
 import { discoverTestFiles } from '../adapters/repository-discovery.js';
 import { readSourceFile } from '../adapters/source-reader.js';
 import { extractTestCases } from '../adapters/test-extraction.js';
+import { createAuditCacheKeyPort } from '../adapters/cache-key.js';
 import { createAuditEvidencePort } from '../adapters/evidence-audit-port.js';
 import { createJevEvaluationPort } from '../adapters/jev-evaluation-port.js';
 import { createJevHttpGateway } from '../adapters/jev-http-gateway.js';
@@ -32,6 +33,7 @@ import { JEV_MODEL_ID } from '../domain/rubric.js';
 import {
   AuditStoreCorruptError,
   AuditStoreSchemaVersionError,
+  type AuditCacheKeyPort,
   type AuditDiagnostic,
   type AuditEvaluationPort,
   type AuditPorts,
@@ -137,6 +139,14 @@ Options:
                       summary: per-test classification, per-dimension judgments, findings, model
                       requested/responded/matchesPin, usage, policy/rubric versions, and evidence
                       provenance counts. Requires --evaluate.
+  --fresh            Bypasses the content-addressed judgment cache: every evaluable test case gets
+                      a fresh TypeSafe request even when an unchanged one was already judged before,
+                      and the new result is appended alongside the prior one rather than replacing
+                      it (persistence is append-only; nothing already stored is ever mutated or
+                      deleted). Without --fresh, an evaluation whose exact rubric version, model id,
+                      classification policy version, test source, and evidence are unchanged from a
+                      prior run is served from the local store at zero cost, reported as cached
+                      rather than evaluated. Requires --evaluate.
   --dry-run --json   Print the same dry-run preview as one machine-readable JSON line instead of
                       the human-readable text report. Requires --dry-run.
   --json             Requires --dry-run or --evaluate; --json alone is a usage error.
@@ -156,8 +166,13 @@ Options:
  * `AuditEvaluationPort` in `src/domain/audit.ts`, and this function must
  * never construct one on its own, so an ordinary `audit` invocation never
  * touches `createJevHttpGateway`, an API key, or the network.
+ *
+ * `cacheKeyPort` (Phase 5, task P5-2) is always constructed together with
+ * `storePort` — never independently — by `runCli`, so this function itself
+ * never has to decide when caching is meaningful; it only wires whatever
+ * it is given.
  */
-function createProductionPorts(evaluationPort?: AuditEvaluationPort, storePort?: AuditStorePort): AuditPorts {
+function createProductionPorts(evaluationPort?: AuditEvaluationPort, storePort?: AuditStorePort, cacheKeyPort?: AuditCacheKeyPort): AuditPorts {
   return {
     discovery: { discover: discoverTestFiles },
     sourceReader: { read: readSourceFile },
@@ -165,6 +180,7 @@ function createProductionPorts(evaluationPort?: AuditEvaluationPort, storePort?:
     evidence: createAuditEvidencePort(),
     ...(evaluationPort === undefined ? {} : { evaluation: evaluationPort }),
     ...(storePort === undefined ? {} : { store: storePort }),
+    ...(cacheKeyPort === undefined ? {} : { cacheKey: cacheKeyPort }),
   };
 }
 
@@ -260,6 +276,7 @@ function dryRunTextReport(rootDir: string, estimate: DryRunEstimate): string {
 
 const ZERO_EVALUATION_TOTALS: NonNullable<AuditResult['evaluation']>['totals'] = {
   evaluated: 0,
+  cached: 0,
   failed: 0,
   skipped: { total: 0, byReason: { skip: 0, todo: 0, 'evidence-unavailable': 0 } },
   usage: { inputTokens: 0, outputTokens: 0 },
@@ -341,6 +358,7 @@ function evaluateTextReport(result: AuditResult): string {
     `Model mismatches: ${totals.modelMismatches}`,
     `Root: ${result.rootDir}`,
     `Evaluated: ${totals.evaluated}`,
+    `Cached: ${totals.cached}`,
     `Healthy: ${statusCounts.healthy}, Weak: ${statusCounts.weak}, Misleading: ${statusCounts.misleading}, Needs review: ${statusCounts['needs-review']}`,
     `Skipped: ${skipped.total} (skip: ${skipped.byReason.skip}, todo: ${skipped.byReason.todo}, evidence-unavailable: ${skipped.byReason['evidence-unavailable']})`,
     `Failed: ${totals.failed}`,
@@ -355,6 +373,7 @@ interface ParsedAuditOptions {
   readonly inspectPayloads: boolean;
   readonly dryRun: boolean;
   readonly evaluate: boolean;
+  readonly fresh: boolean;
   readonly json: boolean;
 }
 
@@ -363,6 +382,7 @@ function parseAuditOptions(args: readonly string[]): ParsedAuditOptions | { read
   let inspectPayloads = false;
   let dryRun = false;
   let evaluate = false;
+  let fresh = false;
   let json = false;
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
@@ -377,6 +397,10 @@ function parseAuditOptions(args: readonly string[]): ParsedAuditOptions | { read
     }
     if (argument === '--evaluate') {
       evaluate = true;
+      continue;
+    }
+    if (argument === '--fresh') {
+      fresh = true;
       continue;
     }
     if (argument === '--json') {
@@ -396,7 +420,8 @@ function parseAuditOptions(args: readonly string[]): ParsedAuditOptions | { read
   if (dryRun && inspectPayloads) return { error: '--dry-run cannot be combined with --inspect-payloads' };
   if (dryRun && evaluate) return { error: '--dry-run cannot be combined with --evaluate' };
   if (evaluate && inspectPayloads) return { error: '--evaluate cannot be combined with --inspect-payloads' };
-  return { overrides, inspectPayloads, dryRun, evaluate, json };
+  if (fresh && !evaluate) return { error: '--fresh requires --evaluate (audit --evaluate --fresh)' };
+  return { overrides, inspectPayloads, dryRun, evaluate, fresh, json };
 }
 
 const NO_KEY_USAGE_MESSAGE = 'No TypeSafe API key is configured. Provide one with `jev-test-auditor auth login`, or set the TYPESAFE_API_KEY environment variable.';
@@ -613,9 +638,14 @@ export async function runCli(
     }
   }
 
+  // Phase 5, task P5-2: the cache-key port is always constructed together with a successfully
+  // opened store — never independently of it, since a lookup needs somewhere to look things up in
+  // — and never fails on its own (no I/O, no state; see `createAuditCacheKeyPort`'s own doc).
+  const cacheKeyPort: AuditCacheKeyPort | undefined = storePort === undefined ? undefined : createAuditCacheKeyPort();
+
   try {
     const result = dependencies.audit === undefined
-      ? await runAudit(configuration, createProductionPorts(evaluationPort, storePort))
+      ? await runAudit(configuration, createProductionPorts(evaluationPort, storePort, cacheKeyPort), { fresh: parsed.fresh })
       : await dependencies.audit(configuration);
 
     if (parsed.dryRun) {

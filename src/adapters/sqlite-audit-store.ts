@@ -31,6 +31,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import {
   AuditStoreCorruptError,
   AuditStoreSchemaVersionError,
+  type AuditStoreCachedJudgment,
   type AuditStorePort,
   type AuditStoreWorkItemIdentity,
   type AuditStoreWorkItemOutcome,
@@ -157,7 +158,7 @@ async function loadSqliteModule(): Promise<typeof import('node:sqlite')> {
 
 // --- Schema / versioned migrations ------------------------------------------------------
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 type Migration = (db: DatabaseSync) => void;
 
@@ -227,6 +228,15 @@ const MIGRATIONS: readonly Migration[] = [
         reason TEXT NOT NULL
       ) STRICT;
     `);
+  },
+  // Phase 5, task P5-2: content-addressed caching. `cache_key` is nullable — a `completed` work
+  // item recorded by a caller that never wires `AuditCacheKeyPort` (or a pre-P5-2 row already on
+  // disk before this migration ran) simply carries no key, and `lookup` (below) can never match a
+  // stored NULL against a real key string, so it is correctly unfindable rather than requiring an
+  // extra runtime check to exclude it.
+  (db) => {
+    db.exec('ALTER TABLE work_items ADD COLUMN cache_key TEXT;');
+    db.exec('CREATE INDEX idx_work_items_cache_key ON work_items (cache_key);');
   },
 ];
 
@@ -329,10 +339,16 @@ function migrate(db: DatabaseSync): void {
 
 // --- Row writers -------------------------------------------------------------------------
 
-function insertWorkItem(db: DatabaseSync, runId: string, identity: AuditStoreWorkItemIdentity, state: WorkItemState): number {
+function insertWorkItem(
+  db: DatabaseSync,
+  runId: string,
+  identity: AuditStoreWorkItemIdentity,
+  state: WorkItemState,
+  cacheKey: string | undefined,
+): number {
   const result = db.prepare(
-    'INSERT INTO work_items (run_id, test_case_id, repository_relative_path, name, state, recorded_at) VALUES (?, ?, ?, ?, ?, ?)',
-  ).run(runId, identity.testCaseId, identity.repositoryRelativePath, identity.name, state, new Date().toISOString());
+    'INSERT INTO work_items (run_id, test_case_id, repository_relative_path, name, state, recorded_at, cache_key) VALUES (?, ?, ?, ?, ?, ?, ?)',
+  ).run(runId, identity.testCaseId, identity.repositoryRelativePath, identity.name, state, new Date().toISOString(), cacheKey ?? null);
   return Number(result.lastInsertRowid);
 }
 
@@ -433,9 +449,14 @@ export async function createSqliteAuditStore(options: CreateSqliteAuditStoreOpti
     async recordWorkItem(runId: string, outcome: AuditStoreWorkItemOutcome): Promise<void> {
       db.exec('BEGIN');
       try {
-        const workItemId = insertWorkItem(db, runId, outcome.identity, outcome.state);
+        const cacheKey = outcome.state === 'completed' || outcome.state === 'cached' ? outcome.cacheKey : undefined;
+        const workItemId = insertWorkItem(db, runId, outcome.identity, outcome.state, cacheKey);
         if (outcome.state === 'completed') {
           insertAttempt(db, workItemId, outcome.evaluation);
+          insertJudgment(db, workItemId, outcome.classification);
+        } else if (outcome.state === 'cached') {
+          // A cache hit made no provider request: no `attempts` row (there was no attempt), only
+          // the reused judgment, recorded as its own append-only fact (Phase 5, task P5-2).
           insertJudgment(db, workItemId, outcome.classification);
         } else if (outcome.state === 'failed') {
           insertError(db, workItemId, outcome.errorKind, outcome.errorMessage);
@@ -447,6 +468,20 @@ export async function createSqliteAuditStore(options: CreateSqliteAuditStoreOpti
         db.exec('ROLLBACK');
         throw error;
       }
+    },
+
+    async lookup(cacheKey: string): Promise<AuditStoreCachedJudgment | undefined> {
+      const row = db.prepare(`
+        SELECT j.classification AS classification
+        FROM work_items w
+        JOIN attempts a ON a.work_item_id = w.id
+        JOIN judgments j ON j.work_item_id = w.id
+        WHERE w.state = 'completed' AND w.cache_key = ? AND a.model_matches_pin = 1
+        ORDER BY w.id DESC
+        LIMIT 1
+      `).get(cacheKey) as { readonly classification: string } | undefined;
+      if (row === undefined) return undefined;
+      return { classification: JSON.parse(row.classification) as AuditStoreCachedJudgment['classification'] };
     },
 
     async finishRun(runId: string): Promise<void> {

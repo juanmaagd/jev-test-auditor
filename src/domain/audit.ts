@@ -135,16 +135,37 @@ export interface AuditEvaluationPort {
 }
 
 /**
+ * The content-addressed cache key port (Phase 5, task P5-2). Computes the
+ * deterministic key that identifies "evaluating this exact test case
+ * against this exact evidence, full source, rubric, and policy" — see
+ * `src/adapters/cache-key.ts`'s own doc for precisely which of
+ * `request`/`fullTestSource` the composed key covers and how. Optional on
+ * {@link AuditPorts}, exactly like {@link AuditEvaluationPort} and
+ * {@link AuditStorePort}: caching only matters when both this port and a
+ * `store` are present, and the CLI composition root always constructs them
+ * together (see `src/cli/index.ts`'s `createProductionPorts`) — never one
+ * without the other in production. No I/O, no state; safe to call any
+ * number of times.
+ */
+export interface AuditCacheKeyPort {
+  computeKey(request: AuditEvaluationRequest, fullTestSource: string): string;
+}
+
+/**
  * The seven work-item states persistence recognizes (Phase 5, task P5-1;
  * `odd/tasks/phase-5-persistence.md` Decisions: "Work-item states are the
  * design's seven"). Only `completed` and a valid `cached` judgment
  * participate in quality classification. Task P5-1 itself only ever
- * produces `completed`, `failed`, and `skipped` records: `pending`/`running`
- * are scheduler checkpoints (Phase 5, task P5-3) and `cached`/`uncertain`
- * are cache-lookup outcomes (Phase 5, task P5-2). All seven are admitted by
- * the type (and the adapter's schema `CHECK` constraint) from the start so
- * a later phase never needs a backward-incompatible migration just to widen
- * it.
+ * produced `completed`, `failed`, and `skipped` records; task P5-2 adds
+ * `cached`, produced exactly once — on a cache hit (see
+ * {@link AuditStorePort.lookup}) — and never anywhere else. `pending`/
+ * `running` remain scheduler checkpoints reserved for Phase 5, task P5-3.
+ * `uncertain` is admitted by the type (and the adapter's schema `CHECK`
+ * constraint) for forward compatibility only: nothing in this codebase
+ * produces it as of task P5-2, and no semantics are defined for it here —
+ * a later phase that wants to produce it must define what it means before
+ * doing so. All seven are admitted from the start so a later phase never
+ * needs a backward-incompatible migration just to widen the set.
  */
 export const WORK_ITEM_STATES = ['pending', 'running', 'completed', 'cached', 'uncertain', 'skipped', 'failed'] as const;
 export type WorkItemState = (typeof WORK_ITEM_STATES)[number];
@@ -164,15 +185,30 @@ export interface AuditStoreWorkItemIdentity {
  * error kind and message `runAudit` already reports in an
  * `evaluation-failed` diagnostic (`src/application/audit.ts`); a `skipped`
  * outcome carries the same {@link DryRunSkippedReason} `classifyTestCase`
- * (`src/domain/estimate.ts`) already produces. `cached`, `uncertain`,
- * `pending`, and `running` are not constructed by task P5-1 — see
- * {@link WorkItemState}'s own doc.
+ * (`src/domain/estimate.ts`) already produces. `uncertain`, `pending`, and
+ * `running` are not constructed anywhere in this codebase — see
+ * {@link WorkItemState}'s own doc. A `cached` outcome (task P5-2) carries
+ * the exact `cacheKey` that hit and the reused {@link ClassificationResult}
+ * — never a fresh {@link JevEvaluation}, since no provider request was
+ * made. `completed`'s own `cacheKey` is optional, not because a real
+ * evaluation lacks one, but so a caller that never wires
+ * {@link AuditCacheKeyPort} (or a pre-P5-2 test fixture) still compiles and
+ * persists exactly as before — see {@link AuditStorePort.lookup}'s own doc
+ * for why an absent key simply means "can never be found again," never a
+ * silent behavior change.
  */
 export type AuditStoreWorkItemOutcome =
   | {
     readonly state: 'completed';
     readonly identity: AuditStoreWorkItemIdentity;
+    readonly cacheKey?: string;
     readonly evaluation: JevEvaluation;
+    readonly classification: ClassificationResult;
+  }
+  | {
+    readonly state: 'cached';
+    readonly identity: AuditStoreWorkItemIdentity;
+    readonly cacheKey: string;
     readonly classification: ClassificationResult;
   }
   | {
@@ -186,6 +222,11 @@ export type AuditStoreWorkItemOutcome =
     readonly identity: AuditStoreWorkItemIdentity;
     readonly reason: DryRunSkippedReason;
   };
+
+/** One cached judgment returned by {@link AuditStorePort.lookup}: just the reused {@link ClassificationResult} — never the original raw {@link JevEvaluation}, since a cache hit makes no provider request to have one from. */
+export interface AuditStoreCachedJudgment {
+  readonly classification: ClassificationResult;
+}
 
 /**
  * The audit persistence port (Phase 5, task P5-1): append-only storage for
@@ -209,6 +250,34 @@ export interface AuditStorePort {
   beginRun(rootDir: string): Promise<string>;
   /** Persists one terminal work-item outcome for `runId`, atomically (all-or-nothing): a failure here leaves no partial record. */
   recordWorkItem(runId: string, outcome: AuditStoreWorkItemOutcome): Promise<void>;
+  /**
+   * Looks up the cached judgment for `cacheKey` (Phase 5, task P5-2).
+   *
+   * **Lookup rule, when one key has several results** (append-only plus
+   * `--fresh` means a single key can accumulate more than one `completed`
+   * judgment over time): returns the most recent `completed` work item
+   * recorded under this exact key whose attempt's `model.matchesPin` was
+   * `true` — "most recent" meaning highest `work_items.id` (insertion
+   * order), never `recorded_at`, which is a millisecond-resolution ISO
+   * string that can collide under a fast run. A model mismatch is not a
+   * trustworthy judgment to serve silently as a cache hit, so a
+   * pin-mismatched row is skipped in favor of an older pin-matched one;
+   * with no pin-matched row at all, this is a miss (`undefined`).
+   *
+   * A `cached` work item's own judgment is never itself eligible as a
+   * source for a later lookup — only `completed` rows are — so every hit
+   * traces back to exactly one real provider response, never a cache hit
+   * of a cache hit.
+   *
+   * A `completed` row recorded with no `cacheKey` (see
+   * {@link AuditStoreWorkItemOutcome}'s own doc on why that field is
+   * optional there) can never be a hit: the underlying comparison never
+   * matches a stored `NULL`, by construction, not by an extra filter this
+   * method has to remember to apply.
+   *
+   * Returns `undefined` on a miss.
+   */
+  lookup(cacheKey: string): Promise<AuditStoreCachedJudgment | undefined>;
   /** Marks `runId` finished. */
   finishRun(runId: string): Promise<void>;
   /** Releases the underlying database handle. Safe to call once, after every other call for this store has settled. */
@@ -285,6 +354,8 @@ export interface AuditPorts {
   readonly evaluation?: AuditEvaluationPort;
   /** Opt-in (Phase 5, task P5-1): see {@link AuditStorePort}'s own doc for the full opt-in contract. */
   readonly store?: AuditStorePort;
+  /** Opt-in (Phase 5, task P5-2): see {@link AuditCacheKeyPort}'s own doc for the full opt-in contract. */
+  readonly cacheKey?: AuditCacheKeyPort;
 }
 
 export type AuditRequest = ResolvedConfiguration;
@@ -332,25 +403,39 @@ export interface AuditTotals {
 }
 
 /**
- * Evaluation totals (Phase 4, task P4-4). `evaluated`, `failed`, and
- * `skipped` always sum to the total number of test cases `classifyTestCase`
- * (see `src/domain/estimate.ts`) considered across the whole run: `skipped`
- * is never evaluated at all (a static `skip`/`todo` modifier or no built
+ * Evaluation totals (Phase 4, task P4-4; `cached` added by Phase 5, task
+ * P5-2). `evaluated`, `cached`, `failed`, and `skipped` always sum to the
+ * total number of test cases `classifyTestCase` (see
+ * `src/domain/estimate.ts`) considered across the whole run: `skipped` is
+ * never evaluated at all (a static `skip`/`todo` modifier or no built
  * evidence bundle); `failed` was attempted but its gateway call or
- * classification threw; `evaluated` succeeded and has a
- * {@link ClassificationResult} in `classifications`. `modelMismatches`
- * counts evaluated test cases whose `model.matchesPin` is `false` — the
- * verified provider contract requires this to be reported, never hidden
- * (Phase 4 Scope), and a single "first success" `respondedModel` alone
- * would silently hide a mismatch on a later call.
+ * classification threw; `evaluated` made a fresh provider request that
+ * succeeded; `cached` made no provider request at all, reusing a judgment
+ * already recorded under that content-addressed key (see
+ * `AuditStorePort.lookup`). Both `evaluated` and `cached` test cases have a
+ * {@link ClassificationResult} in `classifications` and participate
+ * identically in `statusCounts`/`respondedModel`/`modelMismatches` below
+ * (Phase 5 Decisions: "Only `completed` and valid `cached` judgments
+ * participate in quality classification") — only `usage` treats them
+ * differently: a cache hit's `classification.usage` reflects the ORIGINAL
+ * evaluation's cost, not a fresh spend, so it is deliberately excluded from
+ * `usage` here to keep that field meaning "what this run actually billed."
+ * `modelMismatches` counts every evaluated-or-cached test case whose
+ * `model.matchesPin` is `false` — the verified provider contract requires
+ * this to be reported, never hidden (Phase 4 Scope), and a single "first
+ * success" `respondedModel` alone would silently hide a mismatch on a
+ * later call.
  */
 export interface AuditEvaluationTotals {
   readonly evaluated: number;
+  /** Test cases served from the content-addressed cache this run, at zero provider cost (Phase 5, task P5-2). Always `0` when caching is not wired (see {@link AuditPorts.cacheKey}). */
+  readonly cached: number;
   readonly failed: number;
   readonly skipped: DryRunSkippedTotals;
+  /** Tokens actually spent by THIS run's fresh provider requests only — never includes a cache hit's reused `classification.usage` (see this interface's own doc). */
   readonly usage: { readonly inputTokens: number; readonly outputTokens: number };
   readonly statusCounts: Readonly<Record<OverallClassificationStatus, number>>;
-  /** The `model.responded` of the first successful evaluation, in submission order; `undefined` when none succeeded. Not a claim that every evaluation responded with the same model — see `modelMismatches`. */
+  /** The `model.responded` of the first successful-or-cached evaluation, in submission order; `undefined` when none succeeded. Not a claim that every evaluation responded with the same model — see `modelMismatches`. */
   readonly respondedModel: string | undefined;
   readonly modelMismatches: number;
 }

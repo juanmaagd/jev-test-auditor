@@ -1,4 +1,5 @@
 import type {
+  AuditCacheKeyPort,
   AuditEvaluationPort,
   AuditEvaluationResult,
   AuditEvaluationTotals,
@@ -128,7 +129,24 @@ function collectEvaluableItems(files: readonly AuditFileResult[]): {
 
 type EvaluationOutcome =
   | { readonly kind: 'success'; readonly testCase: TestCase; readonly classification: ClassificationResult; readonly evaluation: JevEvaluation }
+  | { readonly kind: 'cached'; readonly testCase: TestCase; readonly classification: ClassificationResult }
   | { readonly kind: 'failure'; readonly testCase: TestCase; readonly error: unknown };
+
+/**
+ * Content-addressed caching inputs (Phase 5, task P5-2), bundled together
+ * since all three matter only as a whole: `port` computes the key,
+ * `sourceTextByPath` supplies the one ingredient `AuditFileResult` itself
+ * never carries (the file's full raw source text — see `runAudit`'s own
+ * comment on why it is never retained past this point), and `fresh`
+ * bypasses lookup without disabling recording. Optional on `runEvaluation`
+ * exactly like `store`/`runId`: absent, caching is skipped entirely and
+ * every evaluable item dispatches exactly as it did before this task.
+ */
+interface EvaluationCacheOptions {
+  readonly port: AuditCacheKeyPort;
+  readonly sourceTextByPath: ReadonlyMap<string, string>;
+  readonly fresh: boolean;
+}
 
 interface EvaluationRunResult {
   readonly evaluation: AuditEvaluationResult;
@@ -156,12 +174,24 @@ function identityOf(testCase: TestCase): AuditStoreWorkItemIdentity {
  * When `store`/`runId` are both given (Phase 5, task P5-1: `ports.store` is
  * opt-in exactly like `ports.evaluation`), every terminal work item this
  * function reaches — `skipped` up front (already known before the pool
- * starts), then `completed`/`failed` as each pool worker settles — is
- * persisted through `store.recordWorkItem` before that worker's outcome is
- * returned, so an interrupted run still leaves every already-terminal item
- * committed. `runBoundedPool` itself is untouched: this only adds a side
- * effect inside the existing worker callback, never changes dispatch order
- * or concurrency (that is Phase 5, task P5-3's job).
+ * starts), then `completed`/`cached`/`failed` as each pool worker settles —
+ * is persisted through `store.recordWorkItem` before that worker's outcome
+ * is returned, so an interrupted run still leaves every already-terminal
+ * item committed. `runBoundedPool` itself is untouched: this only adds a
+ * side effect inside the existing worker callback, never changes dispatch
+ * order or concurrency (that is Phase 5, task P5-3's job).
+ *
+ * When `cache` is also given (Phase 5, task P5-2; requires `store`/`runId`
+ * too — caching without persistence has nothing to look anything up in),
+ * each item's cache key is computed first. Unless `cache.fresh` is `true`,
+ * `store.lookup` runs before ever calling `evaluationPort.evaluate`: a hit
+ * records a `cached` work item and reuses the stored judgment, skipping
+ * the provider call entirely; a miss (or `cache.fresh`) dispatches exactly
+ * as before, and a successful dispatch's `completed` record now also
+ * carries the computed key, so a later run can find it. `cache.fresh`
+ * never skips recording — it only skips the lookup — so a fresh dispatch's
+ * result is still a new, immutable, appended `completed` record; it never
+ * mutates or deletes the judgment(s) already stored under that key.
  */
 async function runEvaluation(
   files: readonly AuditFileResult[],
@@ -169,8 +199,10 @@ async function runEvaluation(
   concurrency: number,
   store?: AuditStorePort,
   runId?: string,
+  cache?: EvaluationCacheOptions,
 ): Promise<EvaluationRunResult> {
   const { items, skippedByReason, skippedItems } = collectEvaluableItems(files);
+  const cacheEnabled = store !== undefined && runId !== undefined && cache !== undefined;
 
   if (store !== undefined && runId !== undefined) {
     for (const skipped of skippedItems) {
@@ -179,10 +211,40 @@ async function runEvaluation(
   }
 
   const outcomes = await runBoundedPool<EvaluableItem, EvaluationOutcome>(items, concurrency, async (item) => {
+    let cacheKey: string | undefined;
+    if (cacheEnabled) {
+      // Believed unreachable: every evaluable item's file was successfully read (a read failure
+      // leaves that file with zero test cases, so it never reaches `collectEvaluableItems`).
+      // Handled gracefully rather than thrown, so a cache-plumbing gap degrades to "cache
+      // disabled for this one item" instead of crashing the whole run.
+      const sourceText = cache.sourceTextByPath.get(item.testCase.repositoryRelativePath);
+      if (sourceText !== undefined) {
+        cacheKey = cache.port.computeKey({ testCase: item.testCase, bundle: item.bundle }, sourceText);
+        if (!cache.fresh) {
+          const hit = await store.lookup(cacheKey);
+          if (hit !== undefined) {
+            await store.recordWorkItem(runId, {
+              state: 'cached',
+              identity: identityOf(item.testCase),
+              cacheKey,
+              classification: hit.classification,
+            });
+            return { kind: 'cached', testCase: item.testCase, classification: hit.classification };
+          }
+        }
+      }
+    }
+
     try {
       const { classification, evaluation } = await evaluationPort.evaluate({ testCase: item.testCase, bundle: item.bundle });
       if (store !== undefined && runId !== undefined) {
-        await store.recordWorkItem(runId, { state: 'completed', identity: identityOf(item.testCase), evaluation, classification });
+        await store.recordWorkItem(runId, {
+          state: 'completed',
+          identity: identityOf(item.testCase),
+          ...(cacheKey === undefined ? {} : { cacheKey }),
+          evaluation,
+          classification,
+        });
       }
       return { kind: 'success', testCase: item.testCase, classification, evaluation };
     } catch (error) {
@@ -201,6 +263,8 @@ async function runEvaluation(
   const classifications: ClassificationResult[] = [];
   const diagnostics: AuditDiagnostic[] = [];
   const fileDiagnosticsByPath = new Map<string, Diagnostic[]>();
+  let evaluated = 0;
+  let cached = 0;
   let failed = 0;
   let modelMismatches = 0;
   let inputTokens = 0;
@@ -211,13 +275,22 @@ async function runEvaluation(
   let respondedModel: string | undefined;
 
   for (const outcome of outcomes) {
-    if (outcome.kind === 'success') {
+    if (outcome.kind === 'success' || outcome.kind === 'cached') {
       classifications.push(outcome.classification);
-      inputTokens += outcome.classification.usage.inputTokens;
-      outputTokens += outcome.classification.usage.outputTokens;
       statusCounts[outcome.classification.status] += 1;
       if (!outcome.classification.model.matchesPin) modelMismatches += 1;
       if (respondedModel === undefined) respondedModel = outcome.classification.model.responded;
+      if (outcome.kind === 'success') {
+        evaluated += 1;
+        // A cache hit spends zero tokens THIS run — its classification's `usage` reflects the
+        // ORIGINAL evaluation's cost, recorded when that judgment was first computed, never a
+        // fresh spend. Folding it into this run's totals would overstate what this run actually
+        // billed.
+        inputTokens += outcome.classification.usage.inputTokens;
+        outputTokens += outcome.classification.usage.outputTokens;
+      } else {
+        cached += 1;
+      }
       continue;
     }
 
@@ -235,7 +308,8 @@ async function runEvaluation(
 
   const skippedTotal = skippedByReason.skip + skippedByReason.todo + skippedByReason['evidence-unavailable'];
   const totals: AuditEvaluationTotals = {
-    evaluated: classifications.length,
+    evaluated,
+    cached,
     failed,
     skipped: { total: skippedTotal, byReason: skippedByReason },
     usage: { inputTokens, outputTokens },
@@ -259,9 +333,29 @@ function withEvaluationDiagnostics(
   });
 }
 
+/**
+ * Per-invocation run-mode options for {@link runAudit} (Phase 5, task
+ * P5-2), kept separate from {@link AuditRequest}/`ResolvedConfiguration`
+ * exactly like the CLI's own `--dry-run`/`--evaluate`/`--json` flags: these
+ * are how this one call behaves, not audit-target configuration.
+ */
+export interface RunAuditOptions {
+  /**
+   * Bypasses cache lookup for every evaluable test case (`--fresh` at the
+   * CLI): dispatches a fresh provider request regardless of a warm cache.
+   * Never skips recording — a fresh dispatch's result is still written as
+   * a new, immutable, appended `completed` record; it never mutates or
+   * deletes any judgment already stored under that key. Has no effect
+   * without a cache-key port and store both present (see
+   * {@link AuditPorts.cacheKey}'s own doc). Defaults to `false`.
+   */
+  readonly fresh?: boolean;
+}
+
 export async function runAudit(
   request: AuditRequest,
   ports: AuditPorts,
+  options: RunAuditOptions = {},
 ): Promise<AuditResult> {
   let discovery;
   try {
@@ -306,6 +400,14 @@ export async function runAudit(
   });
   const diagnostics: AuditDiagnostic[] = [...discovery.diagnostics];
   const results: AuditFileResult[] = [];
+  // Phase 5, task P5-2: the cache key needs each evaluable test case's whole-file source (see
+  // `src/adapters/cache-key.ts`'s own doc on why `state.fragments` alone is not enough), which
+  // `AuditFileResult` itself never carries — deliberately: retaining full raw source there would
+  // let it leak into `AuditResult`/JSON reports and hold every file's content in memory for the
+  // whole run. This map is local to `runAudit`, discarded once evaluation finishes, and populated
+  // only when evaluation was actually requested at all (`ports.evaluation !== undefined`), since
+  // an offline audit never consults it.
+  const sourceTextByPath: Map<string, string> | undefined = ports.evaluation === undefined ? undefined : new Map();
 
   for (const discovered of files) {
     let sourceText: string;
@@ -314,6 +416,7 @@ export async function runAudit(
         rootDir: request.rootDir,
         repositoryRelativePath: discovered.repositoryRelativePath,
       });
+      sourceTextByPath?.set(discovered.repositoryRelativePath, sourceText);
     } catch (error) {
       const diagnostic = withPath({
         code: 'source-read-failed',
@@ -401,7 +504,13 @@ export async function runAudit(
     // `AuditStorePort`'s own doc) — `beginRun`/`finishRun` bracket this one run only when a store
     // is actually present, so an offline or store-less `--evaluate` run never touches it.
     const runId = ports.store === undefined ? undefined : await ports.store.beginRun(request.rootDir);
-    const evaluationRun = await runEvaluation(results, ports.evaluation, request.concurrency, ports.store, runId);
+    // Phase 5, task P5-2: caching is meaningful only alongside persistence (a lookup needs
+    // somewhere to look things up in), so `cache` is built only when `ports.cacheKey` is present —
+    // never independently of `ports.store`/`runId`, which `runEvaluation` itself also re-checks.
+    const cache = ports.cacheKey === undefined || sourceTextByPath === undefined
+      ? undefined
+      : { port: ports.cacheKey, sourceTextByPath, fresh: options.fresh ?? false };
+    const evaluationRun = await runEvaluation(results, ports.evaluation, request.concurrency, ports.store, runId, cache);
     evaluation = evaluationRun.evaluation;
     diagnostics.push(...evaluationRun.diagnostics);
     finalFiles = withEvaluationDiagnostics(results, evaluationRun.fileDiagnosticsByPath);

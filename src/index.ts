@@ -255,11 +255,12 @@ export {
   type OverallClassificationStatus,
 } from './domain/classification.js';
 
-export { runAudit } from './application/audit.js';
+export { runAudit, type RunAuditOptions } from './application/audit.js';
 export {
   AuditStoreCorruptError,
   AuditStoreSchemaVersionError,
   WORK_ITEM_STATES,
+  type AuditCacheKeyPort,
   type AuditDiagnostic,
   type AuditDiscoveryPort,
   type AuditEvaluationOutcome,
@@ -276,6 +277,7 @@ export {
   type AuditRequest,
   type AuditResult,
   type AuditSourceReaderPort,
+  type AuditStoreCachedJudgment,
   type AuditStoreError,
   type AuditStoreErrorCode,
   type AuditStorePort,
@@ -285,6 +287,12 @@ export {
   type SourceReadRequest,
   type WorkItemState,
 } from './domain/audit.js';
+
+export {
+  computeCacheKey,
+  createAuditCacheKeyPort,
+  type CacheKeyInput,
+} from './adapters/cache-key.js';
 
 export {
   createSqliteAuditStore,
