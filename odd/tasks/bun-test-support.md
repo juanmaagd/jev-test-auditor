@@ -69,18 +69,20 @@ Silence about an unsupported framework is the dishonesty the PRD forbids: operat
   - Emit a per-file warning diagnostic with the attribution evidence found, count it in totals, and surface it in the CLI summary and JSON.
   - Verify a file with an unknown framework, a file with conflicting evidence, and that Jest/Vitest files emit nothing new.
   - Evidence: `63daa3c` (`feat: report unattributable test frameworks`) on `feat/unsupported-framework-diagnostic`; 9 files, 222 additions and 6 deletions (228 authored changed lines). Suite 515 tests, typecheck, build, lint, and diff check passed. Observed RED before implementation. The check lives in extraction, which already knows both the attributed framework and the extracted count, and fires only when the framework is `unknown` and no case was extracted; a recognized framework with zero cases stays silent. `AuditTotals.unsupportedFrameworkFiles` counts affected files and the CLI needed no change because it serializes totals verbatim. The packed smoke fixture gained two expected warnings for its syntax-error and non-framework files. Mutations on dropping the warning, warning on recognized empty files, omitting the evidence, dropping the total, and firing when cases exist turned RED. Re-audit of `~/Desktop/pr-hero`: 173 files, 173 `unsupported-framework` warnings naming `bun:test`, where before it reported zero tests and zero diagnostics.
-- [ ] **B-2 — Extract bun:test**
+- [x] **B-2 — Extract bun:test**
   - Attribute `bun:test` as framework `bun`; support its suite/case API, modifiers including `test.serial`, hooks, mocks (`mock`, `spyOn`, `mock.module`, and `jest.*` from `bun:test`), assertions, and static parameter tables.
   - Verify against real fixtures plus a re-audit of `~/Desktop/pr-hero`, and confirm Jest and Vitest behavior is untouched.
+  - Evidence: `f5e8bbd` (`feat: extract bun test suites`) on `feat/bun-test-extraction`; 9 files, 532 additions and 83 deletions (615 authored changed lines). Suite 530 tests, typecheck, build, lint, and diff check passed. Observed RED before implementation. Framework `bun` is attributed from a static `bun:test` import or require with the existing precedence; conflicting evidence still resolves to `unknown`. `MockApi` gained the bun forms including `bun.mock.module` and a `bun.jest.*` set, so bun provenance is never recorded as plain Jest, and the module-specifier predicate became an explicit set instead of a suffix heuristic. `TestModifierKind` gained `serial` and `todoIf`; bun's `.if` maps to `runIf` and `.failing` to `fails`, both gated to bun so Jest 28's real `test.failing` is untouched. Mutations on attributing bun as vitest, dropping `serial`, recording bun's `jest.fn` as Jest, ignoring scope shadowing, reverting attribution, and dropping `bun.mock.module` from mock-target reclassification turned RED. Re-audit of `~/Desktop/pr-hero`: 173 files, 3,597 test cases, 33 dynamic, 0 diagnostics, 0 unsupported-framework files, all attributed `bun`. Hand spot-checks on three files matched, including a template-literal test name correctly recorded as dynamic. Known gaps: a bare `jest.fn()` never imported from `bun:test` is unrecognized; `vi` re-exported from `bun:test` is unhandled; two-level namespace chains such as `t.mock.module(...)` are unsupported; `_test`/`_spec` filename patterns and `.mjs`/`.cjs`/`.mts`/`.cts` extensions remain deferred.
 
 ## Progress
 
-- Current task: **B-2**.
-- Completed tasks: **B-1**.
-- Running authored count: **228**.
+- Current task: **none — feature complete**.
+- Completed tasks: **B-1, B-2**.
+- Running authored count: **843**, against a 700-line forecast.
 - Slice ledger:
   - `feat/unsupported-framework-diagnostic`: `63daa3c` — honest unsupported-framework reporting.
+  - `feat/bun-test-extraction`: `f5e8bbd` — bun:test attribution, modifiers, mocks, and extraction.
 
 ## Next step
 
-Branch `feat/bun-test-extraction` from `feat/unsupported-framework-diagnostic` and delegate B-2 to one writer with strict TDD, then review before the work-unit commit.
+Integrating this chain into `main` is the user's decision. The pr-hero re-audit exposed the next problem, tracked in `odd/tasks/path-alias-resolution.md`: its evidence density is 1.44 fragments per test against 2.69 here, because 17,316 subpath imports stay unresolved.
