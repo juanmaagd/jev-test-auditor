@@ -102,31 +102,52 @@ export function isSqliteExperimentalWarning(warning: unknown, warningType: unkno
   );
 }
 
+// Module-level suppression state (P5-1 verifier finding E): a naive save/restore of
+// `process.emitWarning` per call breaks under two overlapping (not merely nested) calls — call A
+// resolving first would restore the pre-A baseline, dropping call B's still-active patch (letting
+// a real sqlite warning leak during the crossover window), and call B resolving afterward would
+// then permanently install A's now-stale wrapper instead of the true original. Instead, exactly
+// one shared patch is installed by the first entrant and removed by the last, tracked by a depth
+// counter — every overlapping call, however its lifetimes interleave, shares that single patch
+// and its one captured `trueOriginalEmitWarning`, so an unrelated warning still reaches it and
+// the true original is restored exactly once, when the last suppression ends.
+let suppressionDepth = 0;
+let trueOriginalEmitWarning: typeof process.emitWarning | undefined;
+
 /**
  * Runs `loader` with `process.emitWarning` temporarily wrapped so that
  * exactly the `node:sqlite` experimental-feature warning (see
  * {@link isSqliteExperimentalWarning}) never reaches Node's default handler,
  * while every other warning — including a *different* `ExperimentalWarning`
- * — is forwarded to the original `process.emitWarning` untouched. Always
- * restores the original before returning, including when `loader` rejects.
+ * — is forwarded to the original `process.emitWarning` untouched. Safe under
+ * overlapping concurrent calls (see the module-level state comment above):
+ * the true original is restored only once every overlapping call —
+ * including one that rejects — has finished, never mid-overlap.
  */
 export async function withSqliteExperimentalWarningSuppressed<T>(loader: () => Promise<T>): Promise<T> {
-  // Deliberately NOT `.bind()`ed: binding would produce a new function object every call, so
-  // restoring `process.emitWarning = originalEmitWarning` afterward would never restore the exact
-  // reference that was there before (breaking identity checks, and — on repeated suppress/restore
-  // cycles — wrapping an already-bound copy again on each call). `process.emitWarning` does not
-  // rely on `this`, so calling the captured reference directly (never through `process.`) is safe.
-  const originalEmitWarning = process.emitWarning;
-  const patched = ((warning: unknown, ...rest: unknown[]): void => {
-    if (isSqliteExperimentalWarning(warning, rest[0])) return;
-    (originalEmitWarning as (...args: unknown[]) => void)(warning, ...rest);
-  }) as typeof process.emitWarning;
+  if (suppressionDepth === 0) {
+    // Deliberately NOT `.bind()`ed: binding would produce a new function object every call, so
+    // restoring `process.emitWarning = trueOriginalEmitWarning` afterward would never restore the
+    // exact reference that was there before (breaking identity checks). `process.emitWarning`
+    // does not rely on `this`, so calling the captured reference directly (never through
+    // `process.`) is safe.
+    const original = process.emitWarning;
+    trueOriginalEmitWarning = original;
+    process.emitWarning = ((warning: unknown, ...rest: unknown[]): void => {
+      if (isSqliteExperimentalWarning(warning, rest[0])) return;
+      (original as (...args: unknown[]) => void)(warning, ...rest);
+    }) as typeof process.emitWarning;
+  }
 
-  process.emitWarning = patched;
+  suppressionDepth += 1;
   try {
     return await loader();
   } finally {
-    process.emitWarning = originalEmitWarning;
+    suppressionDepth -= 1;
+    if (suppressionDepth === 0) {
+      process.emitWarning = trueOriginalEmitWarning as typeof process.emitWarning;
+      trueOriginalEmitWarning = undefined;
+    }
   }
 }
 
@@ -214,15 +235,42 @@ function schemaMetaTableExists(db: DatabaseSync): boolean {
 }
 
 /**
+ * Every user table name already present in `db`, excluding SQLite's own
+ * internal `sqlite_%` tables (e.g. `sqlite_sequence`). Used only to
+ * distinguish a genuinely empty database (nothing here yet — safe to
+ * migrate) from a foreign one that already holds someone else's tables but
+ * never went through this adapter's own migrations (P5-1 verifier finding B).
+ */
+function listUserTableNames(db: DatabaseSync): string[] {
+  return db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'").all()
+    .map((row) => (row as { readonly name: string }).name);
+}
+
+/**
  * Reads the store's recorded schema version: `0` for a genuinely empty
- * database (no `schema_meta` table yet — nothing has ever been migrated).
- * Throws {@link AuditStoreCorruptError} when `schema_meta` exists but its
- * one expected row is missing or its `schema_version` is not a
- * non-negative integer — an unknown version, never guessed at or silently
- * recreated.
+ * database (no `schema_meta` table yet, and no other tables either —
+ * nothing has ever been written here). Throws {@link AuditStoreCorruptError}
+ * when:
+ *
+ * - `schema_meta` is absent but the database already contains other user
+ *   tables — a foreign database belonging to another application must
+ *   never be silently adopted as a fresh audit store (P5-1 verifier
+ *   finding B);
+ * - `schema_meta` exists but its one expected row is missing, or its
+ *   `schema_version` is not a non-negative integer — an unknown version,
+ *   never guessed at or silently recreated.
  */
 function readSchemaVersion(db: DatabaseSync): number {
-  if (!schemaMetaTableExists(db)) return 0;
+  if (!schemaMetaTableExists(db)) {
+    const foreignTables = listUserTableNames(db);
+    if (foreignTables.length > 0) {
+      throw new AuditStoreCorruptError(
+        `the database already contains table(s) ${foreignTables.join(', ')} but no schema_meta table — `
+        + 'refusing to adopt what looks like a foreign database as a fresh audit store',
+      );
+    }
+    return 0;
+  }
 
   const row = db.prepare('SELECT schema_version FROM schema_meta WHERE id = 1').get() as
     | { readonly schema_version: unknown }
@@ -324,6 +372,31 @@ export interface CreateSqliteAuditStoreOptions {
 }
 
 /**
+ * `true` for an error already produced by this module's own domain error
+ * types — those are already named and visible, and must pass through
+ * {@link wrapNativeSqliteError} unchanged rather than being wrapped again.
+ */
+function isAuditStoreError(error: unknown): error is AuditStoreCorruptError | AuditStoreSchemaVersionError {
+  return error instanceof AuditStoreCorruptError || error instanceof AuditStoreSchemaVersionError;
+}
+
+/**
+ * Wraps a raw failure from the native `node:sqlite` driver — `ERR_SQLITE_ERROR`
+ * for a file that is not a SQLite database at all, a directory where the
+ * file should be, a read-only file, or a foreign database whose table names
+ * collide with ours (`table ... already exists`) — into
+ * {@link AuditStoreCorruptError}, so none of those ever escape to a caller
+ * as a raw native error (P5-1 verifier finding B). An error already thrown
+ * by this adapter's own domain checks (see {@link isAuditStoreError}) is
+ * rethrown unchanged, never double-wrapped.
+ */
+function wrapNativeSqliteError(error: unknown, databaseFile: string): AuditStoreCorruptError | AuditStoreSchemaVersionError {
+  if (isAuditStoreError(error)) return error;
+  const detail = error instanceof Error ? error.message : String(error);
+  return new AuditStoreCorruptError(`the native sqlite driver rejected "${databaseFile}": ${detail}`);
+}
+
+/**
  * Creates the production {@link AuditStorePort}: creates the containing
  * directory if needed, opens (or creates) `options.databaseFile`, and runs
  * migrations before returning — so a caller's first write is always against
@@ -336,12 +409,18 @@ export async function createSqliteAuditStore(options: CreateSqliteAuditStoreOpti
   const sqliteModule = await loadSqliteModule();
   await mkdir(dirname(options.databaseFile), { recursive: true, mode: DIRECTORY_MODE });
 
-  const db = new sqliteModule.DatabaseSync(options.databaseFile);
+  let db: DatabaseSync;
+  try {
+    db = new sqliteModule.DatabaseSync(options.databaseFile);
+  } catch (error) {
+    throw wrapNativeSqliteError(error, options.databaseFile);
+  }
+
   try {
     migrate(db);
   } catch (error) {
     db.close();
-    throw error;
+    throw wrapNativeSqliteError(error, options.databaseFile);
   }
 
   return {

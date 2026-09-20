@@ -434,23 +434,30 @@ function classificationFor(
  * per test case id. Callers still hand back only a `ClassificationResult`
  * (the Phase 4 shape this test file's fixtures already build); this helper
  * synthesizes the matching raw `JevEvaluation` `AuditEvaluationPort.evaluate`
- * now also returns (Phase 5, task P5-1) directly from that classification's
- * own `model`/`usage` fields, so none of this file's existing call sites
- * need to change.
+ * now also returns (Phase 5, task P5-1). By default the evaluation's
+ * `requestedModel`/`respondedModel`/`modelMatchesPin`/`attempts` mirror the
+ * classification's own `model` fields (and a fixed `attempts: 1`) so none of
+ * this file's existing call sites need to change. `evaluationOverrides`
+ * lets a test specify the raw evaluation's fields independently of the
+ * classification — needed to prove (per the Phase 5 P5-1 verifier findings)
+ * that `runAudit` forwards the evaluation and the classification as
+ * genuinely distinct objects, rather than one being mechanically derived
+ * from the other in a way that could never surface a mix-up between them.
  */
 function stubEvaluationPort(
   handler: (request: AuditEvaluationRequest) => Promise<ClassificationResult>,
+  evaluationOverrides: Partial<Pick<JevEvaluation, 'requestedModel' | 'respondedModel' | 'modelMatchesPin' | 'attempts' | 'answers'>> = {},
 ): AuditEvaluationPort {
   return {
     async evaluate(request) {
       const classification = await handler(request);
       const evaluation: JevEvaluation = {
-        requestedModel: classification.model.requested,
-        respondedModel: classification.model.responded,
-        modelMatchesPin: classification.model.matchesPin,
-        answers: {},
+        requestedModel: evaluationOverrides.requestedModel ?? classification.model.requested,
+        respondedModel: evaluationOverrides.respondedModel ?? classification.model.responded,
+        modelMatchesPin: evaluationOverrides.modelMatchesPin ?? classification.model.matchesPin,
+        answers: evaluationOverrides.answers ?? {},
         usage: classification.usage,
-        attempts: 1,
+        attempts: evaluationOverrides.attempts ?? 1,
       };
       return { classification, evaluation };
     },
@@ -721,6 +728,36 @@ describe('audit store persistence wiring (Phase 5, task P5-1)', () => {
     expect(outcome.evaluation.attempts).toBe(1);
     expect(store.finishRunCalls).toEqual(['run-1']);
     expect(result.evaluation?.classifications.map((entry) => entry.testCaseId)).toEqual([evaluableCase.id]);
+  });
+
+  it('persists the raw evaluation\'s own requestedModel, respondedModel, and attempts count independently of the classification\'s fields (P5-1 verifier finding A)', async () => {
+    const store = fakeStore();
+    const evaluableCase = testCaseWithModifiers('tc:v1:store-distinct', [], 'store-distinct.test.ts');
+    const discovery: DiscoveryResult = { files: [discovered('store-distinct.test.ts')], excluded: [], diagnostics: [] };
+    const evaluation = stubEvaluationPort(
+      async (request) => classificationFor(request.testCase.id, { responded: 'classification-responded-model' }),
+      { requestedModel: 'evaluation-requested-model', respondedModel: 'evaluation-responded-model', attempts: 4 },
+    );
+
+    await runAudit(configuration, {
+      discovery: { discover: async () => discovery },
+      sourceReader: { read: async () => 'source' },
+      extractor: { extract: () => ({ testCases: [evaluableCase], dynamicMetadata: [], diagnostics: [] }) },
+      evidence: { build: async (request) => ({ bundles: request.testCases.map((testCase) => emptyBundle(testCase.id)), diagnostics: [] }) },
+      evaluation,
+      store,
+    });
+
+    expect(store.workItemCalls).toHaveLength(1);
+    const { outcome } = store.workItemCalls[0]!;
+    expect(outcome.state).toBe('completed');
+    if (outcome.state !== 'completed') throw new Error('unreachable');
+    // The evaluation's model fields are distinct from the classification's own model fields —
+    // a mix-up between the two objects would fail exactly one of these four assertions.
+    expect(outcome.evaluation.requestedModel).toBe('evaluation-requested-model');
+    expect(outcome.evaluation.respondedModel).toBe('evaluation-responded-model');
+    expect(outcome.evaluation.attempts).toBe(4);
+    expect(outcome.classification.model.responded).toBe('classification-responded-model');
   });
 
   it('persists a failed work item with the same typed error kind and message as its evaluation-failed diagnostic', async () => {

@@ -29,13 +29,15 @@ import { canonicalizeEvidenceBundle, type EvidenceBundle } from '../domain/evide
 import { estimateDryRun, JEV_ESTIMATE_SNAPSHOT, type DryRunEstimate } from '../domain/estimate.js';
 import { JevConfigurationError } from '../domain/jev-gateway.js';
 import { JEV_MODEL_ID } from '../domain/rubric.js';
-import type {
-  AuditDiagnostic,
-  AuditEvaluationPort,
-  AuditPorts,
-  AuditRequest,
-  AuditResult,
-  AuditStorePort,
+import {
+  AuditStoreCorruptError,
+  AuditStoreSchemaVersionError,
+  type AuditDiagnostic,
+  type AuditEvaluationPort,
+  type AuditPorts,
+  type AuditRequest,
+  type AuditResult,
+  type AuditStorePort,
 } from '../domain/audit.js';
 import type { ClassificationResult } from '../domain/classification.js';
 import type { ConfigurationOverrides } from '../domain/config.js';
@@ -67,7 +69,10 @@ export interface CliDependencies {
    * `node:sqlite` database under `resolveAuditStorePaths()` (or
    * `configuration.store.databasePath`, when set). Built only after a
    * usable API key was already resolved, so a failed `--evaluate` (missing
-   * key) never creates a database file.
+   * key) never creates a database file. A thrown `AuditStoreSchemaVersionError`
+   * or `AuditStoreCorruptError` here (P5-1 verifier finding C) is handled
+   * exactly like the evaluation port's own `JevConfigurationError` above: a
+   * named, readable message on `io`, exit code 1, no stack trace.
    */
   readonly createStorePort?: () => AuditStorePort | Promise<AuditStorePort>;
   /**
@@ -597,7 +602,15 @@ export async function runCli(
       ?? ((): Promise<AuditStorePort> => createSqliteAuditStore({
         databaseFile: configuration.store.databasePath ?? resolveAuditStorePaths().databaseFile,
       }));
-    storePort = await buildStorePort();
+    try {
+      storePort = await buildStorePort();
+    } catch (error) {
+      if (error instanceof AuditStoreSchemaVersionError || error instanceof AuditStoreCorruptError) {
+        io.writeLine(`Unable to open the audit store: ${error.message}`);
+        return 1;
+      }
+      throw error;
+    }
   }
 
   try {

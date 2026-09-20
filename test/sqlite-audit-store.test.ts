@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createSqliteAuditStore,
@@ -118,6 +118,51 @@ describe('sqlite experimental warning suppression', () => {
     spy.mockRestore();
   });
 
+  // P5-1 verifier finding E: two overlapping (not merely nested) calls each save/restore
+  // `process.emitWarning` independently. Call A resolving first must not restore the pre-A
+  // baseline while call B is still active (dropping B's still-active suppression and letting a
+  // real sqlite warning leak during the crossover window); and call B resolving afterward must
+  // not permanently install A's now-stale wrapper instead of the true original.
+  it('shares one patch across overlapping calls: an earlier call finishing does not drop a still-active later call\'s suppression, and the true original is restored only once the last call finishes', async () => {
+    const spy = vi.spyOn(process, 'emitWarning').mockImplementation(() => undefined);
+    const sqliteWarning = 'SQLite is an experimental feature and might change at any time';
+
+    let resolveA: () => void = () => undefined;
+    const aGate = new Promise<void>((resolve) => { resolveA = resolve; });
+    let resolveB: () => void = () => undefined;
+    const bGate = new Promise<void>((resolve) => { resolveB = resolve; });
+
+    // Start A, then start B while A is still in flight — a genuine overlap, not clean nesting.
+    const callA = withSqliteExperimentalWarningSuppressed(async () => {
+      await aGate;
+      return 'a';
+    });
+    const callB = withSqliteExperimentalWarningSuppressed(async () => {
+      await bGate;
+      return 'b';
+    });
+
+    // A resolves first, while B is still active.
+    resolveA();
+    await expect(callA).resolves.toBe('a');
+
+    // The sqlite warning must still be suppressed here: A's own completion must not have
+    // restored the pre-A baseline and dropped B's still-active patch.
+    process.emitWarning(sqliteWarning, 'ExperimentalWarning');
+    expect(spy).not.toHaveBeenCalledWith(sqliteWarning, 'ExperimentalWarning');
+
+    // Now B (the last remaining call) resolves.
+    resolveB();
+    await expect(callB).resolves.toBe('b');
+
+    // Only now, with no suppression call still active, must the true original be restored.
+    expect(process.emitWarning).toBe(spy);
+    process.emitWarning(sqliteWarning, 'ExperimentalWarning');
+    expect(spy).toHaveBeenCalledWith(sqliteWarning, 'ExperimentalWarning');
+
+    spy.mockRestore();
+  });
+
   // A real, in-process "createSqliteAuditStore never lets the real node:sqlite warning through"
   // assertion is unreliable here: Node deduplicates that exact ExperimentalWarning once per
   // process regardless of how many times `node:sqlite` is imported (verified empirically —
@@ -197,6 +242,129 @@ describe('createSqliteAuditStore migrations', () => {
 
     await expect(createSqliteAuditStore({ databaseFile })).rejects.toThrow(AuditStoreCorruptError);
   });
+
+  // P5-1 verifier finding D: only the "row missing" sub-case above was covered; a malformed
+  // `schema_version` value (present but not a non-negative integer) had zero test coverage —
+  // deleting that whole check left the suite green at 697/697.
+  it.each([
+    ['a string', "'not-a-number'"],
+    ['a float', '1.5'],
+    ['a negative number', '-1'],
+  ])('fails with a named, visible error when schema_meta.schema_version is %s, rather than silently recreating the database', async (_label, sqlLiteral) => {
+    const databaseFile = await tempDatabaseFile();
+
+    const bootstrap = await createSqliteAuditStore({ databaseFile });
+    await bootstrap.close();
+
+    // `schema_meta` is a STRICT table, so a plain UPDATE would itself reject a wrong-typed
+    // literal before this adapter's own validation ever runs. Recreate it as a plain (non-STRICT)
+    // table to get the malformed value stored at all — reproducing what a hand-edited or
+    // otherwise corrupted database file could contain.
+    const db = new DatabaseSync(databaseFile);
+    db.exec('DROP TABLE schema_meta');
+    db.exec('CREATE TABLE schema_meta (id INTEGER PRIMARY KEY, schema_version)');
+    db.exec(`INSERT INTO schema_meta (id, schema_version) VALUES (1, ${sqlLiteral})`);
+    db.close();
+
+    await expect(createSqliteAuditStore({ databaseFile })).rejects.toThrow(AuditStoreCorruptError);
+  });
+});
+
+// --- Foreign database protection (P5-1 verifier finding B) ---------------------------------
+
+describe('createSqliteAuditStore foreign database protection', () => {
+  it('fails with a named, visible error rather than silently adopting a foreign database that has user tables but no schema_meta table', async () => {
+    const databaseFile = await tempDatabaseFile();
+
+    // Simulate another application's database: it has real tables, but never went through this
+    // adapter's own migrations, so it has no `schema_meta` table at all — distinct from a
+    // genuinely empty (never-touched) database, which must still migrate normally (see below).
+    await mkdir(dirname(databaseFile), { recursive: true });
+    const foreignDb = new DatabaseSync(databaseFile);
+    foreignDb.exec('CREATE TABLE some_other_apps_table (id INTEGER PRIMARY KEY, payload TEXT)');
+    foreignDb.close();
+
+    await expect(createSqliteAuditStore({ databaseFile })).rejects.toThrow(AuditStoreCorruptError);
+
+    // The foreign table must be left untouched — no partial adoption.
+    const db = new DatabaseSync(databaseFile);
+    try {
+      const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all()
+        .map((row) => (row as { readonly name: string }).name);
+      expect(tables).toEqual(['some_other_apps_table']);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('still migrates normally from a genuinely empty database with no user tables at all, including an explicitly created zero-byte file', async () => {
+    const databaseFile = await tempDatabaseFile();
+    await mkdir(dirname(databaseFile), { recursive: true });
+    await writeFile(databaseFile, Buffer.alloc(0));
+
+    const store = await createSqliteAuditStore({ databaseFile });
+    await store.close();
+
+    const db = new DatabaseSync(databaseFile);
+    try {
+      const version = (db.prepare('SELECT schema_version FROM schema_meta WHERE id = 1').get() as { readonly schema_version: number }).schema_version;
+      expect(version).toBe(1);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('fails with a named, visible error instead of a raw "table already exists" error when a foreign database\'s table names collide with ours', async () => {
+    const databaseFile = await tempDatabaseFile();
+    await mkdir(dirname(databaseFile), { recursive: true });
+
+    const foreignDb = new DatabaseSync(databaseFile);
+    foreignDb.exec('CREATE TABLE runs (id INTEGER PRIMARY KEY)');
+    foreignDb.close();
+
+    const error: unknown = await createSqliteAuditStore({ databaseFile }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(AuditStoreCorruptError);
+    expect((error as Error).message).not.toContain('ERR_SQLITE_ERROR');
+  });
+});
+
+// --- Wrapping raw native sqlite failures (P5-1 verifier finding B) -------------------------
+
+describe('createSqliteAuditStore native failure wrapping', () => {
+  it('wraps a native failure into a named error when the file is not a SQLite database at all', async () => {
+    const databaseFile = await tempDatabaseFile();
+    await mkdir(dirname(databaseFile), { recursive: true });
+    await writeFile(databaseFile, 'this is not a sqlite database file, just plain text padding padding padding');
+
+    const error: unknown = await createSqliteAuditStore({ databaseFile }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(AuditStoreCorruptError);
+    expect((error as Error).message).not.toContain('ERR_SQLITE_ERROR');
+  });
+
+  it('wraps a native failure into a named error when a directory exists where the database file should be', async () => {
+    const databaseFile = await tempDatabaseFile();
+    await mkdir(databaseFile, { recursive: true });
+
+    const error: unknown = await createSqliteAuditStore({ databaseFile }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(AuditStoreCorruptError);
+    expect((error as Error).message).not.toContain('ERR_SQLITE_ERROR');
+  });
+
+  it('wraps a native failure into a named error when the database file is read-only', async () => {
+    const databaseFile = await tempDatabaseFile();
+    await mkdir(dirname(databaseFile), { recursive: true });
+    await writeFile(databaseFile, Buffer.alloc(0));
+    await chmod(databaseFile, 0o400);
+
+    try {
+      const error: unknown = await createSqliteAuditStore({ databaseFile }).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(AuditStoreCorruptError);
+      expect((error as Error).message).not.toContain('ERR_SQLITE_ERROR');
+    } finally {
+      // Restore write permission so afterEach's recursive rm can clean up the temp directory.
+      await chmod(databaseFile, 0o600);
+    }
+  });
 });
 
 // --- Transactional rollback on a mid-write error ---
@@ -246,6 +414,11 @@ describe('createSqliteAuditStore transactional writes', () => {
 
 // --- Full write/read round trip through recordWorkItem ---
 
+// P5-1 verifier finding A: every fixture value below is deliberately distinct and
+// non-symmetric (never reusing the same literal for two different persisted columns), so a
+// swap between any two columns in `insertAttempt`/`insertJudgment` (`src/adapters/sqlite-audit-store.ts`)
+// turns this suite RED instead of going undetected — see the read-back assertions below, which
+// check every one of those columns individually against its own distinct fixture value.
 function sampleClassification(testCaseId: TestCaseId): ClassificationResult {
   return {
     testCaseId,
@@ -254,23 +427,23 @@ function sampleClassification(testCaseId: TestCaseId): ClassificationResult {
     status: 'healthy',
     dimensions: [],
     findings: [],
-    policyVersion: 2,
-    rubricVersion: 2,
-    model: { requested: 'jev-1.13.0', responded: 'jev-1.13.0', matchesPin: true },
+    policyVersion: 3,
+    rubricVersion: 6,
+    model: { requested: 'jev-classification-requested', responded: 'jev-classification-responded', matchesPin: true },
     usage: { inputTokens: 100, outputTokens: 5 },
   };
 }
 
 function sampleEvaluation(): JevEvaluation {
   return {
-    requestedModel: 'jev-1.13.0',
-    respondedModel: 'jev-1.13.0',
+    requestedModel: 'jev-eval-requested-model',
+    respondedModel: 'jev-eval-responded-model',
     modelMatchesPin: true,
     answers: {
       'assertion-strength.applicable': { type: 'noul', probability: 0.9, raw: { type: 'noul', noul: 0.9 } },
     },
-    usage: { inputTokens: 100, outputTokens: 5 },
-    attempts: 1,
+    usage: { inputTokens: 211, outputTokens: 47 },
+    attempts: 9,
   };
 }
 
@@ -302,14 +475,24 @@ describe('createSqliteAuditStore work-item persistence', () => {
       expect(workItem['test_case_id']).toBe(testCaseId);
 
       const attempt = db.prepare('SELECT * FROM attempts WHERE work_item_id = ?').get(workItem['id'] as number) as Record<string, unknown>;
-      expect(attempt['requested_model']).toBe('jev-1.13.0');
+      // Every assertion below targets a fixture value that is unique across the whole row (see
+      // `sampleEvaluation`'s comment) — a swap of any two of these columns in `insertAttempt`
+      // (`src/adapters/sqlite-audit-store.ts`) fails exactly one of them.
+      expect(attempt['requested_model']).toBe('jev-eval-requested-model');
+      expect(attempt['responded_model']).toBe('jev-eval-responded-model');
       expect(attempt['model_matches_pin']).toBe(1);
-      expect(attempt['input_tokens']).toBe(100);
+      expect(attempt['attempts']).toBe(9);
+      expect(attempt['input_tokens']).toBe(211);
+      expect(attempt['output_tokens']).toBe(47);
       expect(JSON.parse(attempt['raw_answers'] as string)).toEqual(sampleEvaluation().answers);
 
       const judgment = db.prepare('SELECT * FROM judgments WHERE work_item_id = ?').get(workItem['id'] as number) as Record<string, unknown>;
+      // Same non-symmetric-fixture discipline as `attempts` above: `policy_version` and
+      // `rubric_version` are distinct (3 vs. 6), so a swap of those two columns in
+      // `insertJudgment` fails one of these two assertions instead of going undetected.
       expect(judgment['status']).toBe('healthy');
-      expect(judgment['policy_version']).toBe(2);
+      expect(judgment['policy_version']).toBe(3);
+      expect(judgment['rubric_version']).toBe(6);
       expect(JSON.parse(judgment['classification'] as string)).toEqual(sampleClassification(testCaseId));
     } finally {
       db.close();

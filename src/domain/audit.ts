@@ -248,16 +248,29 @@ export class AuditStoreSchemaVersionError extends AuditStoreErrorBase {
 }
 
 /**
- * The store's schema metadata exists but is missing, malformed, or
- * otherwise not a recognized version record — an unknown schema version,
- * distinct from {@link AuditStoreSchemaVersionError}'s known-but-too-new
- * one. Never guessed at, never silently recreated.
+ * The database at the configured path cannot be treated as this adapter's
+ * own audit store — never guessed at, never silently recreated or adopted.
+ * Distinct from {@link AuditStoreSchemaVersionError}'s known-but-too-new
+ * schema version, this covers every other way a store fails to open safely
+ * (Phase 5, task P5-1 verifier finding B):
+ *
+ * - the store's own schema metadata exists but is missing, malformed, or
+ *   otherwise not a recognized version record;
+ * - the database already contains user tables but no `schema_meta` table —
+ *   a foreign database belonging to another application, never silently
+ *   adopted as a fresh audit store (a genuinely empty database, with no
+ *   user tables at all, still migrates normally);
+ * - the underlying native `node:sqlite` driver rejected the file outright
+ *   (not a SQLite database, a directory where the file should be, a
+ *   read-only file, or a foreign database whose table names collide with
+ *   ours) — wrapped here so no raw `ERR_SQLITE_ERROR` ever escapes to a
+ *   caller.
  */
 export class AuditStoreCorruptError extends AuditStoreErrorBase {
   readonly code = 'corrupt' as const;
 
   constructor(detail: string) {
-    super(`Audit store schema metadata is corrupt or unrecognized: ${detail}`);
+    super(`Audit store is corrupt, foreign, or otherwise unusable: ${detail}`);
   }
 }
 

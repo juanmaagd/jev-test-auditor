@@ -8,6 +8,7 @@ import { createJevEvaluationPort } from '../src/adapters/jev-evaluation-port.js'
 import { readStoredCredentials, resolveAuthStoragePaths, writeStoredCredentials } from '../src/adapters/auth-storage.js';
 import { resolveAuditStorePaths } from '../src/adapters/sqlite-audit-store.js';
 import { AuthPromptCancelledError } from '../src/domain/auth.js';
+import { AuditStoreSchemaVersionError } from '../src/domain/audit.js';
 import type { AuditEvaluationPort, AuditFileResult, AuditPorts, AuditResult, AuditStorePort } from '../src/domain/audit.js';
 import { buildEvidenceBundle, DEFAULT_EVIDENCE_BUDGET, type EvidenceBundle } from '../src/domain/evidence.js';
 import { canonicalizeEvidenceBundle } from '../src/index.js';
@@ -1398,6 +1399,25 @@ describe('SQLite audit store (Phase 5, task P5-1)', () => {
     // The production store was never constructed, so no real database file exists.
     const storePaths = resolveAuditStorePaths();
     await expect(access(storePaths.databaseFile)).rejects.toThrow();
+  });
+
+  // P5-1 verifier finding C: `storePort = await buildStorePort()` sat outside the evaluation
+  // port's own try/catch, so a store construction failure (e.g. a schema-incompatible database)
+  // crashed the CLI with a raw unhandled stack trace instead of following the CLI's own
+  // established convention — a named, readable message and exit code 1, no stack trace — that
+  // the evaluation port build directly above it already follows.
+  it('reports a named, readable error and exits 1 — no stack trace — when store construction fails', async () => {
+    const root = await fixture(mathFixtureFiles);
+    const output = captureOutput();
+
+    const exitCode = await runCli(['audit', '--rootDir', root, '--evaluate'], output.io, {
+      createEvaluationPort: () => fakeEvaluationPort(),
+      createStorePort: () => { throw new AuditStoreSchemaVersionError(999, 1); },
+    });
+
+    expect(exitCode).toBe(1);
+    expect(output.lines).toHaveLength(1);
+    expect(output.lines[0]).toContain('999');
   });
 
   it('the API key never reaches the database file, exercised end-to-end through the real key resolution, gateway, and store construction', async () => {
