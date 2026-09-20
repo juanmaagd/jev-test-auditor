@@ -511,7 +511,39 @@ function callbackParameterNames(call: ts.CallExpression): ReadonlySet<string> {
 
 type StaticLiteralResult = { readonly ok: true; readonly value: unknown } | { readonly ok: false };
 
-function staticLiteral(expression: ts.Expression): StaticLiteralResult {
+/**
+ * Unwraps expression forms that the TypeScript compiler erases entirely and
+ * that carry no runtime meaning of their own — `as`/`satisfies` type
+ * assertions, angle-bracket type assertions (`<T>x`), parenthesization, and
+ * non-null assertions (`x!`) — so a statically known parameter table (or a
+ * statically known row/value inside it) stays statically known no matter how
+ * it is type-annotated. `x as const` is the idiomatic way to type a `.each`
+ * table, so this keeps it from looking dynamic.
+ *
+ * Deliberately NOT unwrapped: call expressions, spread elements, bare
+ * identifiers, and template-literal substitutions. Each of those can change
+ * what the expression evaluates to (a call may return something different
+ * each time, an identifier may be reassigned, a spread/substitution pulls in
+ * a runtime value) — unwrapping them would risk inventing a case, which P2-4
+ * explicitly forbids. They must keep surfacing as dynamic metadata.
+ */
+function unwrapTypeOnlyExpression(expression: ts.Expression): ts.Expression {
+  let current = expression;
+  for (;;) {
+    if (ts.isParenthesizedExpression(current)
+      || ts.isAsExpression(current)
+      || ts.isSatisfiesExpression(current)
+      || ts.isTypeAssertionExpression(current)
+      || ts.isNonNullExpression(current)) {
+      current = current.expression;
+      continue;
+    }
+    return current;
+  }
+}
+
+function staticLiteral(rawExpression: ts.Expression): StaticLiteralResult {
+  const expression = unwrapTypeOnlyExpression(rawExpression);
   if (ts.isStringLiteral(expression) || ts.isNoSubstitutionTemplateLiteral(expression)) {
     return { ok: true, value: expression.text };
   }
@@ -624,10 +656,11 @@ function templateRowSpan(
 }
 
 function parameterRows(
-  expression: ts.Expression,
+  rawExpression: ts.Expression,
   sourceFile: ts.SourceFile,
   parameterForm: 'each' | 'for',
 ): readonly { readonly values: readonly unknown[]; readonly span: SourceSpan }[] | undefined {
+  const expression = unwrapTypeOnlyExpression(rawExpression);
   const template = ts.isTaggedTemplateExpression(expression)
     ? expression.template
     : ts.isNoSubstitutionTemplateLiteral(expression) || ts.isTemplateExpression(expression)

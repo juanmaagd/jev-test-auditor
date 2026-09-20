@@ -230,6 +230,121 @@ describe('structural test extraction', () => {
     expect(new Set(result.testCases.map((testCase) => testCase.id)).size).toBe(3);
   });
 
+  describe('type-only wrapper unwrapping on parameter tables', () => {
+    it('expands an "as const" table the same as the bare table, including value identity', () => {
+      const bare = extract("test.each([[1, 2], [3, 4]])('case', () => {});", 'vitest');
+      const asConst = extract("test.each([[1, 2], [3, 4]] as const)('case', () => {});", 'vitest');
+
+      const summarize = (result: TestExtractionResult) => result.testCases.map((testCase) => ({
+        name: testCase.name,
+        values: testCase.parameterization.mode === 'static' ? testCase.parameterization.cases[0]?.values : undefined,
+        valueHash: testCase.parameterization.mode === 'static'
+          ? testCase.parameterization.cases[0]?.identity.valueHash
+          : undefined,
+      }));
+
+      expect(asConst.dynamicMetadata).toEqual([]);
+      expect(asConst.testCases).toHaveLength(2);
+      expect(summarize(asConst)).toEqual(summarize(bare));
+    });
+
+    it('unwraps a "satisfies"-wrapped parameter table', () => {
+      const result = extract(
+        "test.each([[1, 2], [3, 4]] satisfies readonly (readonly [number, number])[])('case', () => {});",
+        'vitest',
+      );
+
+      expect(result.dynamicMetadata).toEqual([]);
+      expect(result.testCases.map((testCase) => testCase.parameterization.mode === 'static'
+        ? testCase.parameterization.cases[0]?.values : [])).toEqual([[1, 2], [3, 4]]);
+    });
+
+    it('unwraps a parenthesized parameter table', () => {
+      const result = extract("test.each(([[1, 2], [3, 4]]))('case', () => {});", 'vitest');
+
+      expect(result.dynamicMetadata).toEqual([]);
+      expect(result.testCases).toHaveLength(2);
+    });
+
+    it('unwraps an angle-bracket type assertion wrapping a parameter table', () => {
+      const result = extract(
+        "test.each(<readonly (readonly [number, number])[]>[[1, 2], [3, 4]])('case', () => {});",
+        'vitest',
+      );
+
+      expect(result.dynamicMetadata).toEqual([]);
+      expect(result.testCases).toHaveLength(2);
+    });
+
+    it('unwraps a non-null-asserted parameter table', () => {
+      const result = extract("test.each([[1, 2], [3, 4]]!)('case', () => {});", 'vitest');
+
+      expect(result.dynamicMetadata).toEqual([]);
+      expect(result.testCases).toHaveLength(2);
+    });
+
+    it('unwraps nested and repeated type-only wrappers around a parameter table', () => {
+      const result = extract("test.each((([[1, 2], [3, 4]] as const)))('case', () => {});", 'vitest');
+
+      expect(result.dynamicMetadata).toEqual([]);
+      expect(result.testCases).toHaveLength(2);
+    });
+
+    it('unwraps a type-only wrapper on an individually-annotated row', () => {
+      const result = extract("test.each([[1, 2] as const, [3, 4]])('case', () => {});", 'vitest');
+
+      expect(result.dynamicMetadata).toEqual([]);
+      expect(result.testCases.map((testCase) => testCase.parameterization.mode === 'static'
+        ? testCase.parameterization.cases[0]?.values : [])).toEqual([[1, 2], [3, 4]]);
+    });
+
+    it('expands "as const" tables identically to the bare table for Vitest .for', () => {
+      const bare = extract("test.for([[1, 2], [3, 4]])('case', () => {});", 'vitest');
+      const asConst = extract("test.for([[1, 2], [3, 4]] as const)('case', () => {});", 'vitest');
+      const values = (result: TestExtractionResult) => result.testCases.map((testCase) => testCase.parameterization.mode === 'static'
+        ? testCase.parameterization.cases[0]?.values : []);
+
+      expect(asConst.dynamicMetadata).toEqual([]);
+      expect(asConst.testCases).toHaveLength(2);
+      expect(values(asConst)).toEqual(values(bare));
+    });
+
+    it('leaves tagged-template parameter tables unaffected by type-only unwrapping', () => {
+      const result = extract("test.each`value | expected\none | 1`('templated', () => {});", 'vitest');
+
+      expect(result.testCases).toHaveLength(1);
+      expect(result.testCases[0]?.parameterization.mode).toBe('static');
+    });
+
+    it('keeps a genuinely dynamic identifier table dynamic even when wrapped in "as const"', () => {
+      const result = extract("test.each(rows as const)('dynamic', () => {});", 'vitest');
+
+      expect(result.testCases).toEqual([]);
+      expect(result.dynamicMetadata.map((metadata) => metadata.reason)).toEqual(['dynamic-parameter-table']);
+    });
+
+    it('keeps a genuinely dynamic call-expression table dynamic even when parenthesized', () => {
+      const result = extract("test.each((getRows()))('dynamic', () => {});", 'vitest');
+
+      expect(result.testCases).toEqual([]);
+      expect(result.dynamicMetadata.map((metadata) => metadata.reason)).toEqual(['dynamic-parameter-table']);
+    });
+
+    it('keeps a spread row dynamic even when the surrounding table is wrapped in "as const"', () => {
+      const result = extract("test.each([[...rows]] as const)('dynamic', () => {});", 'vitest');
+
+      expect(result.testCases).toEqual([]);
+      expect(result.dynamicMetadata.map((metadata) => metadata.reason)).toEqual(['dynamic-parameter-table']);
+    });
+
+    it('does not unwrap a call expression even when it looks like it forwards a literal table', () => {
+      const result = extract("test.each(identity([[1, 2], [3, 4]]))('dynamic', () => {});", 'vitest');
+
+      expect(result.testCases).toEqual([]);
+      expect(result.dynamicMetadata.map((metadata) => metadata.reason)).toEqual(['dynamic-parameter-table']);
+    });
+  });
+
   it('expands safe no-substitution tagged-template tables', () => {
     const result = extract(`test.each\`
       value | expected
