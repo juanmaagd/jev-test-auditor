@@ -40,7 +40,7 @@ import {
   type WorkItemState,
 } from '../domain/audit.js';
 import type { ClassificationResult } from '../domain/classification.js';
-import type { DryRunSkippedReason } from '../domain/estimate.js';
+import type { DryRunCacheNotConsultedReason, DryRunSkippedReason } from '../domain/estimate.js';
 import type { JevEvaluation } from '../domain/jev-gateway.js';
 import type { TestCaseId } from '../domain/test-understanding.js';
 
@@ -684,6 +684,20 @@ export interface AuditStoreReadOnlyLookup {
 }
 
 /**
+ * `openSqliteAuditStoreForLookup`'s own result: a discriminated union rather
+ * than a plain `| undefined`, so the one place that already knows *why* a
+ * lookup is unavailable (this function) is also the one place that reports
+ * it — no second, independent decision elsewhere that could silently drift
+ * from this one. `available: false`'s `reason` is a
+ * {@link DryRunCacheNotConsultedReason} (`src/domain/estimate.ts`) — the
+ * exact same type `DryRunEstimate.cacheNotConsultedReason` carries, so the
+ * CLI only ever passes this value through, never re-derives or re-maps it.
+ */
+export type AuditStoreLookupResult =
+  | { readonly available: true; readonly lookup: AuditStoreReadOnlyLookup }
+  | { readonly available: false; readonly reason: DryRunCacheNotConsultedReason };
+
+/**
  * Opens the audit store strictly for a `--dry-run` cache-hit preview (Phase
  * 5, task P5-5) — the store's own scope constraint carried through from
  * `--evaluate` applies just as strictly here: a dry run "may read an
@@ -692,9 +706,10 @@ export interface AuditStoreReadOnlyLookup {
  * empirically against this Node's real `node:sqlite` (see this task's own
  * evidence in the feature document, not assumed from documentation):
  *
- * - `stat`s `options.databaseFile` first, and returns `undefined`
- *   immediately when it does not exist — the one case the task names
- *   explicitly ("no store exists yet"). This never even loads `node:sqlite`
+ * - `stat`s `options.databaseFile` first, and returns
+ *   `{ available: false, reason: 'no-store' }` immediately when it does not
+ *   exist — the one case the task names explicitly ("no store exists yet").
+ *   This never even loads `node:sqlite`
  *   (no `ExperimentalWarning`, no native open attempt against a path that
  *   is not there), unlike `createSqliteAuditStore`, which always opens
  *   (and, if needed, creates) the file.
@@ -742,19 +757,27 @@ export interface AuditStoreReadOnlyLookup {
  *   `cache_key` column can exist yet) can never contain a hit, and a
  *   subsequent real `--evaluate` would simply migrate it forward first and
  *   then dispatch every evaluable test case — so this degrades to
- *   `undefined` ("not consulted"), matching that outcome exactly, rather
- *   than failing. A native open failure once the file is known to exist
- *   (not a SQLite database, a directory, unreadable permissions, ...) is
- *   wrapped the same way a writable open of the same file would fail for
- *   `--evaluate`, for the same reason.
+ *   `{ available: false, reason: 'schema-outdated' }` ("not consulted"),
+ *   matching that outcome exactly, rather than failing. A native open
+ *   failure once the file is known to exist (not a SQLite database, a
+ *   directory, unreadable permissions, ...) is wrapped the same way a
+ *   writable open of the same file would fail for `--evaluate`, for the
+ *   same reason.
+ *
+ * The two `available: false` `reason`s are exactly the two
+ * {@link DryRunCacheNotConsultedReason} values (`src/domain/estimate.ts`) —
+ * the CLI passes this result's `reason` straight through to
+ * `estimateDryRun`'s own matching parameter with no re-derivation, so this
+ * one function is the single source of truth for "why wasn't the cache
+ * consulted" and the two can never drift apart.
  */
 export async function openSqliteAuditStoreForLookup(
   options: CreateSqliteAuditStoreOptions,
-): Promise<AuditStoreReadOnlyLookup | undefined> {
+): Promise<AuditStoreLookupResult> {
   try {
     await stat(options.databaseFile);
   } catch {
-    return undefined;
+    return { available: false, reason: 'no-store' };
   }
 
   const sqliteModule = await loadSqliteModule();
@@ -775,7 +798,7 @@ export async function openSqliteAuditStoreForLookup(
     }
     if (version < SCHEMA_VERSION) {
       db.close();
-      return undefined;
+      return { available: false, reason: 'schema-outdated' };
     }
   } catch (error) {
     db.close();
@@ -783,14 +806,17 @@ export async function openSqliteAuditStoreForLookup(
   }
 
   return {
-    async lookup(cacheKey: string): Promise<AuditStoreCachedJudgment | undefined> {
-      const row = db.prepare(LOOKUP_CACHED_JUDGMENT_SQL).get(cacheKey) as { readonly classification: string } | undefined;
-      if (row === undefined) return undefined;
-      return { classification: JSON.parse(row.classification) as AuditStoreCachedJudgment['classification'] };
-    },
+    available: true,
+    lookup: {
+      async lookup(cacheKey: string): Promise<AuditStoreCachedJudgment | undefined> {
+        const row = db.prepare(LOOKUP_CACHED_JUDGMENT_SQL).get(cacheKey) as { readonly classification: string } | undefined;
+        if (row === undefined) return undefined;
+        return { classification: JSON.parse(row.classification) as AuditStoreCachedJudgment['classification'] };
+      },
 
-    async close(): Promise<void> {
-      db.close();
+      async close(): Promise<void> {
+        db.close();
+      },
     },
   };
 }

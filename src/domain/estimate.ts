@@ -32,6 +32,26 @@ export {
 
 export type DryRunSkippedReason = 'skip' | 'todo' | 'evidence-unavailable';
 
+/**
+ * Why a `--dry-run` preview did not consult the local content-addressed
+ * cache at all (as opposed to consulting it and finding zero hits) —
+ * orchestrator decision, 2026-09-20, resolving the "byte-identity vs.
+ * disclosure" and "schema-version discrimination" decision gaps P5-5 itself
+ * flagged (`odd/tasks/phase-5-persistence.md`). See
+ * `DryRunEstimate.cacheNotConsultedReason` for the full contract.
+ *
+ * - `'no-store'`: no audit store exists yet at the configured location —
+ *   there is nothing to look anything up in.
+ * - `'schema-outdated'`: a store exists, but its recorded schema predates
+ *   this build's current version. A dry run must never migrate a store (the
+ *   read-only, no-write guarantee `openSqliteAuditStoreForLookup` owns —
+ *   `src/adapters/sqlite-audit-store.ts`), so this is reported honestly as
+ *   "not consulted" rather than silently upgraded or silently treated as an
+ *   all-miss cache. Running `--evaluate` migrates the store forward on its
+ *   own next write, after which the same dry run would consult it normally.
+ */
+export type DryRunCacheNotConsultedReason = 'no-store' | 'schema-outdated';
+
 export type DryRunClassification =
   | { readonly status: 'evaluable' }
   | { readonly status: 'skipped'; readonly reason: DryRunSkippedReason };
@@ -89,16 +109,36 @@ export interface DryRunEstimate {
    */
   readonly initialCalls: number;
   /**
+   * Whether this preview actually consulted the local content-addressed
+   * cache at all — always present (unlike `cacheHits`/`cacheNotConsultedReason`
+   * below), so a JSON consumer can tell "consulted, zero hits" apart from
+   * "not consulted" without inferring it from a missing `cacheHits` key,
+   * which is discoverable but not self-explanatory. `true` means an audit
+   * store was opened read-only and looked up per evaluable test case
+   * (`cacheHits`, even as `0`, is then always present too). `false` means no
+   * lookup happened for any test case at all — every evaluable test case is
+   * reported billable, exactly as if no caching existed.
+   */
+  readonly cacheConsulted: boolean;
+  /**
    * Count of evaluable test cases served from an existing content-addressed
    * cache instead of a fresh Jev request (Phase 5, task P5-5), already
    * excluded from `initialCalls`/`followUpCalls`/`estimatedInputTokens`/
    * `estimatedFollowUpInputTokens`/`estimatedUsd` above. Present (even as
-   * `0`) only when `estimateDryRun` was given a `cacheHitTestCaseIds` set at
-   * all — its own doc explains why "0 hits, but consulted" and "not
-   * consulted" are deliberately distinguishable rather than collapsed to
-   * the same reported shape.
+   * `0`) only when `cacheConsulted` is `true` — omitted whenever it is
+   * `false`.
    */
   readonly cacheHits?: number;
+  /**
+   * Present only when `cacheConsulted` is `false` and the caller supplied a
+   * specific reason (`estimateDryRun`'s fifth parameter) — orchestrator
+   * decision, 2026-09-20 (see {@link DryRunCacheNotConsultedReason}).
+   * Omitted (never a literal `undefined`) whenever `cacheConsulted` is
+   * `true`, and also omitted when the caller reported "not consulted"
+   * without knowing why — e.g. a test seam that swaps out the whole audit
+   * pipeline and never attempts to open a store at all.
+   */
+  readonly cacheNotConsultedReason?: DryRunCacheNotConsultedReason;
   /** Possible follow-up call range; a follow-up happens only when an earlier result identifies a specific evidence need (never an automatic retry), so the true count is unknown ahead of time. */
   readonly followUpCalls: DryRunRange;
   /** Exact sum of UTF-8 byte lengths of `canonicalizeEvidenceBundle(bundle)` over every evaluable bundle. Still reported for its own sake (the local evidence footprint), but no longer what token/cost estimates are derived from — see `requestBytes`. */
@@ -204,12 +244,20 @@ function roundUsd(value: number): number {
  * not what would be billed for it. An id with no matching evaluable test
  * case (e.g. stale content since renamed or deleted) is simply never
  * matched; it can never produce a negative count.
+ *
+ * `cacheNotConsultedReason` (orchestrator decision, 2026-09-20) is likewise
+ * plain data — a caller-supplied {@link DryRunCacheNotConsultedReason}, never
+ * derived by this function. It is only ever reflected in the result
+ * (`DryRunEstimate.cacheNotConsultedReason`) when `cacheHitTestCaseIds` is
+ * `undefined` (not consulted); it is silently ignored whenever a hit set was
+ * actually supplied, since a consulted preview needs no "why not" at all.
  */
 export function estimateDryRun(
   snapshot: JevEstimateSnapshot,
   files: readonly DryRunFileInput[],
   rubric: Rubric = RUBRIC_V2,
   cacheHitTestCaseIds?: ReadonlySet<TestCaseId>,
+  cacheNotConsultedReason?: DryRunCacheNotConsultedReason,
 ): DryRunEstimate {
   validateJevEstimateSnapshot(snapshot);
   // Computed unconditionally (even with zero evaluable test cases): it depends only on the
@@ -283,6 +331,7 @@ export function estimateDryRun(
   };
 
   const skippedTotal = skippedByReason.skip + skippedByReason.todo + skippedByReason['evidence-unavailable'];
+  const cacheConsulted = cacheHitTestCaseIds !== undefined;
 
   return {
     snapshotVersion: snapshot.version,
@@ -292,7 +341,9 @@ export function estimateDryRun(
     evaluable,
     skipped: { total: skippedTotal, byReason: skippedByReason },
     initialCalls: billableCalls,
-    ...(cacheHitTestCaseIds === undefined ? {} : { cacheHits: cacheHitCount }),
+    cacheConsulted,
+    ...(cacheConsulted ? { cacheHits: cacheHitCount } : {}),
+    ...(!cacheConsulted && cacheNotConsultedReason !== undefined ? { cacheNotConsultedReason } : {}),
     followUpCalls,
     evidenceBytes,
     requestBytes,

@@ -1240,16 +1240,20 @@ describe('createSqliteAuditStore loadRunState rootDirCanonical', () => {
 // `audit --dry-run`, which must never create, migrate, or write to the audit store) ---------
 
 describe('openSqliteAuditStoreForLookup', () => {
-  it('returns undefined and creates no file of any kind when no database file exists at the given path', async () => {
-    const databaseFile = await tempDatabaseFile();
+  it(
+    'reports { available: false, reason: \'no-store\' } and creates no file of any kind '
+    + 'when no database file exists at the given path',
+    async () => {
+      const databaseFile = await tempDatabaseFile();
 
-    const lookup = await openSqliteAuditStoreForLookup({ databaseFile });
+      const result = await openSqliteAuditStoreForLookup({ databaseFile });
 
-    expect(lookup).toBeUndefined();
-    await expect(stat(databaseFile)).rejects.toThrow();
-    await expect(stat(`${databaseFile}-wal`)).rejects.toThrow();
-    await expect(stat(`${databaseFile}-shm`)).rejects.toThrow();
-  });
+      expect(result).toEqual({ available: false, reason: 'no-store' });
+      await expect(stat(databaseFile)).rejects.toThrow();
+      await expect(stat(`${databaseFile}-wal`)).rejects.toThrow();
+      await expect(stat(`${databaseFile}-shm`)).rejects.toThrow();
+    },
+  );
 
   it(
     'reads a real completed judgment through the exact same lookup rule as the live store, '
@@ -1271,11 +1275,11 @@ describe('openSqliteAuditStoreForLookup', () => {
       const beforeBytes = await readFile(databaseFile);
       const beforeHash = createHash('sha256').update(beforeBytes).digest('hex');
 
-      const lookup = await openSqliteAuditStoreForLookup({ databaseFile });
-      expect(lookup).toBeDefined();
-      const hit = await lookup?.lookup('ck-readonly-hit');
-      const miss = await lookup?.lookup('ck-does-not-exist');
-      await lookup?.close();
+      const result = await openSqliteAuditStoreForLookup({ databaseFile });
+      if (!result.available) throw new Error('expected the store to be available for lookup');
+      const hit = await result.lookup.lookup('ck-readonly-hit');
+      const miss = await result.lookup.lookup('ck-does-not-exist');
+      await result.lookup.close();
 
       expect(hit).toEqual({ classification: sampleClassification(testCaseId) });
       expect(miss).toBeUndefined();
@@ -1291,6 +1295,17 @@ describe('openSqliteAuditStoreForLookup', () => {
 
   it('a row still sitting only in an uncheckpointed WAL sidecar (the store never closed cleanly) is invisible to the read-only reader — documented limitation, not a bug: a subsequent real --evaluate opens the store normally and sees it', async () => {
     const databaseFile = await tempDatabaseFile();
+    // Bootstrap and close once first, so the schema itself (and nothing else) is checkpointed into
+    // the main file — otherwise the schema would ALSO still be sitting only in the WAL below, and
+    // the read-only reader would degrade to "not consulted" (schema-outdated) rather than ever
+    // reaching this row's own miss, which is a distinct outcome from the one this test claims to
+    // prove. (Caught by this task's own refactor of `openSqliteAuditStoreForLookup`'s return shape:
+    // the original version of this test used `lookup?.lookup(...)` — with `lookup` itself possibly
+    // `undefined` for exactly this reason — so it passed vacuously regardless of which case actually
+    // occurred; `expect(hit).toBeUndefined()` could never tell "unavailable" apart from "available
+    // but a genuine miss".)
+    await (await createSqliteAuditStore({ databaseFile })).close();
+
     const store = await createSqliteAuditStore({ databaseFile });
     const runId = await store.beginRun('/repo');
     const testCaseId = 'tc:v1:uncheckpointed' as TestCaseId;
@@ -1304,9 +1319,10 @@ describe('openSqliteAuditStoreForLookup', () => {
     // Deliberately never closed — simulates a store still open elsewhere / not yet checkpointed.
 
     try {
-      const lookup = await openSqliteAuditStoreForLookup({ databaseFile });
-      const hit = await lookup?.lookup('ck-uncheckpointed');
-      await lookup?.close();
+      const result = await openSqliteAuditStoreForLookup({ databaseFile });
+      if (!result.available) throw new Error(`expected the store to be available for lookup (schema already checkpointed), got reason: ${result.reason}`);
+      const hit = await result.lookup.lookup('ck-uncheckpointed');
+      await result.lookup.close();
 
       expect(hit).toBeUndefined();
     } finally {
@@ -1325,24 +1341,32 @@ describe('openSqliteAuditStoreForLookup', () => {
     await expect(openSqliteAuditStoreForLookup({ databaseFile })).rejects.toThrow(AuditStoreSchemaVersionError);
   });
 
-  it('degrades to undefined (not consulted) for a hand-built v1 database — a subsequent --evaluate would migrate it forward and then dispatch every evaluable test case, which "not consulted" already matches', async () => {
-    const databaseFile = await tempDatabaseFile();
-    await mkdir(dirname(databaseFile), { recursive: true });
-    const db = new DatabaseSync(databaseFile);
-    db.exec('CREATE TABLE schema_meta (id INTEGER PRIMARY KEY CHECK (id = 1), schema_version INTEGER NOT NULL) STRICT;');
-    db.exec('INSERT INTO schema_meta (id, schema_version) VALUES (1, 1)');
-    db.close();
+  it(
+    'degrades to { available: false, reason: \'schema-outdated\' } for a hand-built v1 database — a subsequent '
+    + '--evaluate would migrate it forward and then dispatch every evaluable test case, which "not consulted" already matches',
+    async () => {
+      const databaseFile = await tempDatabaseFile();
+      await mkdir(dirname(databaseFile), { recursive: true });
+      const db = new DatabaseSync(databaseFile);
+      db.exec('CREATE TABLE schema_meta (id INTEGER PRIMARY KEY CHECK (id = 1), schema_version INTEGER NOT NULL) STRICT;');
+      db.exec('INSERT INTO schema_meta (id, schema_version) VALUES (1, 1)');
+      db.close();
 
-    await expect(openSqliteAuditStoreForLookup({ databaseFile })).resolves.toBeUndefined();
-  });
+      await expect(openSqliteAuditStoreForLookup({ databaseFile })).resolves.toEqual({ available: false, reason: 'schema-outdated' });
+    },
+  );
 
-  it('degrades to undefined (not consulted) for a genuinely empty (zero-byte) file — a subsequent --evaluate would migrate it from scratch and dispatch everything', async () => {
-    const databaseFile = await tempDatabaseFile();
-    await mkdir(dirname(databaseFile), { recursive: true });
-    await writeFile(databaseFile, Buffer.alloc(0));
+  it(
+    'degrades to { available: false, reason: \'schema-outdated\' } for a genuinely empty (zero-byte) file — a '
+    + 'subsequent --evaluate would migrate it from scratch and dispatch everything',
+    async () => {
+      const databaseFile = await tempDatabaseFile();
+      await mkdir(dirname(databaseFile), { recursive: true });
+      await writeFile(databaseFile, Buffer.alloc(0));
 
-    await expect(openSqliteAuditStoreForLookup({ databaseFile })).resolves.toBeUndefined();
-  });
+      await expect(openSqliteAuditStoreForLookup({ databaseFile })).resolves.toEqual({ available: false, reason: 'schema-outdated' });
+    },
+  );
 
   it('surfaces AuditStoreCorruptError for a foreign database with tables but no schema_meta table — the same error a subsequent --evaluate would also refuse with', async () => {
     const databaseFile = await tempDatabaseFile();

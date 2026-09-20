@@ -276,6 +276,7 @@ describe('estimateDryRun', () => {
       evaluable: 0,
       skipped: { total: 0, byReason: { skip: 0, todo: 0, 'evidence-unavailable': 0 } },
       initialCalls: 0,
+      cacheConsulted: false,
       followUpCalls: { min: 0, max: 0 },
       evidenceBytes: 0,
       requestBytes: 0,
@@ -347,6 +348,7 @@ describe('estimateDryRun', () => {
         evaluable: 1,
         skipped: { total: 3, byReason: { skip: 1, todo: 1, 'evidence-unavailable': 1 } },
         initialCalls: 1,
+        cacheConsulted: false,
         followUpCalls: { min: 0, max: 1 },
         evidenceBytes: 477,
         requestBytes: goldenRequestBytes,
@@ -663,7 +665,53 @@ describe('estimateDryRun cache-aware billing (Phase 5, task P5-5)', () => {
     expect(result.initialCalls).toBe(1);
   });
 
-  it('places cacheHits immediately after initialCalls in key order when present (stable machine-readable shape for --dry-run --json)', () => {
+  it(
+    'places cacheConsulted immediately after initialCalls, and cacheHits immediately after '
+    + 'cacheConsulted when present, in key order (stable machine-readable shape for --dry-run --json)',
+    () => {
+      const files: readonly DryRunFileInput[] = [{
+        testCases: [testCase('tc:v1:abc', [])],
+        evidence: [smallBundle('tc:v1:abc')],
+      }];
+
+      const result = estimateDryRun(JEV_ESTIMATE_SNAPSHOT, files, RUBRIC_V2, new Set());
+
+      const keys = Object.keys(result);
+      expect(keys.indexOf('cacheConsulted')).toBe(keys.indexOf('initialCalls') + 1);
+      expect(keys.indexOf('cacheHits')).toBe(keys.indexOf('cacheConsulted') + 1);
+    },
+  );
+});
+
+/**
+ * Orchestrator decision, 2026-09-20 — resolving both decision gaps P5-5 itself
+ * flagged (`odd/tasks/phase-5-persistence.md`, "Open questions carried
+ * forward"): the dry-run text report must state whether the local cache was
+ * actually consulted and, when it was not, why — distinguishing "no store
+ * exists yet" from "a store exists but its schema predates this build" —
+ * rather than leaving that discoverable only as a missing `cacheHits` key.
+ * `cacheConsulted` is the always-present machine-readable signal;
+ * `cacheNotConsultedReason` is the optional "why", present only alongside
+ * `cacheConsulted: false` and only when the caller actually knows why.
+ */
+describe('estimateDryRun cache-consultation disclosure', () => {
+  it(
+    'reports cacheConsulted: false and omits cacheNotConsultedReason entirely when no cache-hit set '
+    + 'and no reason are supplied at all (a caller that never attempted to consult a store)',
+    () => {
+      const files: readonly DryRunFileInput[] = [{
+        testCases: [testCase('tc:v1:abc', [])],
+        evidence: [smallBundle('tc:v1:abc')],
+      }];
+
+      const result = estimateDryRun(JEV_ESTIMATE_SNAPSHOT, files);
+
+      expect(result.cacheConsulted).toBe(false);
+      expect('cacheNotConsultedReason' in result).toBe(false);
+    },
+  );
+
+  it('reports cacheConsulted: true and never a cacheNotConsultedReason once a cache-hit set (even empty) is supplied', () => {
     const files: readonly DryRunFileInput[] = [{
       testCases: [testCase('tc:v1:abc', [])],
       evidence: [smallBundle('tc:v1:abc')],
@@ -671,7 +719,63 @@ describe('estimateDryRun cache-aware billing (Phase 5, task P5-5)', () => {
 
     const result = estimateDryRun(JEV_ESTIMATE_SNAPSHOT, files, RUBRIC_V2, new Set());
 
+    expect(result.cacheConsulted).toBe(true);
+    expect('cacheNotConsultedReason' in result).toBe(false);
+  });
+
+  it('reports cacheNotConsultedReason "no-store" when told the cache was not consulted because no store exists yet', () => {
+    const files: readonly DryRunFileInput[] = [{
+      testCases: [testCase('tc:v1:abc', [])],
+      evidence: [smallBundle('tc:v1:abc')],
+    }];
+
+    const result = estimateDryRun(JEV_ESTIMATE_SNAPSHOT, files, RUBRIC_V2, undefined, 'no-store');
+
+    expect(result.cacheConsulted).toBe(false);
+    expect(result.cacheNotConsultedReason).toBe('no-store');
+    expect('cacheHits' in result).toBe(false);
+    // Billable numbers are unaffected by the reason — identical to a cold dry run with no reason at all.
+    expect(result.initialCalls).toBe(1);
+  });
+
+  it('reports cacheNotConsultedReason "schema-outdated" when told an existing store\'s schema predates this build', () => {
+    const files: readonly DryRunFileInput[] = [{
+      testCases: [testCase('tc:v1:abc', [])],
+      evidence: [smallBundle('tc:v1:abc')],
+    }];
+
+    const result = estimateDryRun(JEV_ESTIMATE_SNAPSHOT, files, RUBRIC_V2, undefined, 'schema-outdated');
+
+    expect(result.cacheConsulted).toBe(false);
+    expect(result.cacheNotConsultedReason).toBe('schema-outdated');
+    expect('cacheHits' in result).toBe(false);
+  });
+
+  it(
+    'never reports cacheNotConsultedReason when the cache WAS actually consulted, even if a reason was '
+    + 'mistakenly supplied alongside a real hit set (consulted status wins, not "was a reason given")',
+    () => {
+      const files: readonly DryRunFileInput[] = [{
+        testCases: [testCase('tc:v1:abc', [])],
+        evidence: [smallBundle('tc:v1:abc')],
+      }];
+
+      const result = estimateDryRun(JEV_ESTIMATE_SNAPSHOT, files, RUBRIC_V2, new Set(), 'no-store');
+
+      expect(result.cacheConsulted).toBe(true);
+      expect('cacheNotConsultedReason' in result).toBe(false);
+    },
+  );
+
+  it('places cacheNotConsultedReason immediately after cacheConsulted in key order when present', () => {
+    const files: readonly DryRunFileInput[] = [{
+      testCases: [testCase('tc:v1:abc', [])],
+      evidence: [smallBundle('tc:v1:abc')],
+    }];
+
+    const result = estimateDryRun(JEV_ESTIMATE_SNAPSHOT, files, RUBRIC_V2, undefined, 'no-store');
+
     const keys = Object.keys(result);
-    expect(keys.indexOf('cacheHits')).toBe(keys.indexOf('initialCalls') + 1);
+    expect(keys.indexOf('cacheNotConsultedReason')).toBe(keys.indexOf('cacheConsulted') + 1);
   });
 });

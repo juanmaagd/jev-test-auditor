@@ -32,7 +32,7 @@ import {
   type StoredCredentials,
 } from '../domain/auth.js';
 import { canonicalizeEvidenceBundle, type EvidenceBundle } from '../domain/evidence.js';
-import { estimateDryRun, JEV_ESTIMATE_SNAPSHOT, type DryRunEstimate } from '../domain/estimate.js';
+import { estimateDryRun, JEV_ESTIMATE_SNAPSHOT, type DryRunCacheNotConsultedReason, type DryRunEstimate } from '../domain/estimate.js';
 import { JevConfigurationError } from '../domain/jev-gateway.js';
 import { JEV_MODEL_ID, RUBRIC_V2 } from '../domain/rubric.js';
 import {
@@ -132,15 +132,18 @@ Options:
                       versioned local pricing snapshot. The rubric's own questions dominate a
                       request's bytes (about 93% for the shipped rubric) — see "Rubric bytes per
                       request" in the output. If an audit store already exists at the default (or
-                      configured) location, it is opened strictly read-only and consulted for
-                      cache hits, reported separately (cacheHits) and excluded from the billable
-                      count and token/cost estimates; with no store yet, every evaluable test case
-                      is reported billable and no cache-related field appears at all — this is how
-                      "no cache was consulted" is disclosed, since the report is otherwise
-                      unchanged from before this behavior existed. Makes no network or provider
-                      calls, requires no API key, and writes nothing to disk — not even to the
-                      audit store when one is consulted, which is never created, migrated, or
-                      written to by --dry-run. Cannot be combined with
+                      configured) location and is at this build's current schema, it is opened
+                      strictly read-only and consulted for cache hits, reported separately
+                      (cacheHits) and excluded from the billable count and token/cost estimates.
+                      Whether the cache was consulted at all is always disclosed explicitly
+                      (cacheConsulted; in text, the existing "Cache hits" line itself); when it was
+                      not, the reason is named too (cacheNotConsultedReason; in text, a
+                      "Cache: not consulted (...)" line): no audit store exists yet (no-store), or
+                      an existing store's schema predates this build and a dry run must never
+                      migrate it (schema-outdated — run --evaluate to upgrade it). Makes no
+                      network or provider calls, requires no API key, and writes nothing to disk —
+                      not even to the audit store when one is consulted, which is never created,
+                      migrated, or written to by --dry-run. Cannot be combined with
                       --inspect-payloads or --evaluate.
   --evaluate         Opt-in only: sends every evaluable test case's local evidence bundle to
                       TypeSafe's Jev model for real judgment (costs money; nothing is sent without
@@ -262,12 +265,19 @@ function inspectPayloadLines(result: AuditResult): readonly string[] {
  * the same no-network, no-write audit pipeline as the normal summary (see
  * `runCli`), so they are exact disclosures, not placeholders.
  *
- * `cacheHits` (Phase 5, task P5-5) is spread in immediately after
- * `initialCalls`, matching `DryRunEstimate.cacheHits`'s own doc, and only
- * when `estimate.cacheHits` is present at all — omitted entirely (never a
- * literal `0`) when no audit store was consulted, so a cold dry run's JSON
- * bytes stay byte-for-byte identical to this report's shape before this
- * task, which existing golden tests assert exactly.
+ * `cacheConsulted` (orchestrator decision, 2026-09-20) is always present,
+ * spread in immediately after `initialCalls` — see
+ * `DryRunEstimate.cacheConsulted`'s own doc. `cacheHits` (Phase 5, task
+ * P5-5) follows it, present only when `estimate.cacheHits` is present at
+ * all — i.e. only when `cacheConsulted` is `true` — omitted entirely (never
+ * a literal `0`) otherwise. `cacheNotConsultedReason` follows in its place
+ * instead, present only when `cacheConsulted` is `false` and a specific
+ * reason is known. Every field from `initialCalls` onward previously kept a
+ * cold dry run's JSON byte-for-byte identical to its shape before Phase 5,
+ * task P5-5; this task's own deliberate change is `cacheConsulted` and
+ * `cacheNotConsultedReason` becoming part of that shape — the existing
+ * golden test was updated to match rather than loosened to a substring
+ * match (see `test/cli.test.ts`).
  */
 function dryRunJsonLine(rootDir: string, estimate: DryRunEstimate): string {
   return JSON.stringify({
@@ -281,7 +291,9 @@ function dryRunJsonLine(rootDir: string, estimate: DryRunEstimate): string {
     evaluable: estimate.evaluable,
     skipped: estimate.skipped,
     initialCalls: estimate.initialCalls,
+    cacheConsulted: estimate.cacheConsulted,
     ...(estimate.cacheHits === undefined ? {} : { cacheHits: estimate.cacheHits }),
+    ...(estimate.cacheNotConsultedReason === undefined ? {} : { cacheNotConsultedReason: estimate.cacheNotConsultedReason }),
     followUpCalls: estimate.followUpCalls,
     evidenceBytes: estimate.evidenceBytes,
     requestBytes: estimate.requestBytes,
@@ -297,13 +309,38 @@ function dryRunJsonLine(rootDir: string, estimate: DryRunEstimate): string {
 }
 
 /**
+ * The human-readable "why the cache was not consulted" disclosure line
+ * (orchestrator decision, 2026-09-20), or no line at all. An exhaustive
+ * `switch` over {@link DryRunCacheNotConsultedReason} (plus `undefined`, for
+ * a caller that reported "not consulted" without knowing why — the
+ * `dependencies.audit` test seam's only path) — adding a new reason value
+ * without adding its case here is a compile error, not a silently-missing
+ * disclosure.
+ */
+function cacheNotConsultedLines(reason: DryRunCacheNotConsultedReason | undefined): readonly string[] {
+  switch (reason) {
+    case undefined:
+      return [];
+    case 'no-store':
+      return ['Cache: not consulted (no audit store exists yet at the configured location).'];
+    case 'schema-outdated':
+      return ["Cache: not consulted (the audit store's schema predates this build and a dry run must not migrate it; run --evaluate to upgrade it)."];
+  }
+}
+
+/**
  * Concise human-readable `--dry-run` text report, one `writeLine` call
  * (embedded newlines), mirroring `dryRunJsonLine`'s data. Every existing
  * line's wording stays byte-for-byte unchanged (a cold dry run's full text
- * report is therefore identical to this report's output before Phase 5,
- * task P5-5); a "Cache hits" line is appended right after "Initial Jev
- * calls" only when `estimate.cacheHits` is present — purely additive, never
- * printed for a cold dry run with no store to consult.
+ * report before this disclosure existed had no cache-related line at all,
+ * which the report now replaces with an explicit "not consulted" line — the
+ * one intentional behavior change this task makes to the text report). A
+ * "Cache hits" line is appended right after "Initial Jev calls" only when
+ * `estimate.cacheHits` is present — unchanged from before, purely additive,
+ * and this is the ONLY disclosure printed when the cache WAS consulted (per
+ * this task's own scope: "the report keeps saying so as it does today").
+ * Otherwise, `cacheNotConsultedLines` appends the "why not" line in that
+ * same position when a reason is known.
  */
 function dryRunTextReport(rootDir: string, estimate: DryRunEstimate): string {
   const { skipped } = estimate;
@@ -317,6 +354,7 @@ function dryRunTextReport(rootDir: string, estimate: DryRunEstimate): string {
     `Skipped: ${skipped.total} (skip: ${skipped.byReason.skip}, todo: ${skipped.byReason.todo}, evidence-unavailable: ${skipped.byReason['evidence-unavailable']})`,
     `Initial Jev calls (one per evaluable test case, exact): ${estimate.initialCalls}`,
     ...(estimate.cacheHits === undefined ? [] : [`Cache hits (served from the local audit store, zero cost, exact): ${estimate.cacheHits}`]),
+    ...cacheNotConsultedLines(estimate.cacheNotConsultedReason),
     `Follow-up calls (possible range, exact bound): ${estimate.followUpCalls.min} - ${estimate.followUpCalls.max}`,
     `Evidence bytes (canonical, evaluable bundles only, exact): ${estimate.evidenceBytes}`,
     `Request bytes (canonical, real state + rubric questions, evaluable requests only, exact): ${estimate.requestBytes}`,
@@ -725,12 +763,25 @@ export async function runCli(
   // schema-incompatible or corrupt store surfaces the identical named, visible failure `--evaluate`
   // already reports (readable message, exit 1, no stack trace) — see that function's own doc for
   // why: a subsequent real `--evaluate` against the same file would refuse too.
+  //
+  // Orchestrator decision, 2026-09-20: `openSqliteAuditStoreForLookup`'s result also names WHY the
+  // cache was not consulted when it was not (`AuditStoreLookupResult`'s `reason`, an
+  // `estimateDryRun`-matching `DryRunCacheNotConsultedReason`) — threaded straight through to
+  // `estimateDryRun` below with no re-derivation, so the CLI is never a second place that could
+  // disagree with the adapter about why. Left `undefined` for the `dependencies.audit` test seam,
+  // which never attempts to open a store at all and therefore has no reason to report.
   let dryRunLookup: AuditStoreReadOnlyLookup | undefined;
+  let dryRunCacheNotConsultedReason: DryRunCacheNotConsultedReason | undefined;
   if (parsed.dryRun && dependencies.audit === undefined) {
     try {
-      dryRunLookup = await openSqliteAuditStoreForLookup({
+      const lookupResult = await openSqliteAuditStoreForLookup({
         databaseFile: configuration.store.databasePath ?? resolveAuditStorePaths().databaseFile,
       });
+      if (lookupResult.available) {
+        dryRunLookup = lookupResult.lookup;
+      } else {
+        dryRunCacheNotConsultedReason = lookupResult.reason;
+      }
     } catch (error) {
       if (error instanceof AuditStoreSchemaVersionError || error instanceof AuditStoreCorruptError) {
         io.writeLine(`Unable to open the audit store: ${error.message}`);
@@ -787,14 +838,15 @@ export async function runCli(
       // this dry run's billable count agrees with what a subsequent real `--evaluate` run over the
       // same fixture and store actually dispatches, by construction. With no store to consult
       // (the common case: none exists yet), `cacheHitTestCaseIds` stays `undefined` and
-      // `estimateDryRun` is called exactly as it always was — see that function's own doc for why
-      // this keeps a cold dry run's output byte-for-byte identical to before this task.
+      // `estimateDryRun` reports every evaluable test case as billable, exactly as it always did —
+      // see that function's own doc for why the underlying numbers stay byte-identical to before
+      // this task. `dryRunCacheNotConsultedReason` (orchestrator decision, 2026-09-20) is passed
+      // alongside it — `estimateDryRun` itself only ever reflects it when the cache was NOT
+      // consulted, so passing it unconditionally here is safe.
       const cacheHitTestCaseIds = dryRunLookup === undefined
         ? undefined
         : await computeDryRunCacheHits(result.files, result.sourceTextByPath ?? new Map(), createAuditCacheKeyPort(), dryRunLookup.lookup);
-      const estimate = cacheHitTestCaseIds === undefined
-        ? estimateDryRun(JEV_ESTIMATE_SNAPSHOT, result.files)
-        : estimateDryRun(JEV_ESTIMATE_SNAPSHOT, result.files, RUBRIC_V2, cacheHitTestCaseIds);
+      const estimate = estimateDryRun(JEV_ESTIMATE_SNAPSHOT, result.files, RUBRIC_V2, cacheHitTestCaseIds, dryRunCacheNotConsultedReason);
       io.writeLine(parsed.json ? dryRunJsonLine(result.rootDir, estimate) : dryRunTextReport(result.rootDir, estimate));
       return 0;
     }

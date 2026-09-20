@@ -458,7 +458,10 @@ describe('--dry-run --json', () => {
   it(
     'prints exactly one literal golden JSON line for the fixed golden audit result '
     + '(1 evaluable / 3 skipped [skip:1, todo:1, evidence-unavailable:1]; '
-    + 'tokens 5847..9356, follow-up max 9356, usd 0.000245574..0.000785904 — see test/estimate.test.ts for the arithmetic)',
+    + 'tokens 5847..9356, follow-up max 9356, usd 0.000245574..0.000785904 — see test/estimate.test.ts for the arithmetic). '
+    + 'This is the golden fixture the cache-consultation disclosure (orchestrator decision, 2026-09-20) deliberately '
+    + 'changes: cacheConsulted:false is now always present, right after initialCalls — the exact-match assertion below '
+    + 'was updated to include it rather than loosened to a substring match.',
     async () => {
       const output = captureOutput();
 
@@ -470,7 +473,7 @@ describe('--dry-run --json', () => {
         '{"dryRun":true,"reportingOnly":true,"rootDir":"/workspace","model":"jev-1.13.0","snapshotVersion":2,'
         + '"asOf":"2026-09-20","discovered":4,"evaluable":1,'
         + '"skipped":{"total":3,"byReason":{"skip":1,"todo":1,"evidence-unavailable":1}},'
-        + '"initialCalls":1,"followUpCalls":{"min":0,"max":1},"evidenceBytes":477,'
+        + '"initialCalls":1,"cacheConsulted":false,"followUpCalls":{"min":0,"max":1},"evidenceBytes":477,'
         + '"requestBytes":28068,"rubricBytesPerRequest":27701,'
         + '"estimatedInputTokens":{"min":5847,"max":9356},'
         + '"estimatedFollowUpInputTokens":{"min":0,"max":9356},'
@@ -1996,8 +1999,29 @@ describe('cache-aware --dry-run (Phase 5, task P5-5)', () => {
       expect(parsed['initialCalls']).toBe(2);
       // Not consulted (no store exists yet): cacheHits is omitted entirely, never present as 0.
       expect('cacheHits' in parsed).toBe(false);
+      // Explicit disclosure (orchestrator decision, 2026-09-20): cacheConsulted is always present,
+      // and the specific reason is named — never left to be inferred from the missing cacheHits key.
+      expect(parsed['cacheConsulted']).toBe(false);
+      expect(parsed['cacheNotConsultedReason']).toBe('no-store');
       await expect(access(storePaths.databaseFile)).rejects.toThrow();
       await expect(access(storePaths.configDir)).rejects.toThrow();
+    },
+  );
+
+  it(
+    'a cold dry run\'s human-readable text report plainly discloses that the cache was not consulted because '
+    + 'no store exists yet, and never prints a "Cache hits" line',
+    async () => {
+      const root = await fixture(twoTestFixtureFiles);
+      const output = captureOutput();
+
+      const exitCode = await runCli(['audit', '--rootDir', root, '--dry-run'], output.io);
+
+      expect(exitCode).toBe(0);
+      const report = output.lines[0] ?? '';
+      expect(report).toContain('not consulted');
+      expect(report).toContain('no audit store exists yet');
+      expect(report).not.toContain('Cache hits');
     },
   );
 
@@ -2036,11 +2060,16 @@ describe('cache-aware --dry-run (Phase 5, task P5-5)', () => {
       expect(parsed['evaluable']).toBe(3);
       expect(parsed['cacheHits']).toBe(2);
       expect(parsed['initialCalls']).toBe(1);
-      // Stable key order (required verification): `cacheHits` sits immediately after
-      // `initialCalls` — `dryRunJsonLine` builds its own object literal separately from
-      // `DryRunEstimate`'s own field order, so this is the one place a reordering there is caught.
+      // Explicit disclosure: consulted, and no "why not" reason since there is nothing to explain.
+      expect(parsed['cacheConsulted']).toBe(true);
+      expect('cacheNotConsultedReason' in parsed).toBe(false);
+      // Stable key order (required verification): `cacheConsulted` sits immediately after
+      // `initialCalls`, and `cacheHits` immediately after `cacheConsulted` — `dryRunJsonLine`
+      // builds its own object literal separately from `DryRunEstimate`'s own field order, so this
+      // is the one place a reordering there is caught.
       const keys = Object.keys(parsed);
-      expect(keys.indexOf('cacheHits')).toBe(keys.indexOf('initialCalls') + 1);
+      expect(keys.indexOf('cacheConsulted')).toBe(keys.indexOf('initialCalls') + 1);
+      expect(keys.indexOf('cacheHits')).toBe(keys.indexOf('cacheConsulted') + 1);
 
       const afterBytes = await readFile(storePaths.databaseFile);
       const afterHash = createHash('sha256').update(afterBytes).digest('hex');
@@ -2048,6 +2077,29 @@ describe('cache-aware --dry-run (Phase 5, task P5-5)', () => {
       expect(afterBytes.byteLength).toBe(beforeBytes.byteLength);
       const sidecarsAfter = [`${storePaths.databaseFile}-wal`, `${storePaths.databaseFile}-shm`].filter((path) => existsSync(path));
       expect(sidecarsAfter).toEqual(sidecarsBefore);
+    },
+  );
+
+  it(
+    'a warm dry run\'s human-readable text report keeps saying so exactly as it did before this disclosure existed '
+    + '(the existing "Cache hits" line already covers the consulted case) and prints no "not consulted" wording',
+    async () => {
+      const root = await fixture(twoTestFixtureFiles);
+
+      const evaluateCalls: string[] = [];
+      const warmUpExit = await runCli(['audit', '--rootDir', root, '--evaluate'], captureOutput().io, {
+        createEvaluationPort: () => deterministicEvaluationPort((name) => evaluateCalls.push(name)),
+      });
+      expect(warmUpExit).toBe(0);
+      expect(evaluateCalls).toEqual(['adds', 'subtracts']);
+
+      const output = captureOutput();
+      const exitCode = await runCli(['audit', '--rootDir', root, '--dry-run'], output.io);
+
+      expect(exitCode).toBe(0);
+      const report = output.lines[0] ?? '';
+      expect(report).toContain('Cache hits (served from the local audit store, zero cost, exact): 2');
+      expect(report).not.toContain('not consulted');
     },
   );
 
@@ -2099,6 +2151,54 @@ describe('cache-aware --dry-run (Phase 5, task P5-5)', () => {
     expect(output.lines).toHaveLength(1);
     expect(output.lines[0]).toContain('999');
   });
+
+  it(
+    'a store whose recorded schema predates this build (an older version, not corrupt or unrecognized) is honestly '
+    + 'reported as not consulted rather than migrated, silently treated as an all-miss cache, or refused as an error — '
+    + 'exit 0, every evaluable test case billable, and the store left byte-identical with no sidecar',
+    async () => {
+      const root = await fixture(twoTestFixtureFiles);
+      const storePaths = resolveAuditStorePaths();
+      await mkdir(storePaths.configDir, { recursive: true, mode: 0o700 });
+      const db = new DatabaseSync(storePaths.databaseFile);
+      db.exec('CREATE TABLE schema_meta (id INTEGER PRIMARY KEY CHECK (id = 1), schema_version INTEGER NOT NULL) STRICT;');
+      db.exec('INSERT INTO schema_meta (id, schema_version) VALUES (1, 1)');
+      db.close();
+
+      const beforeBytes = await readFile(storePaths.databaseFile);
+      const beforeHash = createHash('sha256').update(beforeBytes).digest('hex');
+
+      const jsonOutput = captureOutput();
+      const jsonExitCode = await runCli(['audit', '--rootDir', root, '--dry-run', '--json'], jsonOutput.io);
+
+      expect(jsonExitCode).toBe(0);
+      const parsed = JSON.parse(jsonOutput.lines[0]!) as Record<string, unknown>;
+      expect(parsed['evaluable']).toBe(2);
+      // Every evaluable test case is billable — identical to a cold dry run with no store at all.
+      expect(parsed['initialCalls']).toBe(2);
+      expect('cacheHits' in parsed).toBe(false);
+      expect(parsed['cacheConsulted']).toBe(false);
+      expect(parsed['cacheNotConsultedReason']).toBe('schema-outdated');
+
+      const textOutput = captureOutput();
+      const textExitCode = await runCli(['audit', '--rootDir', root, '--dry-run'], textOutput.io);
+      expect(textExitCode).toBe(0);
+      const report = textOutput.lines[0] ?? '';
+      expect(report).toContain('not consulted');
+      expect(report).toContain('predates this build');
+      expect(report).toContain('--evaluate');
+      expect(report).not.toContain('Cache hits');
+
+      // The read-only, no-write guarantee holds here too: an outdated store is never migrated,
+      // never written to, and no sidecar file appears, exactly like every other --dry-run path.
+      const afterBytes = await readFile(storePaths.databaseFile);
+      const afterHash = createHash('sha256').update(afterBytes).digest('hex');
+      expect(afterHash).toBe(beforeHash);
+      expect(afterBytes.byteLength).toBe(beforeBytes.byteLength);
+      await expect(access(`${storePaths.databaseFile}-wal`)).rejects.toThrow();
+      await expect(access(`${storePaths.databaseFile}-shm`)).rejects.toThrow();
+    },
+  );
 
   it('an audit with neither --evaluate nor --dry-run still creates no database file or config directory, exactly as before this task (P5-1\'s own guarantee, unaffected by P5-5)', async () => {
     const root = await fixture(twoTestFixtureFiles);
