@@ -1,10 +1,12 @@
-import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { runAudit } from '../src/application/audit.js';
 import { runCli, type CliIo } from '../src/cli/index.js';
 import { createJevEvaluationPort } from '../src/adapters/jev-evaluation-port.js';
+import { readStoredCredentials, resolveAuthStoragePaths, writeStoredCredentials } from '../src/adapters/auth-storage.js';
+import { AuthPromptCancelledError } from '../src/domain/auth.js';
 import type { AuditEvaluationPort, AuditFileResult, AuditPorts, AuditResult } from '../src/domain/audit.js';
 import { buildEvidenceBundle, DEFAULT_EVIDENCE_BUDGET, type EvidenceBundle } from '../src/domain/evidence.js';
 import { canonicalizeEvidenceBundle } from '../src/index.js';
@@ -16,6 +18,36 @@ const temporaryRoots: string[] = [];
 
 afterAll(async () => {
   await Promise.all(temporaryRoots.map((root) => rm(root, { force: true, recursive: true })));
+});
+
+/**
+ * Global safety net (Phase 4, task P4-5): every test in this file runs
+ * against a temp per-user config directory, never the real
+ * `~/.config`/`%APPDATA%`. Without this, any test that reaches the
+ * production `--evaluate`/`auth` code paths (most do not override
+ * `createEvaluationPort`) would resolve real on-host storage paths — a
+ * developer's own stored TypeSafe key would then silently change test
+ * behavior. `XDG_CONFIG_HOME` and `APPDATA` are both set so this holds on
+ * every platform regardless of which one a given test run honors.
+ */
+let originalXdgConfigHome: string | undefined;
+let originalAppData: string | undefined;
+let globalTestConfigHome: string;
+
+beforeAll(async () => {
+  globalTestConfigHome = await mkdtemp(join(tmpdir(), 'jev-cli-auth-config-'));
+  originalXdgConfigHome = process.env['XDG_CONFIG_HOME'];
+  originalAppData = process.env['APPDATA'];
+  process.env['XDG_CONFIG_HOME'] = globalTestConfigHome;
+  process.env['APPDATA'] = globalTestConfigHome;
+});
+
+afterAll(async () => {
+  if (originalXdgConfigHome === undefined) delete process.env['XDG_CONFIG_HOME'];
+  else process.env['XDG_CONFIG_HOME'] = originalXdgConfigHome;
+  if (originalAppData === undefined) delete process.env['APPDATA'];
+  else process.env['APPDATA'] = originalAppData;
+  await rm(globalTestConfigHome, { recursive: true, force: true });
 });
 
 async function fixture(files: Readonly<Record<string, string>>): Promise<string> {
@@ -625,6 +657,7 @@ describe('--evaluate', () => {
       expect(exitCode).toBe(1);
       expect(output.lines[0]).toContain('--evaluate');
       expect(output.lines[0]).toContain('TYPESAFE_API_KEY');
+      expect(output.lines[0]).toContain('auth login');
       expect(fetchSpy).not.toHaveBeenCalled();
     });
 
@@ -635,7 +668,39 @@ describe('--evaluate', () => {
 
       expect(exitCode).toBe(1);
       expect(output.lines[0]).toContain('TYPESAFE_API_KEY');
+      expect(output.lines[0]).toContain('auth login');
       expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it('uses the locally stored key when TYPESAFE_API_KEY is unset, constructing the gateway and attempting a request', async () => {
+      const isolatedConfigHome = await mkdtemp(join(tmpdir(), 'jev-cli-auth-isolated-'));
+      temporaryRoots.push(isolatedConfigHome);
+      const savedXdg = process.env['XDG_CONFIG_HOME'];
+      const savedAppData = process.env['APPDATA'];
+      process.env['XDG_CONFIG_HOME'] = isolatedConfigHome;
+      process.env['APPDATA'] = isolatedConfigHome;
+      const evaluateFetchSpy = vi.fn(async () => new Response(JSON.stringify({
+        model: 'jev-1.13.0', answers: {}, usage: { input_tokens: 0, output_tokens: 0 },
+      }), { status: 200 }));
+      globalThis.fetch = evaluateFetchSpy as unknown as typeof fetch;
+
+      try {
+        const paths = resolveAuthStoragePaths();
+        await writeStoredCredentials(paths, 'stored-secret-key');
+        const output = captureOutput();
+
+        const exitCode = await runCli(['audit', '--evaluate'], output.io);
+
+        expect(exitCode).toBe(0);
+        expect(evaluateFetchSpy).toHaveBeenCalled();
+        const [, requestInit] = evaluateFetchSpy.mock.calls[0] as unknown as [string, RequestInit];
+        const headers = requestInit.headers as Record<string, string>;
+        expect(headers['Authorization']).toBe('Bearer stored-secret-key');
+        expect(output.lines.join('\n')).not.toContain('stored-secret-key');
+      } finally {
+        if (savedXdg === undefined) delete process.env['XDG_CONFIG_HOME']; else process.env['XDG_CONFIG_HOME'] = savedXdg;
+        if (savedAppData === undefined) delete process.env['APPDATA']; else process.env['APPDATA'] = savedAppData;
+      }
     });
 
     it('never constructs or touches the network for a plain audit (no --evaluate) even though a key is missing', async () => {
@@ -1138,5 +1203,213 @@ describe('--evaluate', () => {
       expect(report).toContain('Evaluated: 0');
       expect(report).toContain('Failed: 0');
     });
+  });
+});
+
+/** Isolates XDG_CONFIG_HOME/APPDATA to a fresh temp directory for one test, restoring on cleanup. Layered on top of this file's global override so every `auth`/storage-touching test gets its own clean slate. */
+function useIsolatedConfigHome(): void {
+  let configHome: string;
+  let savedXdg: string | undefined;
+  let savedAppData: string | undefined;
+
+  beforeEach(async () => {
+    configHome = await mkdtemp(join(tmpdir(), 'jev-cli-auth-isolated-'));
+    savedXdg = process.env['XDG_CONFIG_HOME'];
+    savedAppData = process.env['APPDATA'];
+    process.env['XDG_CONFIG_HOME'] = configHome;
+    process.env['APPDATA'] = configHome;
+  });
+
+  afterEach(async () => {
+    if (savedXdg === undefined) delete process.env['XDG_CONFIG_HOME']; else process.env['XDG_CONFIG_HOME'] = savedXdg;
+    if (savedAppData === undefined) delete process.env['APPDATA']; else process.env['APPDATA'] = savedAppData;
+    await rm(configHome, { recursive: true, force: true });
+  });
+}
+
+function fakePromptOnce(value: string): () => Promise<string> {
+  return async () => value;
+}
+
+function fakePromptRejecting(error: unknown): () => Promise<string> {
+  return async () => { throw error; };
+}
+
+const CANARY_KEY = 'sk-canary-9999-do-not-print';
+
+describe('auth login', () => {
+  useIsolatedConfigHome();
+
+  it('stores a key read from the prompt, writes the credentials file, and never echoes the key', async () => {
+    const output = captureOutput();
+
+    const exitCode = await runCli(['auth', 'login'], output.io, { readApiKeyFromPrompt: fakePromptOnce(CANARY_KEY) });
+
+    expect(exitCode).toBe(0);
+    const paths = resolveAuthStoragePaths();
+    await expect(readStoredCredentials(paths)).resolves.toEqual({ version: 1, apiKey: CANARY_KEY });
+    expect(output.lines.join('\n')).not.toContain(CANARY_KEY);
+    expect(output.lines.join('\n')).toContain(paths.credentialsFile);
+  });
+
+  it('rejects a blank/whitespace-only key and writes nothing', async () => {
+    const output = captureOutput();
+
+    const exitCode = await runCli(['auth', 'login'], output.io, { readApiKeyFromPrompt: fakePromptOnce('   ') });
+
+    expect(exitCode).toBe(1);
+    expect(output.lines.join('\n')).toContain('No API key was entered');
+    const paths = resolveAuthStoragePaths();
+    await expect(readStoredCredentials(paths)).resolves.toBeUndefined();
+  });
+
+  it('reports cancellation (Ctrl+C) without writing anything', async () => {
+    const output = captureOutput();
+
+    const exitCode = await runCli(['auth', 'login'], output.io, {
+      readApiKeyFromPrompt: fakePromptRejecting(new AuthPromptCancelledError()),
+    });
+
+    expect(exitCode).toBe(1);
+    expect(output.lines.join('\n')).toContain('cancelled');
+    const paths = resolveAuthStoragePaths();
+    await expect(readStoredCredentials(paths)).resolves.toBeUndefined();
+  });
+
+  it('rejects the key when passed as a CLI argument, and never echoes it back', async () => {
+    const output = captureOutput();
+
+    const exitCode = await runCli(['auth', 'login', CANARY_KEY], output.io, {
+      readApiKeyFromPrompt: () => { throw new Error('must not prompt when an argument was rejected'); },
+    });
+
+    expect(exitCode).toBe(1);
+    expect(output.lines.join('\n')).not.toContain(CANARY_KEY);
+    expect(output.lines.join('\n')).toContain('does not accept the API key as an argument');
+    const paths = resolveAuthStoragePaths();
+    await expect(readStoredCredentials(paths)).resolves.toBeUndefined();
+  });
+});
+
+describe('auth status', () => {
+  useIsolatedConfigHome();
+  let savedKey: string | undefined;
+
+  beforeEach(() => {
+    savedKey = process.env['TYPESAFE_API_KEY'];
+    delete process.env['TYPESAFE_API_KEY'];
+  });
+
+  afterEach(() => {
+    if (savedKey === undefined) delete process.env['TYPESAFE_API_KEY']; else process.env['TYPESAFE_API_KEY'] = savedKey;
+  });
+
+  it('reports not configured when nothing is set anywhere', async () => {
+    const output = captureOutput();
+
+    const exitCode = await runCli(['auth', 'status'], output.io);
+
+    expect(exitCode).toBe(0);
+    const report = output.lines.join('\n');
+    expect(report).toContain('not configured');
+    expect(report).toContain('does not exist');
+    expect(report).toContain('auth login');
+  });
+
+  it('reports configured (source: environment) when TYPESAFE_API_KEY is set, and never prints the key', async () => {
+    process.env['TYPESAFE_API_KEY'] = CANARY_KEY;
+    const output = captureOutput();
+
+    const exitCode = await runCli(['auth', 'status'], output.io);
+
+    expect(exitCode).toBe(0);
+    const report = output.lines.join('\n');
+    expect(report).toContain('configured (source: environment)');
+    expect(report).not.toContain(CANARY_KEY);
+    expect(report).not.toContain(CANARY_KEY.slice(-4));
+  });
+
+  it('reports configured (source: stored) when only the stored file has a key', async () => {
+    const paths = resolveAuthStoragePaths();
+    await writeStoredCredentials(paths, CANARY_KEY);
+    const output = captureOutput();
+
+    const exitCode = await runCli(['auth', 'status'], output.io);
+
+    expect(exitCode).toBe(0);
+    const report = output.lines.join('\n');
+    expect(report).toContain('configured (source: stored)');
+    expect(report).toContain('owner-only permissions: yes');
+    expect(report).not.toContain(CANARY_KEY);
+    expect(report).not.toContain(CANARY_KEY.slice(-4));
+  });
+
+  it.skipIf(process.platform === 'win32')('reports an insecure stored file and does not silently treat it as usable', async () => {
+    const paths = resolveAuthStoragePaths();
+    await writeStoredCredentials(paths, CANARY_KEY);
+    await chmod(paths.credentialsFile, 0o644);
+    const output = captureOutput();
+
+    const exitCode = await runCli(['auth', 'status'], output.io);
+
+    expect(exitCode).toBe(0);
+    const report = output.lines.join('\n');
+    expect(report).toContain('not configured');
+    expect(report).toContain('insecure permissions');
+    expect(report).not.toContain(CANARY_KEY);
+    expect(report).not.toContain(CANARY_KEY.slice(-4));
+  });
+
+  it('reports a corrupt stored file without crashing', async () => {
+    const paths = resolveAuthStoragePaths();
+    await mkdir(paths.configDir, { recursive: true, mode: 0o700 });
+    await writeFile(paths.credentialsFile, 'not json', { mode: 0o600 });
+    const output = captureOutput();
+
+    const exitCode = await runCli(['auth', 'status'], output.io);
+
+    expect(exitCode).toBe(0);
+    expect(output.lines.join('\n')).toContain('corrupt');
+  });
+});
+
+describe('auth logout', () => {
+  useIsolatedConfigHome();
+
+  it('deletes an existing stored key and reports success', async () => {
+    const paths = resolveAuthStoragePaths();
+    await writeStoredCredentials(paths, CANARY_KEY);
+    const output = captureOutput();
+
+    const exitCode = await runCli(['auth', 'logout'], output.io);
+
+    expect(exitCode).toBe(0);
+    expect(output.lines.join('\n')).toContain('deleted');
+    expect(output.lines.join('\n')).not.toContain(CANARY_KEY);
+    await expect(readStoredCredentials(paths)).resolves.toBeUndefined();
+  });
+
+  it('reports honestly when nothing was stored, and still exits 0', async () => {
+    const output = captureOutput();
+
+    const exitCode = await runCli(['auth', 'logout'], output.io);
+
+    expect(exitCode).toBe(0);
+    expect(output.lines.join('\n')).toContain('nothing to delete');
+  });
+});
+
+describe('--help documents auth commands', () => {
+  it('lists auth login, auth status, and auth logout', async () => {
+    const output = captureOutput();
+
+    await runCli(['--help'], output.io);
+
+    const help = output.lines.join('\n');
+    expect(help).toContain('auth login');
+    expect(help).toContain('auth status');
+    expect(help).toContain('auth logout');
+    expect(help).toContain('stdin is a TTY');
+    expect(help).toContain('command-line argument');
   });
 });

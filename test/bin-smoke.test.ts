@@ -52,6 +52,18 @@ function installedBinRun(binPath: string, args: readonly string[], cwd: string):
   return { status: result.status, stdout: result.stdout };
 }
 
+/** Like {@link installedBinRun}, but feeds `input` on the child's stdin as a non-TTY pipe — used to drive `auth login`, which reads one trimmed line when stdin is not a TTY. */
+function installedBinRunWithInput(
+  binPath: string,
+  args: readonly string[],
+  cwd: string,
+  input: string,
+): { readonly status: number | null; readonly stdout: string } {
+  const invocation = installedBinInvocation(binPath, args);
+  const result = spawnSync(invocation.command, [...invocation.args], { cwd, encoding: 'utf8', input });
+  return { status: result.status, stdout: result.stdout };
+}
+
 function npmCommand(): string {
   return process.platform === 'win32' ? 'npm.cmd' : 'npm';
 }
@@ -86,6 +98,10 @@ describe('package metadata', () => {
 });
 
 describe('packed installed package', () => {
+  // Real `npm run build`/`npm pack`/`npm install` plus a growing set of installed-binary
+  // invocations (Phase 4, task P4-5 added the `auth` round trip on top of the existing audit/
+  // dry-run/evaluate coverage) comfortably exceed Vitest's 5s default under load, especially when
+  // this file runs alongside the rest of the suite — hence the explicit longer timeout below.
   it('runs the real packed API and binary against a fixture without executing source', async () => {
     execFileSync(npmCommand(), ['run', 'build'], {
       cwd: process.cwd(),
@@ -279,11 +295,21 @@ describe('packed installed package', () => {
       await expect(access(join(fixtureRoot, 'executed.marker'))).rejects.toThrow();
 
       // Offline default and --evaluate's key requirement, run through the installed binary itself
-      // (Phase 4, task P4-4). TYPESAFE_API_KEY is deleted from THIS process before spawning so the
-      // child, which inherits process.env by default, never sees a real key — a missed delete here
-      // would risk a real billed network call from this suite.
+      // (Phase 4, task P4-4/P4-5). TYPESAFE_API_KEY is deleted from THIS process before spawning so
+      // the child, which inherits process.env by default, never sees a real key — a missed delete
+      // here would risk a real billed network call from this suite. XDG_CONFIG_HOME/APPDATA are
+      // also overridden to a fresh temp directory (`authConfigHome`) for the same reason applied to
+      // the new per-user credentials file (P4-5): the packed binary must never read or write the
+      // real `~/.config`/`%APPDATA%` during a test run, whether or not a real stored key happens to
+      // exist there on the machine running the suite.
       const savedKey = process.env['TYPESAFE_API_KEY'];
+      const savedXdgConfigHome = process.env['XDG_CONFIG_HOME'];
+      const savedAppData = process.env['APPDATA'];
+      const authConfigHome = join(temporaryRoot, 'auth-config-home');
+      await mkdir(authConfigHome, { recursive: true });
       delete process.env['TYPESAFE_API_KEY'];
+      process.env['XDG_CONFIG_HOME'] = authConfigHome;
+      process.env['APPDATA'] = authConfigHome;
       try {
         const plainAudit = execInstalledBin(binPath, ['audit'], fixtureRoot);
         expect(JSON.parse(plainAudit.trim().split(/\r?\n/u)[0] ?? '')).toMatchObject({ reportingOnly: true });
@@ -292,16 +318,53 @@ describe('packed installed package', () => {
         expect(evaluateWithoutKey.status).toBe(1);
         expect(evaluateWithoutKey.stdout).toContain('--evaluate');
         expect(evaluateWithoutKey.stdout).toContain('TYPESAFE_API_KEY');
+        expect(evaluateWithoutKey.stdout).toContain('auth login');
 
         const evaluateJsonWithoutKey = installedBinRun(binPath, ['audit', '--evaluate', '--json'], fixtureRoot);
         expect(evaluateJsonWithoutKey.status).toBe(1);
         expect(evaluateJsonWithoutKey.stdout).toContain('TYPESAFE_API_KEY');
+
+        // `auth --help` / `auth status` on the packed, installed binary (Phase 4, task P4-5):
+        // exits 0 and never prints a secret. `XDG_CONFIG_HOME`/`APPDATA` above are the documented
+        // injected-temp-config-dir override — the same standard variables `auth login`/`status`/
+        // `logout` themselves resolve storage paths from, so no separate ad hoc test-only env var
+        // was needed.
+        const authHelp = execInstalledBin(binPath, ['--help'], fixtureRoot);
+        expect(authHelp).toContain('auth login');
+        expect(authHelp).toContain('auth status');
+        expect(authHelp).toContain('auth logout');
+
+        const statusBeforeLogin = installedBinRun(binPath, ['auth', 'status'], fixtureRoot);
+        expect(statusBeforeLogin.status).toBe(0);
+        expect(statusBeforeLogin.stdout).toContain('not configured');
+
+        // `auth login` reads one trimmed line when stdin is not a TTY (piped here), so this exercises
+        // the full store round trip through the packed binary without an interactive terminal.
+        const canaryKey = 'sk-packed-smoke-canary-key';
+        const login = installedBinRunWithInput(binPath, ['auth', 'login'], fixtureRoot, `${canaryKey}\n`);
+        expect(login.status).toBe(0);
+        expect(login.stdout).not.toContain(canaryKey);
+
+        const statusAfterLogin = installedBinRun(binPath, ['auth', 'status'], fixtureRoot);
+        expect(statusAfterLogin.status).toBe(0);
+        expect(statusAfterLogin.stdout).toContain('configured (source: stored)');
+        expect(statusAfterLogin.stdout).not.toContain(canaryKey);
+
+        const logout = installedBinRun(binPath, ['auth', 'logout'], fixtureRoot);
+        expect(logout.status).toBe(0);
+        expect(logout.stdout).toContain('deleted');
+
+        const statusAfterLogout = installedBinRun(binPath, ['auth', 'status'], fixtureRoot);
+        expect(statusAfterLogout.status).toBe(0);
+        expect(statusAfterLogout.stdout).toContain('not configured');
       } finally {
         if (savedKey === undefined) delete process.env['TYPESAFE_API_KEY']; else process.env['TYPESAFE_API_KEY'] = savedKey;
+        if (savedXdgConfigHome === undefined) delete process.env['XDG_CONFIG_HOME']; else process.env['XDG_CONFIG_HOME'] = savedXdgConfigHome;
+        if (savedAppData === undefined) delete process.env['APPDATA']; else process.env['APPDATA'] = savedAppData;
       }
       await expect(access(join(fixtureRoot, 'executed.marker'))).rejects.toThrow();
     } finally {
       await rm(temporaryRoot, { recursive: true, force: true });
     }
-  });
+  }, 60_000);
 });

@@ -9,6 +9,21 @@ import { extractTestCases } from '../adapters/test-extraction.js';
 import { createAuditEvidencePort } from '../adapters/evidence-audit-port.js';
 import { createJevEvaluationPort } from '../adapters/jev-evaluation-port.js';
 import { createJevHttpGateway } from '../adapters/jev-http-gateway.js';
+import { readApiKeyFromPrompt } from '../adapters/auth-prompt.js';
+import {
+  deleteStoredCredentials,
+  readStoredCredentials,
+  resolveAuthStoragePaths,
+  statStoredCredentialsFile,
+  writeStoredCredentials,
+} from '../adapters/auth-storage.js';
+import {
+  AuthCorruptCredentialsError,
+  AuthInsecurePermissionsError,
+  AuthPromptCancelledError,
+  resolveApiKey,
+  type StoredCredentials,
+} from '../domain/auth.js';
 import { canonicalizeEvidenceBundle, type EvidenceBundle } from '../domain/evidence.js';
 import { estimateDryRun, JEV_ESTIMATE_SNAPSHOT, type DryRunEstimate } from '../domain/estimate.js';
 import { JevConfigurationError } from '../domain/jev-gateway.js';
@@ -34,22 +49,42 @@ export interface CliDependencies {
    * Test seam only: overrides how the `--evaluate` evaluation port is
    * constructed. Only consulted when `dependencies.audit` is not provided
    * (the real `runAudit` pipeline path) — production always uses the
-   * default, which constructs a real `createJevHttpGateway()` (eager API
-   * key validation) wrapped by `createJevEvaluationPort`. A thrown
-   * `JevConfigurationError` here is handled exactly like the production
-   * path: a usage error, exit 1, no network ever attempted.
+   * default, which resolves an API key (`TYPESAFE_API_KEY`, else the
+   * locally stored file — see `resolveEvaluationApiKey` below) and
+   * constructs a real `createJevHttpGateway({ apiKey })` wrapped by
+   * `createJevEvaluationPort`. A thrown `JevConfigurationError` here is
+   * handled exactly like the production path: a usage error, exit 1, no
+   * network ever attempted.
    */
-  readonly createEvaluationPort?: () => AuditEvaluationPort;
+  readonly createEvaluationPort?: () => AuditEvaluationPort | Promise<AuditEvaluationPort>;
+  /**
+   * Test seam only, consulted by `auth login`: overrides how the API key is
+   * read from the terminal. Production default (`readApiKeyFromPrompt`)
+   * reads `process.stdin`/`process.stdout` directly — hidden input on a
+   * real TTY, one trimmed line otherwise.
+   */
+  readonly readApiKeyFromPrompt?: () => Promise<string>;
 }
 
 const HELP = `jev-test-auditor — inspect semantic test quality
 
 Usage:
   jev-test-auditor audit [options]
+  jev-test-auditor auth <login|status|logout>
   jev-test-auditor --help
 
 Commands:
-  audit       Discover and extract test understanding without executing project code
+  audit         Discover and extract test understanding without executing project code
+  auth login    Store a TypeSafe API key locally for this tool. Reads from an interactive,
+                no-echo prompt when stdin is a TTY; reads one trimmed line from stdin
+                otherwise (so automation/CI can pipe a key in). NEVER accepts the key as a
+                command-line argument — that would leak it into shell history and the
+                process list.
+  auth status   Report whether a TypeSafe API key is available, which source would win
+                (environment or stored file), and the stored file's path and permissions.
+                Never prints the key itself.
+  auth logout   Delete the locally stored TypeSafe API key, if any, and report honestly
+                whether one existed.
 
 Options:
   --rootDir <path>   Audit a configured repository root
@@ -67,9 +102,12 @@ Options:
                       --inspect-payloads or --evaluate.
   --evaluate         Opt-in only: sends every evaluable test case's local evidence bundle to
                       TypeSafe's Jev model for real judgment (costs money; nothing is sent without
-                      this flag). Requires the TYPESAFE_API_KEY environment variable — its absence
-                      is a usage error (exit 1, no network attempted). Prints a terminal evaluation
-                      summary (status counts, skipped-by-reason, failed, total usage input tokens,
+                      this flag). Requires a TypeSafe API key from the TYPESAFE_API_KEY
+                      environment variable (checked first, so CI keeps injecting GitHub secrets)
+                      or from 'jev-test-auditor auth login'; having neither is a usage error
+                      (exit 1, no network attempted) that names both ways to provide one. Prints
+                      a terminal evaluation summary (status counts, skipped-by-reason, failed,
+                      total usage input tokens,
                       and the responded model id) instead of the normal summary. Thresholds are
                       provisional and uncalibrated; see README.md. Cannot be combined with
                       --dry-run or --inspect-payloads.
@@ -334,6 +372,150 @@ function parseAuditOptions(args: readonly string[]): ParsedAuditOptions | { read
   return { overrides, inspectPayloads, dryRun, evaluate, json };
 }
 
+const NO_KEY_USAGE_MESSAGE = 'No TypeSafe API key is configured. Provide one with `jev-test-auditor auth login`, or set the TYPESAFE_API_KEY environment variable.';
+
+/**
+ * Resolves the API key `--evaluate` should use: `TYPESAFE_API_KEY` first
+ * (checked without ever touching the stored file, so CI's env-only setup
+ * never pays for or risks a stored-file read), else the locally stored
+ * file. A storage-side problem (insecure permissions, corrupt file) is
+ * itself reported as the usage error rather than silently treated as "no
+ * key" — a stray unusable stored file is a real, actionable problem, not
+ * nothing.
+ */
+async function resolveEvaluationApiKey(): Promise<{ readonly apiKey: string } | { readonly errorMessage: string }> {
+  const environmentApiKey = process.env['TYPESAFE_API_KEY']?.trim() ?? '';
+  if (environmentApiKey.length > 0) return { apiKey: environmentApiKey };
+
+  const paths = resolveAuthStoragePaths();
+  try {
+    const stored = await readStoredCredentials(paths);
+    const resolution = resolveApiKey({ environmentApiKey: undefined, stored });
+    return resolution === undefined ? { errorMessage: NO_KEY_USAGE_MESSAGE } : { apiKey: resolution.apiKey };
+  } catch (error) {
+    if (error instanceof AuthInsecurePermissionsError || error instanceof AuthCorruptCredentialsError) {
+      return { errorMessage: error.message };
+    }
+    throw error;
+  }
+}
+
+async function runAuthLogin(io: CliIo, dependencies: CliDependencies): Promise<number> {
+  io.writeLine('Enter your TypeSafe API key. Input is hidden on an interactive terminal; otherwise one line is read from stdin.');
+
+  const readKey = dependencies.readApiKeyFromPrompt ?? (() => readApiKeyFromPrompt());
+  let rawKey: string;
+  try {
+    rawKey = await readKey();
+  } catch (error) {
+    if (error instanceof AuthPromptCancelledError) {
+      io.writeLine(error.message);
+      return 1;
+    }
+    throw error;
+  }
+
+  const apiKey = rawKey.trim();
+  if (apiKey.length === 0) {
+    io.writeLine('No API key was entered. Nothing was stored.');
+    return 1;
+  }
+
+  const paths = resolveAuthStoragePaths();
+  await writeStoredCredentials(paths, apiKey);
+  io.writeLine(`TypeSafe API key stored at ${paths.credentialsFile}.`);
+  return 0;
+}
+
+/**
+ * Never reads the stored file's content when an environment key is already
+ * present: `status` only needs to know a key is *available*, and skipping
+ * the read keeps a plaintext key out of memory whenever it does not
+ * matter. The file's existence and permission bits are still always
+ * reported (via `statStoredCredentialsFile`, which never reads content)
+ * regardless of which source would actually be used.
+ */
+async function runAuthStatus(io: CliIo): Promise<number> {
+  const paths = resolveAuthStoragePaths();
+  const fileStatus = await statStoredCredentialsFile(paths);
+  const environmentApiKey = process.env['TYPESAFE_API_KEY']?.trim() ?? '';
+
+  let stored: StoredCredentials | undefined;
+  let storedProblem: 'insecure-permissions' | 'corrupt' | undefined;
+  if (environmentApiKey.length === 0) {
+    try {
+      stored = await readStoredCredentials(paths);
+    } catch (error) {
+      if (error instanceof AuthInsecurePermissionsError) storedProblem = 'insecure-permissions';
+      else if (error instanceof AuthCorruptCredentialsError) storedProblem = 'corrupt';
+      else throw error;
+    }
+  }
+
+  const resolution = resolveApiKey({ environmentApiKey: environmentApiKey.length > 0 ? environmentApiKey : undefined, stored });
+  const lines = [
+    resolution === undefined
+      ? 'TypeSafe API key: not configured'
+      : `TypeSafe API key: configured (source: ${resolution.source})`,
+  ];
+
+  if (!fileStatus.permissionsEnforced) {
+    lines.push(
+      fileStatus.exists
+        ? `Stored credentials file: ${paths.credentialsFile} (exists; note: file permissions are not enforced by this tool on Windows)`
+        : `Stored credentials file: ${paths.credentialsFile} (does not exist)`,
+    );
+  } else if (!fileStatus.exists) {
+    lines.push(`Stored credentials file: ${paths.credentialsFile} (does not exist)`);
+  } else if (storedProblem === 'insecure-permissions' || fileStatus.ownerOnly === false) {
+    lines.push(
+      `Stored credentials file: ${paths.credentialsFile} (exists; insecure permissions — fix with \`chmod 600 ${paths.credentialsFile}\`, or run \`auth login\` again to recreate it)`,
+    );
+  } else if (storedProblem === 'corrupt') {
+    lines.push(`Stored credentials file: ${paths.credentialsFile} (exists; corrupt or unrecognized format — run \`auth login\` again to overwrite it)`);
+  } else {
+    lines.push(`Stored credentials file: ${paths.credentialsFile} (exists; owner-only permissions: yes)`);
+  }
+
+  if (resolution === undefined) lines.push(NO_KEY_USAGE_MESSAGE);
+  io.writeLine(lines.join('\n'));
+  return 0;
+}
+
+async function runAuthLogout(io: CliIo): Promise<number> {
+  const paths = resolveAuthStoragePaths();
+  const existed = await deleteStoredCredentials(paths);
+  io.writeLine(
+    existed
+      ? `Stored TypeSafe API key deleted from ${paths.credentialsFile}.`
+      : `No stored TypeSafe API key was found at ${paths.credentialsFile}; nothing to delete.`,
+  );
+  return 0;
+}
+
+async function runAuthCommand(args: readonly string[], io: CliIo, dependencies: CliDependencies): Promise<number> {
+  const subcommand = args[0];
+  if (subcommand === undefined) {
+    io.writeLine('Usage: jev-test-auditor auth <login|status|logout>');
+    return 1;
+  }
+  if (subcommand === 'login') {
+    if (args.length > 1) {
+      io.writeLine(
+        'auth login does not accept the API key as an argument (it would be saved in shell history and visible in '
+        + 'the process list). Run `jev-test-auditor auth login` with no arguments and enter the key at the prompt, '
+        + 'or pipe it on stdin.',
+      );
+      return 1;
+    }
+    return runAuthLogin(io, dependencies);
+  }
+  if (subcommand === 'status') return runAuthStatus(io);
+  if (subcommand === 'logout') return runAuthLogout(io);
+  io.writeLine(`Unknown auth command: ${subcommand}`);
+  return 1;
+}
+
 export async function runCli(
   args: readonly string[],
   io: CliIo,
@@ -342,6 +524,10 @@ export async function runCli(
   if (args.includes('--help') || args.length === 0) {
     io.writeLine(HELP);
     return 0;
+  }
+
+  if (args[0] === 'auth') {
+    return runAuthCommand(args.slice(1), io, dependencies);
   }
 
   if (args[0] !== 'audit') {
@@ -362,9 +548,13 @@ export async function runCli(
   let evaluationPort: AuditEvaluationPort | undefined;
   if (parsed.evaluate && dependencies.audit === undefined) {
     const buildEvaluationPort = dependencies.createEvaluationPort
-      ?? ((): AuditEvaluationPort => createJevEvaluationPort(createJevHttpGateway()));
+      ?? (async (): Promise<AuditEvaluationPort> => {
+        const resolved = await resolveEvaluationApiKey();
+        if ('errorMessage' in resolved) throw new JevConfigurationError(resolved.errorMessage);
+        return createJevEvaluationPort(createJevHttpGateway({ apiKey: resolved.apiKey }));
+      });
     try {
-      evaluationPort = buildEvaluationPort();
+      evaluationPort = await buildEvaluationPort();
     } catch (error) {
       if (error instanceof JevConfigurationError) {
         io.writeLine(`--evaluate requires a TypeSafe API key: ${error.message}`);

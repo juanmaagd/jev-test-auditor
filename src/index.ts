@@ -183,6 +183,39 @@ export {
 export { createJevEvaluationPort } from './adapters/jev-evaluation-port.js';
 
 export {
+  AUTH_CREDENTIALS_VERSION,
+  AuthBlankKeyError,
+  AuthCorruptCredentialsError,
+  AuthInsecurePermissionsError,
+  AuthPromptCancelledError,
+  resolveApiKey,
+  type ApiKeyResolution,
+  type ApiKeySource,
+  type AuthStorageError,
+  type AuthStorageErrorCode,
+  type ResolveApiKeyInput,
+  type StoredCredentials,
+} from './domain/auth.js';
+export {
+  deleteStoredCredentials,
+  readStoredCredentials,
+  resolveAuthStoragePaths,
+  statStoredCredentialsFile,
+  writeStoredCredentials,
+  type AuthStorageEnvironment,
+  type AuthStorageFsOps,
+  type AuthStorageOptions,
+  type AuthStoragePaths,
+  type StoredCredentialsFileStatus,
+} from './adapters/auth-storage.js';
+export {
+  readApiKeyFromPrompt,
+  type AuthPromptReadable,
+  type AuthPromptStreams,
+  type AuthPromptWritable,
+} from './adapters/auth-prompt.js';
+
+export {
   CLASSIFICATION_LEVELS,
   CLASSIFICATION_POLICY_V1,
   classifyEvaluation,

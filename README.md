@@ -22,6 +22,7 @@ The final command prints one deterministic reporting-only JSON summary. It does 
 
 ```text
 jev-test-auditor audit [options]
+jev-test-auditor auth <login|status|logout>
 jev-test-auditor --help
 ```
 
@@ -36,15 +37,35 @@ jev-test-auditor --help
 | `audit --evaluate` | Opt-in only. Sends every evaluable test case's local evidence bundle to TypeSafe's Jev model for a real semantic judgment, replacing the normal summary with a terminal evaluation report (status counts, skipped-by-reason, failed count, total usage input tokens, and the responded model id). Requires `TYPESAFE_API_KEY`; its absence is a usage error (exit 1, no network attempted). Cannot be combined with `--dry-run` or `--inspect-payloads`. See "Jev evaluation" below. |
 | `audit --evaluate --json` | Same evaluation run as one deterministic canonical JSON line instead of the terminal report: per-test classification, per-dimension judgments, findings, model requested/responded/matchesPin, usage, policy/rubric versions, and evidence provenance counts. Requires `--evaluate`. |
 | `audit --json` (alone) | Usage error (exit 1): `--json` requires `--dry-run` or `--evaluate`. |
+| `auth login` | Stores a TypeSafe API key locally for this tool. Reads from a no-echo interactive prompt when stdin is a TTY; reads one trimmed line from stdin otherwise, so automation/CI can pipe a key in. **Never** accepts the key as a command-line argument — see "Local API key storage" below. |
+| `auth status` | Reports whether a key is available, which source would win (`environment` or `stored`), and the stored file's path and permission status. Never prints the key itself. |
+| `auth logout` | Deletes the locally stored key, if any, and reports honestly whether one existed. |
 
 The default summary's `totals` include evidence counters (`evidenceBundles`, `evidenceFragments`, `evidenceTruncatedFragments`, `evidenceOmitted`, `evidenceDenied`, `evidenceUnresolved`), and each file entry carries `evidenceBundleCount`. Bundle *contents* — fragment text, spans, hashes — never appear in the default line; only `--inspect-payloads` prints them.
+
+## Local API key storage (`auth login` / `auth status` / `auth logout`)
+
+`--evaluate` needs a TypeSafe API key. Local storage is a per-user file scoped to this tool, not a global environment variable — `TYPESAFE_API_KEY` remains supported and is checked first, so CI keeps injecting it as a GitHub repository secret.
+
+- **Precedence**: `TYPESAFE_API_KEY` (non-blank) wins whenever it is set, so CI/automation setups are unaffected; otherwise the locally stored file's key is used; otherwise `--evaluate` is a usage error (exit 1, no network attempted) that names both ways to provide a key.
+- **`auth login`** reads the key from a no-echo interactive prompt when stdin is a TTY (raw mode, no character echoed, Ctrl+C cancels cleanly and always restores the terminal), or one trimmed line from stdin otherwise, so scripted/CI setup can pipe a key in. The key is **never** accepted as a command-line argument — that would leak it into shell history and the process list. A blank/whitespace-only key is rejected; nothing is written.
+- **`auth status`** reports whether a key is available, which source would win (`environment` or `stored`), and the stored file's path and permission state. It never prints the key, or any part of it (no masking, no last-four characters).
+- **`auth logout`** deletes the stored file and reports honestly whether one existed.
+- **Storage location**:
+  - POSIX: `$XDG_CONFIG_HOME/jev-test-auditor/credentials.json`, or `~/.config/jev-test-auditor/credentials.json` when `XDG_CONFIG_HOME` is unset.
+  - Windows: `%APPDATA%\jev-test-auditor\credentials.json`.
+  - The containing directory is created with mode `0o700` and the file with mode `0o600`, both set **at creation** (never write-then-`chmod`, which would leave a window where the file is world-readable) via a temp-file-plus-atomic-rename sequence.
+  - On POSIX, a stored file whose permissions are more permissive than owner-only is refused (fail closed) rather than silently trusted — `auth status`/`--evaluate` report the problem and how to fix it (`chmod 600 <path>`, or `auth login` again to recreate it).
+  - **Windows does not enforce file permissions.** This tool does not verify or claim to verify them there; `auth status` says so plainly.
+- **The stored file holds the key in plaintext**, readable by any process running as the same user. A system keychain was considered and deliberately deferred (Phase 4 Decisions) — do not treat this file as hardened secret storage. Prefer `TYPESAFE_API_KEY` for shared/CI machines.
+- **CI guidance**: add the key as a GitHub repository secret and inject it as the `TYPESAFE_API_KEY` environment variable in the workflow step that runs `audit --evaluate`. `auth login`'s interactive prompt is for local developer use only.
 
 ## Jev evaluation (`audit --evaluate`)
 
 `--evaluate` is opt-in only. Without it, `jev-test-auditor` never leaves this machine: no gateway is constructed, no API key is read, and no network call is ever attempted — proven by tests that stub `fetch` to throw during a real audit run. Passing `--evaluate`:
 
 - **Costs money and sends evidence to TypeSafe.** Every evaluable test case's local evidence bundle (test body plus its minimal helper/production-seam fragments and provenance — never the whole repository, never audited code executed) is sent as one Jev request. Pricing is USD 0.042 per 1,000,000 input tokens (output tokens are unbilled); see `JEV_ESTIMATE_SNAPSHOT` in `src/domain/estimate.ts` and `audit --dry-run` for a no-network cost preview before spending anything for real.
-- **Requires `TYPESAFE_API_KEY`.** Read from the environment only — never logged, printed, serialized, or included in any report or error message. Missing or blank is a usage error (exit 1) before any request is attempted.
+- **Requires a TypeSafe API key** from `TYPESAFE_API_KEY` or `auth login` (see "Local API key storage" above) — never logged, printed, serialized, or included in any report or error message. Having neither is a usage error (exit 1) before any request is attempted.
 - **Runs with bounded concurrency**: a fixed pool sized from configuration's `concurrency` (default 4), no adaptive throttling (a later phase's concern). Verified provider rate limits: 250,000 input tokens/second, 1,200 requests/minute (`JEV_VERIFIED_RATE_LIMITS`).
 - **Never fabricates a verdict.** A failed evaluation (rate limit, timeout, malformed response, etc.) produces one `evaluation-failed` diagnostic naming the test case and the error's typed kind — never the API key or the request body — and contributes no classification; it is never counted as healthy.
 - **Thresholds are provisional and uncalibrated.** `CLASSIFICATION_POLICY_V1`'s applicability/confidence/level cut points are versioned guesses, not validated claims — a later benchmark phase calibrates them.
@@ -67,7 +88,7 @@ The default summary's `totals` include evidence counters (`evidenceBundles`, `ev
 | 1. Foundation | One TypeScript package, inward dependency boundaries, configuration, and CLI entry point. | **Completed** |
 | 2. Test understanding | Discover and parse Jest/Vitest tests into deterministic structural test understanding (test cases, imports, mocks, assertions). | **Completed** |
 | 3. Evidence and context | For every extracted test case, resolve its relative imports safely and select the smallest useful helper/production-seam evidence within configured budgets, exposed locally through `--inspect-payloads`, plus a no-network `--dry-run` cost/call estimate. | **Completed** |
-| 4. Jev evaluation MVP | Versioned rubric and request composition, a TypeSafe HTTP gateway, deterministic non-compensatory classification, and opt-in `audit --evaluate` wiring with terminal and canonical JSON reporting. | **Completed** |
+| 4. Jev evaluation MVP | Versioned rubric and request composition, a TypeSafe HTTP gateway, deterministic non-compensatory classification, opt-in `audit --evaluate` wiring with terminal and canonical JSON reporting, and local per-user API key storage (`auth login`/`status`/`logout`). | **Completed** |
 | 5. Persistence, caching, and resilience | SQLite run store and cache, `--fresh`/resume, adaptive scheduling, and provider-throttling resilience. | Planned; not implemented |
 | 6. HTML reporting | Self-contained offline HTML renderer embedding the canonical JSON report. | Planned; not implemented |
 | 7. Benchmarks and calibration | Deterministic benchmark corpus, executable oracles, and calibrating `CLASSIFICATION_POLICY_V1`'s provisional thresholds. | Planned; not implemented |
