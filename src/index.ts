@@ -301,6 +301,9 @@ export {
   type AuditExtractorPort,
   type AuditFileResult,
   type AuditPorts,
+  type AuditProgressEvent,
+  type AuditProgressPort,
+  type AuditProgressState,
   type AuditRequest,
   type AuditResult,
   type AuditResumeError,
@@ -337,3 +340,8 @@ export {
   type AuditStoreReadOnlyLookup,
   type CreateSqliteAuditStoreOptions,
 } from './adapters/sqlite-audit-store.js';
+
+export {
+  createTerminalProgressReporter,
+  type TerminalProgressReporterOptions,
+} from './adapters/terminal-progress-reporter.js';

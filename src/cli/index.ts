@@ -48,6 +48,7 @@ import {
   type AuditDiagnostic,
   type AuditEvaluationPort,
   type AuditPorts,
+  type AuditProgressPort,
   type AuditRequest,
   type AuditResult,
   type AuditStorePort,
@@ -55,6 +56,7 @@ import {
 import { CLASSIFICATION_POLICY_V2 } from '../domain/classification.js';
 import type { ConfigurationOverrides } from '../domain/config.js';
 import { buildAuditReport, type AuditReportContext } from '../domain/report.js';
+import { createTerminalProgressReporter } from '../adapters/terminal-progress-reporter.js';
 
 export interface CliIo {
   writeLine(message: string): void;
@@ -88,6 +90,17 @@ export interface CliDependencies {
    * named, readable message on `io`, exit code 1, no stack trace.
    */
   readonly createStorePort?: () => AuditStorePort | Promise<AuditStorePort>;
+  /**
+   * Test seam only (Phase 6, task P6-3): overrides how the `--evaluate` terminal-progress
+   * reporter is constructed. Only consulted when `dependencies.audit` is not provided and a usable
+   * evaluation port was already resolved — production always uses the default,
+   * `createTerminalProgressReporter` (`src/adapters/terminal-progress-reporter.ts`) bound to
+   * `process.stderr.write`/`process.stderr.isTTY`. Progress is never opt-out and carries no CLI
+   * flag of its own (see this phase's own feature document): its non-TTY behavior — one clean,
+   * newline-terminated line per terminal transition, always on stderr, never stdout — already
+   * keeps a piped `--evaluate --json` consumer's stdout byte-clean without anything to disable.
+   */
+  readonly createProgressPort?: () => AuditProgressPort;
   /**
    * Test seam only, consulted by `auth login`: overrides how the API key is
    * read from the terminal. Production default (`readApiKeyFromPrompt`)
@@ -155,7 +168,9 @@ Options:
                       (exit 1, no network attempted) that names both ways to provide one. Prints
                       a terminal evaluation summary (status counts, skipped-by-reason, failed,
                       total usage input tokens,
-                      and the responded model id) instead of the normal summary. Thresholds are
+                      and the responded model id) instead of the normal summary. Reports per-item
+                      progress as it happens on stderr, never stdout, with no flag to disable it —
+                      see "Progress during a run" in README.md. Thresholds are
                       provisional and uncalibrated; see README.md. Cannot be combined with
                       --dry-run or --inspect-payloads.
   --evaluate --json  Print one deterministic canonical JSON line instead of the terminal evaluation
@@ -215,7 +230,12 @@ Options:
  * never has to decide when caching is meaningful; it only wires whatever
  * it is given.
  */
-function createProductionPorts(evaluationPort?: AuditEvaluationPort, storePort?: AuditStorePort, cacheKeyPort?: AuditCacheKeyPort): AuditPorts {
+function createProductionPorts(
+  evaluationPort?: AuditEvaluationPort,
+  storePort?: AuditStorePort,
+  cacheKeyPort?: AuditCacheKeyPort,
+  progressPort?: AuditProgressPort,
+): AuditPorts {
   return {
     discovery: { discover: discoverTestFiles },
     sourceReader: { read: readSourceFile },
@@ -224,6 +244,7 @@ function createProductionPorts(evaluationPort?: AuditEvaluationPort, storePort?:
     ...(evaluationPort === undefined ? {} : { evaluation: evaluationPort }),
     ...(storePort === undefined ? {} : { store: storePort }),
     ...(cacheKeyPort === undefined ? {} : { cacheKey: cacheKeyPort }),
+    ...(progressPort === undefined ? {} : { progress: progressPort }),
   };
 }
 
@@ -717,6 +738,23 @@ export async function runCli(
   // — and never fails on its own (no I/O, no state; see `createAuditCacheKeyPort`'s own doc).
   const cacheKeyPort: AuditCacheKeyPort | undefined = storePort === undefined ? undefined : createAuditCacheKeyPort();
 
+  // Phase 6, task P6-3: the progress port is opt-in exactly like the evaluation port above, and —
+  // deliberately unlike the store — never depends on whether a store was actually built: progress
+  // describes what this run is doing, not what gets persisted (see `AuditProgressPort`'s own doc,
+  // `src/domain/audit.ts`). Gated on `evaluationPort !== undefined` only so nothing is constructed
+  // for a `--evaluate` invocation that already failed to resolve an API key above. Never fails on
+  // its own (no I/O, no state at construction time — `createTerminalProgressReporter` only closes
+  // over a `write` function and a boolean).
+  let progressPort: AuditProgressPort | undefined;
+  if (parsed.evaluate && dependencies.audit === undefined && evaluationPort !== undefined) {
+    const buildProgressPort = dependencies.createProgressPort
+      ?? ((): AuditProgressPort => createTerminalProgressReporter({
+        write: (chunk) => { process.stderr.write(chunk); },
+        isTTY: process.stderr.isTTY === true,
+      }));
+    progressPort = buildProgressPort();
+  }
+
   // Phase 5, task P5-5: `--dry-run` may READ an existing audit store to report cache hits, but
   // must never create, migrate, or write to one — `openSqliteAuditStoreForLookup` itself is the
   // one place that guarantee lives (see its own doc). Gated exactly like `--evaluate`'s own store
@@ -760,7 +798,7 @@ export async function runCli(
       result = dependencies.audit === undefined
         ? await runAudit(
           configuration,
-          createProductionPorts(evaluationPort, storePort, cacheKeyPort),
+          createProductionPorts(evaluationPort, storePort, cacheKeyPort, progressPort),
           {
             fresh: parsed.fresh,
             ...(parsed.resume === undefined ? {} : { resume: parsed.resume }),

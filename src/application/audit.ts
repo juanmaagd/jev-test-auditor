@@ -8,6 +8,7 @@ import {
   type AuditEvaluationResult,
   type AuditEvaluationTotals,
   type AuditPorts,
+  type AuditProgressPort,
   type AuditRequest,
   type AuditResult,
   type AuditResumeSummary,
@@ -311,6 +312,14 @@ async function runEvaluation(
   runId?: string,
   cache?: EvaluationCacheOptions,
   resume?: EvaluationResumeOptions,
+  /**
+   * Terminal-progress reporting (Phase 6, task P6-3), independent of `store`/`runId` — see
+   * `AuditProgressPort`'s own doc (`src/domain/audit.ts`) for why: progress describes what THIS
+   * RUN is doing, not what gets persisted. Notified at exactly the same checkpoints
+   * `store.recordWorkItem` is, but never gated on `store`/`runId` being present — a run with no
+   * store still reports every transition.
+   */
+  progress?: AuditProgressPort,
 ): Promise<EvaluationRunResult> {
   const { items, skippedByReason, skippedItems } = collectEvaluableItems(files);
   const cacheEnabled = store !== undefined && runId !== undefined && cache !== undefined;
@@ -350,26 +359,37 @@ async function runEvaluation(
     ? skippedItems
     : skippedItems.filter((skipped) => resume.terminalByIdentityKey.get(identityKey(identityOf(skipped.testCase)))?.state !== 'skipped');
 
-  if (store !== undefined && runId !== undefined) {
-    for (const skipped of skippedToRecord) {
+  // Phase 6, task P6-3: `begin` fires exactly once, before any per-item transition, naming
+  // precisely how many work items will reach a terminal state THIS run — see
+  // `AuditProgressPort.begin`'s own doc for why an already-terminal, reused item on a resumed run
+  // is deliberately excluded from this count (never `items.length` unconditionally).
+  progress?.begin(skippedToRecord.length + outstandingItems.length);
+
+  for (const skipped of skippedToRecord) {
+    if (store !== undefined && runId !== undefined) {
       await store.recordWorkItem(runId, { state: 'skipped', identity: identityOf(skipped.testCase), reason: skipped.reason });
     }
-    // Phase 5, task P5-3: every evaluable item's intended work is made durable BEFORE the
-    // scheduler dispatches anything at all — see `AuditStoreWorkItemOutcome`'s own doc for why a
-    // later phase's `--resume <runId>` needs this recorded up front, not only once an item starts.
-    // Phase 5, task P5-4: only the OUTSTANDING items get this checkpoint on a resumed run — an
-    // already-terminal item is reused, never re-announced as pending. Appending another `pending`
-    // row for an item that already had one (e.g. it reached `running` before the interruption) is
-    // still honest, append-only history: "we are attempting this item again, as of now."
-    for (const item of outstandingItems) {
+    progress?.report({ state: 'skipped', identity: identityOf(skipped.testCase), concurrencyLimit: controller.limit });
+  }
+  // Phase 5, task P5-3: every evaluable item's intended work is made durable BEFORE the
+  // scheduler dispatches anything at all — see `AuditStoreWorkItemOutcome`'s own doc for why a
+  // later phase's `--resume <runId>` needs this recorded up front, not only once an item starts.
+  // Phase 5, task P5-4: only the OUTSTANDING items get this checkpoint on a resumed run — an
+  // already-terminal item is reused, never re-announced as pending. Appending another `pending`
+  // row for an item that already had one (e.g. it reached `running` before the interruption) is
+  // still honest, append-only history: "we are attempting this item again, as of now."
+  for (const item of outstandingItems) {
+    if (store !== undefined && runId !== undefined) {
       await store.recordWorkItem(runId, { state: 'pending', identity: identityOf(item.testCase) });
     }
+    progress?.report({ state: 'pending', identity: identityOf(item.testCase), concurrencyLimit: controller.limit });
   }
 
   const dispatchedOutcomes = await runAdaptiveSchedule<EvaluableItem, EvaluationOutcome>(outstandingItems, controller, async (item) => {
     if (store !== undefined && runId !== undefined) {
       await store.recordWorkItem(runId, { state: 'running', identity: identityOf(item.testCase) });
     }
+    progress?.report({ state: 'running', identity: identityOf(item.testCase), concurrencyLimit: controller.limit });
 
     let cacheKey: string | undefined;
     if (cacheEnabled) {
@@ -389,6 +409,7 @@ async function runEvaluation(
               cacheKey,
               classification: hit.classification,
             });
+            progress?.report({ state: 'cached', identity: identityOf(item.testCase), concurrencyLimit: controller.limit });
             return { result: { kind: 'cached', testCase: item.testCase, classification: hit.classification }, signal: 'neutral' };
           }
         }
@@ -408,6 +429,7 @@ async function runEvaluation(
           classification,
         });
       }
+      progress?.report({ state: 'completed', identity: identityOf(item.testCase), concurrencyLimit: controller.limit });
       const signal: ThrottleSignal = evaluation.attempts > 1 ? 'throttled' : 'clean';
       return { result: { kind: 'success', testCase: item.testCase, classification, evaluation }, signal };
     } catch (error) {
@@ -420,6 +442,7 @@ async function runEvaluation(
           errorMessage: messageOf(error),
         });
       }
+      progress?.report({ state: 'failed', identity: identityOf(item.testCase), concurrencyLimit: controller.limit });
       const signal: ThrottleSignal = isThrottleErrorKind(evaluationErrorKind(error)) ? 'throttled' : 'neutral';
       return { result: { kind: 'failure', testCase: item.testCase, error }, signal };
     }
@@ -859,7 +882,7 @@ export async function runAudit(
     const resumeOptions = resumeState === undefined
       ? undefined
       : { terminalByIdentityKey: new Map(resumeState.terminalWorkItems.map((outcome) => [identityKey(outcome.identity), outcome])) };
-    const evaluationRun = await runEvaluation(results, ports.evaluation, request.concurrency, scheduler, ports.store, runId, cache, resumeOptions);
+    const evaluationRun = await runEvaluation(results, ports.evaluation, request.concurrency, scheduler, ports.store, runId, cache, resumeOptions, ports.progress);
     evaluation = evaluationRun.evaluation;
     diagnostics.push(...evaluationRun.diagnostics);
     finalFiles = withEvaluationDiagnostics(results, evaluationRun.fileDiagnosticsByPath);

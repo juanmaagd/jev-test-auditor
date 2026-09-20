@@ -590,6 +590,63 @@ export interface AuditResumeSummary {
   readonly nothingOutstanding: boolean;
 }
 
+/**
+ * Terminal-progress checkpoint states (Phase 6, task P6-3): the same six states
+ * `AuditStoreWorkItemOutcome`/`recordWorkItem` ever actually produces — `uncertain` is excluded
+ * here too, for the identical reason {@link WorkItemState}'s own doc gives (nothing in this
+ * codebase constructs it, and no semantics are defined for it). Derived from {@link WorkItemState}
+ * with `Exclude`, rather than a second hand-written literal union, so a future phase that ever
+ * does wire up `uncertain` is forced to decide what a progress reporter does with it instead of
+ * silently falling outside this type's coverage.
+ */
+export type AuditProgressState = Exclude<WorkItemState, 'uncertain'>;
+
+/**
+ * One per-item checkpoint transition, reported to {@link AuditProgressPort.report} at exactly the
+ * same call sites `AuditStorePort.recordWorkItem` is called from `runEvaluation`
+ * (`src/application/audit.ts`) — see that port's own doc for why the two are wired independently
+ * rather than one depending on the other. `concurrencyLimit` is the adaptive scheduler's own
+ * `AdaptiveConcurrencyController.limit` (`src/domain/scheduler.ts`) read at the exact moment this
+ * transition is reported — P5-3 makes it change mid-run (halving on an observed throttle,
+ * restoring by one step after a clean-dispatch streak), so a reporter that surfaces it can explain
+ * a run visibly slowing down without a second call. Because `controller.report(signal)` is only
+ * applied by `runAdaptiveSchedule` (`src/application/scheduler.ts`) AFTER a worker's own promise
+ * settles, a throttled dispatch's own terminal event still carries the PRE-reduction limit; the
+ * reduction is visible starting with the next item's own `running` event, never retroactively on
+ * an event already reported.
+ */
+export interface AuditProgressEvent {
+  readonly state: AuditProgressState;
+  readonly identity: AuditStoreWorkItemIdentity;
+  readonly concurrencyLimit: number;
+}
+
+/**
+ * The terminal-progress reporting port (Phase 6, task P6-3): notified of every per-item checkpoint
+ * transition `runEvaluation` reaches, in real completion order under concurrency — never sorted,
+ * batched, or deferred to the end of the run. Optional on {@link AuditPorts}, exactly like
+ * `evaluation`/`store`/`cacheKey`, but deliberately independent of `store`: progress describes
+ * what THIS RUN is doing, not what gets persisted, so a run with no store wired still reports
+ * every transition exactly as if one were present, and a store failing to open or simply never
+ * being requested never silences progress. The domain stays free of I/O — this is a port
+ * (interface) declared here exactly like every other `AuditPorts` member; the adapter that
+ * actually writes anywhere (`src/adapters/terminal-progress-reporter.ts`) lives outside the
+ * domain and application layers, and the CLI composition root (`src/cli/index.ts`) is the only
+ * place that constructs one for real.
+ */
+export interface AuditProgressPort {
+  /**
+   * Called exactly once per run, before any {@link report} call, naming how many work items will
+   * reach a terminal state THIS run — newly recorded skips plus currently outstanding items; an
+   * already-terminal item reused on `--resume <runId>` is never redispatched and never reported
+   * again, so it is deliberately excluded from this count (never `items.length` unconditionally).
+   * A reporter needs no separate call to learn its own denominator for "N of TOTAL done."
+   */
+  begin(total: number): void;
+  /** Called once per checkpoint transition — see {@link AuditProgressEvent}'s own doc. */
+  report(event: AuditProgressEvent): void;
+}
+
 export interface AuditPorts {
   readonly discovery: AuditDiscoveryPort;
   readonly sourceReader: AuditSourceReaderPort;
@@ -601,6 +658,8 @@ export interface AuditPorts {
   readonly store?: AuditStorePort;
   /** Opt-in (Phase 5, task P5-2): see {@link AuditCacheKeyPort}'s own doc for the full opt-in contract. */
   readonly cacheKey?: AuditCacheKeyPort;
+  /** Opt-in (Phase 6, task P6-3): see {@link AuditProgressPort}'s own doc for the full opt-in contract — deliberately independent of `store`. */
+  readonly progress?: AuditProgressPort;
 }
 
 export type AuditRequest = ResolvedConfiguration;

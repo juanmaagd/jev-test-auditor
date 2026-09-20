@@ -2530,3 +2530,178 @@ describe('--help documents auth commands', () => {
     expect(help).toContain('command-line argument');
   });
 });
+
+/**
+ * Terminal progress wiring (Phase 6, task P6-3), exercised end to end through the real `runCli`
+ * pipeline — `createProgressPort` is the test seam (mirroring `createEvaluationPort`/
+ * `createStorePort`), and the "no seam at all" tests below prove the production default instead.
+ * Every test here audits a real, explicit `--rootDir` fixture (never this repository's own working
+ * directory — see this phase's own feature document for why that trap has bitten this project
+ * before) with a genuinely evaluable test case, so progress actually fires; a run that produced no
+ * events at all would make "stdout stayed clean" a vacuous claim.
+ */
+describe('terminal progress during a run (Phase 6, task P6-3)', () => {
+  useIsolatedConfigHome();
+
+  const mathFixtureFiles = {
+    'math.test.ts': "import { expect, test } from 'vitest';\ntest('adds', () => { expect(1 + 1).toBe(2); });\n",
+  };
+
+  function fakeEvaluationPort(): AuditEvaluationPort {
+    return {
+      async evaluate(request) {
+        return {
+          evaluation: {
+            requestedModel: 'jev-1.13.0', respondedModel: 'jev-1.13.0', modelMatchesPin: true,
+            answers: {}, usage: { inputTokens: 10, outputTokens: 1 }, attempts: 1,
+          },
+          classification: {
+            testCaseId: request.testCase.id,
+            repositoryRelativePath: request.testCase.repositoryRelativePath,
+            name: request.testCase.name,
+            status: 'healthy',
+            dimensions: [],
+            findings: [],
+            policyVersion: 2,
+            rubricVersion: 2,
+            model: { requested: 'jev-1.13.0', responded: 'jev-1.13.0', matchesPin: true },
+            usage: { inputTokens: 10, outputTokens: 1 },
+          },
+        };
+      },
+    };
+  }
+
+  function fakeStorePort(): AuditStorePort {
+    return {
+      beginRun: async () => 'progress-run-1',
+      canonicalizeRootDir: async (rootDir) => rootDir,
+      recordWorkItem: async () => undefined,
+      lookup: async () => undefined,
+      finishRun: async () => undefined,
+      loadRunState: async () => undefined,
+      close: async () => undefined,
+    };
+  }
+
+  it('attaches the createProgressPort test seam through the real pipeline: begin/report fire for the fixture\'s one evaluable test case, and stdout stays exactly the terminal summary', async () => {
+    const root = await fixture(mathFixtureFiles);
+    const output = captureOutput();
+    const beginCalls: number[] = [];
+    const reportedStates: string[] = [];
+
+    const exitCode = await runCli(['audit', '--rootDir', root, '--evaluate'], output.io, {
+      createEvaluationPort: () => fakeEvaluationPort(),
+      createStorePort: () => fakeStorePort(),
+      createProgressPort: () => ({
+        begin: (total) => { beginCalls.push(total); },
+        report: (event) => { reportedStates.push(event.state); },
+      }),
+    });
+
+    expect(exitCode).toBe(0);
+    expect(beginCalls).toEqual([1]);
+    expect(reportedStates).toEqual(['pending', 'running', 'completed']);
+    // stdout carries only the ordinary terminal report — progress went through the seam above,
+    // never through `io.writeLine`.
+    expect(output.lines).toHaveLength(1);
+    expect(output.lines[0]).toContain('Jev evaluation summary');
+  });
+
+  it('never constructs a progress port without --evaluate — an ordinary audit stays exactly as before', async () => {
+    const root = await fixture(mathFixtureFiles);
+    const output = captureOutput();
+
+    const exitCode = await runCli(['audit', '--rootDir', root], output.io, {
+      createProgressPort: () => { throw new Error('must not construct the progress port without --evaluate'); },
+    });
+
+    expect(exitCode).toBe(0);
+  });
+
+  it('--evaluate --json stays byte-clean — exactly one parseable canonical JSON line — even though progress genuinely fired', async () => {
+    const root = await fixture(mathFixtureFiles);
+    const output = captureOutput();
+    const reportedStates: string[] = [];
+
+    const exitCode = await runCli(['audit', '--rootDir', root, '--evaluate', '--json'], output.io, {
+      createEvaluationPort: () => fakeEvaluationPort(),
+      createStorePort: () => fakeStorePort(),
+      createProgressPort: () => ({
+        begin: () => undefined,
+        report: (event) => { reportedStates.push(event.state); },
+      }),
+    });
+
+    expect(exitCode).toBe(0);
+    // The trap this test exists to catch: prove progress genuinely fired before trusting that
+    // stdout staying clean means anything.
+    expect(reportedStates.length).toBeGreaterThan(0);
+    expect(output.lines).toHaveLength(1);
+    const parsed = JSON.parse(output.lines[0]!) as { reportVersion: number; rootDir: string };
+    expect(parsed.reportVersion).toBe(1);
+    expect(parsed.rootDir).toBe(root);
+  });
+
+  /**
+   * Genuinely exercises the real key-resolution/gateway path (no `createEvaluationPort` override
+   * — a stub bypasses `resolveEvaluationApiKey` entirely, which would make the "never leaks the
+   * API key" assertions below pass vacuously, since the canary key would never enter the process's
+   * data flow at all; this is exactly the "vacuous canary" trap this phase's own feature document
+   * warns about). Only `fetch` is stubbed, mirroring the existing real-gateway canary test above
+   * ("the API key never reaches the database file...") — `createStorePort` stays faked so this
+   * test creates no real database file.
+   */
+  it('with no createProgressPort seam at all, the production default writes progress to stderr, never stdout, and never leaks the API key', async () => {
+    const root = await fixture(mathFixtureFiles);
+    const canaryKey = 'sk-progress-key-never-leaked-canary';
+    const savedKey = process.env['TYPESAFE_API_KEY'];
+    const originalFetch = globalThis.fetch;
+    process.env['TYPESAFE_API_KEY'] = canaryKey;
+    const fetchSpy = vi.fn(async () => new Response(JSON.stringify({
+      model: 'jev-1.13.0', answers: {}, usage: { input_tokens: 0, output_tokens: 0 },
+    }), { status: 200 }));
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+    const stderrChunks: string[] = [];
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
+      stderrChunks.push(String(chunk));
+      return true;
+    });
+
+    try {
+      const output = captureOutput();
+
+      const exitCode = await runCli(['audit', '--rootDir', root, '--evaluate', '--json'], output.io, {
+        createStorePort: () => fakeStorePort(),
+      });
+
+      expect(exitCode).toBe(0);
+      // The real gateway was genuinely used — proves the canary key actually entered the process's
+      // data flow, so the "never leaks" assertions below are not vacuous.
+      expect(fetchSpy).toHaveBeenCalled();
+      const [, requestInit] = fetchSpy.mock.calls[0] as unknown as [string, RequestInit];
+      expect((requestInit.headers as Record<string, string>)['Authorization']).toBe(`Bearer ${canaryKey}`);
+
+      // stdout: exactly the one canonical JSON line — never corrupted by progress output sharing
+      // the stream.
+      expect(output.lines).toHaveLength(1);
+      expect(() => JSON.parse(output.lines[0]!)).not.toThrow();
+      expect(output.lines[0]).not.toContain(canaryKey);
+
+      // The trap this test exists to catch: prove progress genuinely produced output before
+      // trusting that "stdout is clean" and "no leak" mean anything.
+      expect(stderrChunks.length).toBeGreaterThan(0);
+      // In vitest, `process.stderr.isTTY` is falsy, so this deterministically exercises the
+      // non-TTY path: one clean, newline-terminated line naming the fixture's evaluable test case.
+      for (const chunk of stderrChunks) {
+        expect(chunk.endsWith('\n')).toBe(true);
+        expect(chunk).not.toContain(canaryKey);
+      }
+      expect(stderrChunks.join('')).toContain('math.test.ts');
+    } finally {
+      stderrSpy.mockRestore();
+      globalThis.fetch = originalFetch;
+      if (savedKey === undefined) delete process.env['TYPESAFE_API_KEY']; else process.env['TYPESAFE_API_KEY'] = savedKey;
+    }
+  });
+});
