@@ -139,19 +139,36 @@ const FORBIDDEN_NETWORK_SPECIFIERS = new Set([
   'undici',
 ]);
 
-function containsBareFetchCall(sourceFile: ts.SourceFile): boolean {
-  let found = false;
+function countBareFetchCalls(sourceFile: ts.SourceFile): number {
+  let count = 0;
   function visit(node: ts.Node): void {
-    if (found) return;
     if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'fetch') {
-      found = true;
-      return;
+      count += 1;
     }
     ts.forEachChild(node, visit);
   }
   visit(sourceFile);
-  return found;
+  return count;
 }
+
+function containsBareFetchCall(sourceFile: ts.SourceFile): boolean {
+  return countBareFetchCalls(sourceFile) > 0;
+}
+
+/**
+ * `src/adapters/jev-http-gateway.ts` (Phase 4, task P4-2) is the one
+ * reviewed exception to "never calls a bare fetch(...)": it is the sole
+ * TypeSafe HTTP gateway adapter, and its network call is always the
+ * caller-injected `fetch` or, absent an override, `globalThis.fetch` —
+ * never a new import of `node:http`/`node:https`/`node:net`/`node:tls`/
+ * `undici`, which stays forbidden repository-wide, unconditionally, by the
+ * import check above (this file is not exempt from that one). Every other
+ * file under `src/` still fails the check below on any bare `fetch(...)`
+ * call. The positive assertion right after it keeps this exception honest:
+ * if the adapter ever stops calling `fetch` directly (or starts calling it
+ * more than once), that assertion — not silence — is what notices.
+ */
+const ALLOWED_BARE_FETCH_FILE = join(process.cwd(), 'src', 'adapters', 'jev-http-gateway.ts');
 
 describe('no network access', () => {
   it('never imports a raw network module anywhere under src/', async () => {
@@ -168,15 +185,28 @@ describe('no network access', () => {
     expect(violations).toEqual([]);
   });
 
-  it('never calls a bare fetch(...) anywhere under src/', async () => {
+  it('never calls a bare fetch(...) anywhere under src/, except the one reviewed gateway call site', async () => {
     const files = await sourceFiles(join(process.cwd(), 'src'));
     const violations: string[] = [];
 
     for (const file of files) {
+      if (file === ALLOWED_BARE_FETCH_FILE) continue;
       const source = ts.createSourceFile(file, await readFile(file, 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
       if (containsBareFetchCall(source)) violations.push(file);
     }
 
     expect(violations).toEqual([]);
+  });
+
+  it('allows exactly one bare fetch(...) call site in the TypeSafe HTTP gateway adapter', async () => {
+    const source = ts.createSourceFile(
+      ALLOWED_BARE_FETCH_FILE,
+      await readFile(ALLOWED_BARE_FETCH_FILE, 'utf8'),
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+
+    expect(countBareFetchCalls(source)).toBe(1);
   });
 });

@@ -147,6 +147,39 @@ export {
   type JevStateUnresolved,
 } from './domain/jev-request.js';
 
+export {
+  JevAbortError,
+  JevAuthError,
+  JevConfigurationError,
+  JevOverloadedError,
+  JevRateLimitError,
+  JevRequestError,
+  JevResponseError,
+  JevTimeoutError,
+  type JevAnswer,
+  type JevEvaluation,
+  type JevGatewayError,
+  type JevGatewayErrorCode,
+  type JevGatewayEvaluateOptions,
+  type JevGatewayPort,
+  type JevNoulAnswer,
+  type JevRawAnswer,
+  type JevRawNoulAnswer,
+  type JevRawScoreAnswer,
+  type JevScoreAnswer,
+  type JevUsage,
+} from './domain/jev-gateway.js';
+export {
+  createJevHttpGateway,
+  DEFAULT_JEV_RETRY_CONFIG,
+  DEFAULT_JEV_TIMEOUT_MS,
+  JEV_TYPESAFE_BASE_URL,
+  type CreateJevHttpGatewayOptions,
+  type JevFetch,
+  type JevRetryConfig,
+  type JevSleep,
+} from './adapters/jev-http-gateway.js';
+
 export { runAudit } from './application/audit.js';
 export {
   type AuditDiagnostic,
