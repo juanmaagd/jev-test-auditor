@@ -242,6 +242,7 @@ export async function runAudit(
         testCases: 0,
         dynamicMetadata: 0,
         diagnostics: diagnostics.length,
+        unsupportedFrameworkFiles: 0,
         evidenceBundles: 0,
         evidenceFragments: 0,
         evidenceTruncatedFragments: 0,
@@ -364,6 +365,9 @@ export async function runAudit(
     testCases: finalFiles.reduce((total, file) => total + file.testCases.length, 0),
     dynamicMetadata: finalFiles.reduce((total, file) => total + file.dynamicMetadata.length, 0),
     diagnostics: diagnostics.length,
+    // B-1: one file, one count, regardless of how many `unsupported-framework`
+    // diagnostics it happens to carry (extraction emits at most one).
+    unsupportedFrameworkFiles: finalFiles.filter((file) => file.diagnostics.some((diagnostic) => diagnostic.code === 'unsupported-framework')).length,
     evidenceBundles: evidenceBundles.length,
     evidenceFragments: evidenceBundles.reduce((total, bundle) => total + bundle.totals.fragments, 0),
     evidenceTruncatedFragments: evidenceBundles.reduce((total, bundle) => total + bundle.totals.truncatedFragments, 0),

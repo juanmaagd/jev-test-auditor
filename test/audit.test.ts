@@ -150,7 +150,8 @@ describe('audit application', () => {
     expect(result.files.map((file) => file.discovered.repositoryRelativePath)).toEqual(['a.test.ts', 'z.test.ts']);
     expect(result.excluded.map((file) => file.repositoryRelativePath)).toEqual(['a.skip.ts', 'z.skip.ts']);
     expect(result.totals).toEqual({
-      files: 2, excluded: 2, testCases: 2, dynamicMetadata: 0, diagnostics: 0, ...zeroEvidenceTotals, evidenceBundles: 2,
+      files: 2, excluded: 2, testCases: 2, dynamicMetadata: 0, diagnostics: 0, unsupportedFrameworkFiles: 0,
+      ...zeroEvidenceTotals, evidenceBundles: 2,
     });
     expect(result.reportingOnly).toBe(true);
     expect(result.files.every((file) => file.evidence.length === 1)).toBe(true);
@@ -204,7 +205,9 @@ describe('audit application', () => {
     expect(result.diagnostics).toEqual([
       { code: 'discovery-failed', message: 'Unable to discover test files: discovery boom', severity: 'error' },
     ]);
-    expect(result.totals).toEqual({ files: 0, excluded: 0, testCases: 0, dynamicMetadata: 0, diagnostics: 1, ...zeroEvidenceTotals });
+    expect(result.totals).toEqual({
+      files: 0, excluded: 0, testCases: 0, dynamicMetadata: 0, diagnostics: 1, unsupportedFrameworkFiles: 0, ...zeroEvidenceTotals,
+    });
     expect(result.reportingOnly).toBe(true);
   });
 
@@ -242,6 +245,38 @@ describe('audit application', () => {
     expect(calls).toBe(0);
     expect(result.files[0]?.evidence).toEqual([]);
     expect(result.totals.evidenceBundles).toBe(0);
+  });
+
+  it('counts files carrying an unsupported-framework diagnostic in totals.unsupportedFrameworkFiles (B-1)', async () => {
+    const discovery: DiscoveryResult = {
+      files: [
+        discovered('bun.test.ts'),
+        discovered('ok.test.ts'),
+        { repositoryRelativePath: 'also-unknown.test.ts', framework: 'unknown', frameworkEvidence: [] },
+      ],
+      excluded: [],
+      diagnostics: [],
+    };
+    const unsupportedFrameworkDiagnostic = {
+      code: 'unsupported-framework',
+      message: 'Test framework could not be attributed for this file; found test-framework-looking import(s): bun:test.',
+      severity: 'warning' as const,
+    };
+
+    const result = await runAudit(configuration, portsFor(
+      discovery,
+      async (path) => path,
+      (path) => {
+        if (path === 'ok.test.ts') return extraction(path);
+        return { testCases: [], dynamicMetadata: [], diagnostics: [unsupportedFrameworkDiagnostic] };
+      },
+    ));
+
+    expect(result.totals.unsupportedFrameworkFiles).toBe(2);
+    expect(result.totals.diagnostics).toBe(2);
+    expect(result.files.find((file) => file.discovered.repositoryRelativePath === 'bun.test.ts')?.diagnostics)
+      .toEqual([unsupportedFrameworkDiagnostic]);
+    expect(result.diagnostics).toContainEqual({ ...unsupportedFrameworkDiagnostic, repositoryRelativePath: 'bun.test.ts' });
   });
 
   it('isolates an evidence-build failure to its own file: emits one evidence-failed diagnostic with the file path, empties that file\'s evidence, and leaves its test cases and every other file untouched', async () => {

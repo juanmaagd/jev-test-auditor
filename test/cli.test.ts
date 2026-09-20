@@ -73,6 +73,7 @@ const zeroEvidenceTotals = {
   evidenceOmitted: 0,
   evidenceDenied: 0,
   evidenceUnresolved: 0,
+  unsupportedFrameworkFiles: 0,
 };
 
 function bundleFor(testCaseId: string): EvidenceBundle {
@@ -257,6 +258,39 @@ describe('CLI foundation', () => {
         severity: 'error',
       }],
     });
+  });
+
+  it('surfaces totals.unsupportedFrameworkFiles in the reporting-only summary (B-1)', async () => {
+    const output = captureOutput();
+    const audit: AuditResult = {
+      rootDir: '/workspace',
+      files: [{
+        discovered: { repositoryRelativePath: 'a.test.ts', framework: 'unknown', frameworkEvidence: [] },
+        testCases: [],
+        dynamicMetadata: [],
+        diagnostics: [{
+          code: 'unsupported-framework',
+          message: 'Test framework could not be attributed for this file; found test-framework-looking import(s): bun:test.',
+          severity: 'warning',
+        }],
+        evidence: [],
+      }],
+      excluded: [],
+      diagnostics: [{
+        code: 'unsupported-framework',
+        message: 'Test framework could not be attributed for this file; found test-framework-looking import(s): bun:test.',
+        severity: 'warning',
+        repositoryRelativePath: 'a.test.ts',
+      }],
+      totals: { files: 1, excluded: 0, testCases: 0, dynamicMetadata: 0, diagnostics: 1, ...zeroEvidenceTotals, unsupportedFrameworkFiles: 1 },
+      reportingOnly: true,
+    };
+
+    const exitCode = await runCli(['audit'], output.io, { audit: async () => audit });
+
+    expect(exitCode).toBe(0);
+    const parsed = JSON.parse(output.lines[0] ?? '') as { totals: { unsupportedFrameworkFiles: number } };
+    expect(parsed.totals.unsupportedFrameworkFiles).toBe(1);
   });
 
   it('returns zero for audit diagnostics and one for usage errors', async () => {

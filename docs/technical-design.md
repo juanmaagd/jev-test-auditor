@@ -47,10 +47,10 @@ Identifiers use normalized repository-relative paths plus structural test ancest
 3. Attribute Jest/Vitest from syntax-aware static imports and package metadata. Conflicting evidence remains `unknown` and is preserved in the discovery record.
 4. Parse JavaScript, JSX, TypeScript, and TSX with the TypeScript compiler API.
 5. Extract `describe`, `test`, `it`, parameterized variants, modifiers, hooks, imports, mocks, and assertion calls.
-6. Emit one `TestCase` per statically identifiable case. Dynamic cases that cannot be enumerated receive explicit extraction metadata rather than invented identities.
+6. Emit one `TestCase` per statically identifiable case. Dynamic cases that cannot be enumerated receive explicit extraction metadata rather than invented identities. A file whose framework cannot be attributed (including conflicting evidence) and that yields zero test cases emits one `unsupported-framework` warning diagnostic naming the test-framework-looking imports actually found (e.g. `bun:test`, `node:test`), or stating plainly that none were found — never a silent empty result, and never a warning for a recognized framework's genuinely empty file.
 7. The application service composes discovery, safe source reading, and extraction through injected ports. It processes included files sequentially in repository-relative lexical order and returns per-file lineage, exclusions, root diagnostics, and `reportingOnly: true`.
 
-`jev-test-auditor audit` projects this result to one deterministic JSON line containing the configured `rootDir`, included file path/framework/count summaries, excluded paths/reasons, totals, and diagnostics. Parser, read, and discovery diagnostics are informational for CLI policy: `audit` exits zero after emitting the summary; usage errors exit one.
+`jev-test-auditor audit` projects this result to one deterministic JSON line containing the configured `rootDir`, included file path/framework/count summaries, excluded paths/reasons, totals (including `unsupportedFrameworkFiles`, the count of files carrying an `unsupported-framework` diagnostic), and diagnostics. Parser, read, and discovery diagnostics are informational for CLI policy: `audit` exits zero after emitting the summary; usage errors exit one.
 
 Skipped and todo cases remain visible but are not silently treated as evaluated active tests. E2E framework files are excluded in v1.
 

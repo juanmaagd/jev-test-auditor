@@ -180,6 +180,7 @@ describe('packed installed package', () => {
           readonly files: number;
           readonly testCases: number;
           readonly diagnostics: number;
+          readonly unsupportedFrameworkFiles: number;
           readonly evidenceBundles: number;
           readonly evidenceFragments: number;
           readonly evidenceTruncatedFragments: number;
@@ -196,10 +197,17 @@ describe('packed installed package', () => {
         { path: 'canary.spec.ts', framework: 'unknown', testCaseCount: 0, dynamicMetadataCount: 0, evidenceBundleCount: 0 },
         { path: 'packed.test.ts', framework: 'vitest', testCaseCount: 1, dynamicMetadataCount: 0, evidenceBundleCount: 1 },
       ]);
+      // `broken.test.ts` (syntax error, no framework import) and `canary.spec.ts`
+      // (imports `node:fs`, not a test framework) each extract zero test cases
+      // with framework `unknown`, so B-1 now reports one `unsupported-framework`
+      // warning per file (odd/tasks/bun-test-support.md) instead of the silent
+      // zero this smoke test used to accept: 1 pre-existing `syntax-error` plus
+      // 2 new `unsupported-framework` diagnostics.
       expect(summary.totals).toMatchObject({
         files: 3,
         testCases: 1,
-        diagnostics: 1,
+        diagnostics: 3,
+        unsupportedFrameworkFiles: 2,
         evidenceBundles: 1,
         evidenceDenied: 0,
       });

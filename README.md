@@ -43,6 +43,8 @@ jev-test-auditor --help
 
 The default summary's `totals` include evidence counters (`evidenceBundles`, `evidenceFragments`, `evidenceTruncatedFragments`, `evidenceOmitted`, `evidenceDenied`, `evidenceUnresolved`), and each file entry carries `evidenceBundleCount`. Bundle *contents* — fragment text, spans, hashes — never appear in the default line; only `--inspect-payloads` prints them.
 
+**An unattributable framework is reported, never silently counted as zero tests.** A discovered, included test file whose framework cannot be attributed (no recognized import, or conflicting evidence — e.g. both Jest and Vitest imported) and that yields zero test cases produces one `unsupported-framework` warning diagnostic naming the test-framework-looking imports actually found (e.g. `bun:test`, `node:test`), or stating plainly that none were found. It is merged into both that file's own diagnostics and the root `diagnostics`, exactly like an extraction diagnostic, and `totals.unsupportedFrameworkFiles` counts how many files carry one — so a reader sees "we don't understand this framework" without reading every record, instead of a report that reads identical to a genuinely empty repository. A recognized framework with genuinely zero test cases (an empty Vitest helper file, say) never produces this warning — it is about silence, not about the framework alone, and it never invents a framework or a test case.
+
 ## Local API key storage (`auth login` / `auth status` / `auth logout`)
 
 `--evaluate` needs a TypeSafe API key. Local storage is a per-user file scoped to this tool, not a global environment variable — `TYPESAFE_API_KEY` remains supported and is checked first, so CI keeps injecting it as a GitHub repository secret.
@@ -108,6 +110,7 @@ The default summary's `totals` include evidence counters (`evidenceBundles`, `ev
 - Findings target test files only; narrowly related production code is supporting evidence, not an independent finding target.
 - E2E frameworks, automatic test rewriting, general source review, and languages outside JavaScript/TypeScript are out of scope.
 - Discovery is repository-local and lexical. Generated/vendor/build paths, symlink escapes, and conservative E2E signals are excluded explicitly.
+- A test file whose framework cannot be attributed is reported (`unsupported-framework` diagnostic, `totals.unsupportedFrameworkFiles`), never silently treated as zero tests — see "Current CLI" above.
 - The audit pipeline is reporting-only: it never executes audited source, package scripts, test runners, or configuration modules. Read and parse diagnostics are emitted in JSON and do not fail the audit.
 - Phases 2 and 3 emit structural test understanding and local evidence bundles only, with no network access. Phase 4 adds real Jev evaluation and classification, opt-in only via `--evaluate`. Persistence, caching, resilience, HTML reports, and SQLite remain future phases.
 - CI is reporting-only in V1; findings do not fail a build.

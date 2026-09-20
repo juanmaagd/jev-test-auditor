@@ -96,6 +96,48 @@ function frameworkForModule(specifier: string): Exclude<TestFramework, 'unknown'
   return undefined;
 }
 
+/**
+ * Module specifiers that are not (yet) an attributable framework here but
+ * are still recognizable test-runner evidence worth naming in the
+ * `unsupported-framework` diagnostic (see {@link unsupportedFrameworkDiagnostic}).
+ * `bun:test` and `node:test` are the two verified provider facts named by
+ * the B-1 task (bun-test-support.md); this list is deliberately narrow —
+ * it never attributes a framework or extracts a case, it only names
+ * evidence in a warning message, so it carries no scope creep toward
+ * implementing support for these runners (that is B-2's job for `bun:test`,
+ * and out of scope entirely for `node:test`).
+ */
+const OTHER_TEST_RUNNER_LOOKING_SPECIFIERS = new Set(['bun:test', 'node:test']);
+
+/** Whether `specifier` looks like a test-framework import — either one this extractor already recognizes (`frameworkForModule`) or one of `OTHER_TEST_RUNNER_LOOKING_SPECIFIERS` — for naming attribution evidence in {@link unsupportedFrameworkDiagnostic}. Never used to attribute a framework or extract a case. */
+function looksLikeTestFrameworkSpecifier(specifier: string): boolean {
+  return frameworkForModule(specifier) !== undefined || OTHER_TEST_RUNNER_LOOKING_SPECIFIERS.has(specifier);
+}
+
+/**
+ * B-1 (`odd/tasks/bun-test-support.md`): a discovered, included test file
+ * that produces no test cases *and* whose framework could not be attributed
+ * must say so instead of silently reporting an empty result (the PRD
+ * forbids that silence — see the task's "Problem" section: `bun:test`
+ * files were reported as "0 test cases, 0 diagnostics" with no way to tell
+ * that apart from a genuinely empty file). This never guesses a framework
+ * or invents a case; it only names the evidence already collected in
+ * `imports` (every static import/export-from/dynamic-import/require
+ * specifier in the file, from {@link importRecordsFor}), or says plainly
+ * that none looked like a test framework.
+ */
+function unsupportedFrameworkDiagnostic(imports: readonly ImportRecord[]): Diagnostic {
+  const evidence = [...new Set(
+    imports
+      .map((record) => record.specifier)
+      .filter((specifier): specifier is string => specifier !== undefined && looksLikeTestFrameworkSpecifier(specifier)),
+  )];
+  const message = evidence.length > 0
+    ? `Test framework could not be attributed for this file; found test-framework-looking import(s): ${evidence.join(', ')}.`
+    : 'Test framework could not be attributed for this file, and no test framework import was found.';
+  return { code: 'unsupported-framework', message, severity: 'warning' };
+}
+
 function semanticForName(name: string): SemanticName | undefined {
   if (name === 'describe' || name === 'suite') return 'suite';
   if (name === 'test' || name === 'it') return 'test';
@@ -1154,9 +1196,20 @@ export function extractTestCases(request: TestExtractionRequest): TestExtraction
     dynamicMetadata: [],
   };
   extractWithContext(context);
+  // B-1: report an unattributable framework instead of a silent empty
+  // result. Placed here (not the application layer) because extraction is
+  // the one place that already knows both the final framework attribution
+  // and the extracted case count for this file — no new cross-layer wiring
+  // is needed, and the domain stays free of adapter imports since this is
+  // adapter code producing a plain `Diagnostic`. A recognized framework
+  // with genuinely zero cases (an empty Vitest helper file, say) is not
+  // reported: the warning is about silence, not about the framework alone.
+  const unsupportedFramework = framework === 'unknown' && context.testCases.length === 0
+    ? [unsupportedFrameworkDiagnostic(context.imports)]
+    : [];
   return {
     testCases: context.testCases,
     dynamicMetadata: context.dynamicMetadata,
-    diagnostics: syntaxDiagnostics(sourceFile),
+    diagnostics: [...syntaxDiagnostics(sourceFile), ...unsupportedFramework],
   };
 }

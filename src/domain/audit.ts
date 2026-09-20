@@ -150,6 +150,15 @@ export interface AuditTotals {
   readonly testCases: number;
   readonly dynamicMetadata: number;
   readonly diagnostics: number;
+  /**
+   * Count of files carrying an `unsupported-framework` diagnostic (B-1,
+   * `odd/tasks/bun-test-support.md`): a discovered, included test file
+   * whose framework could not be attributed and that produced zero test
+   * cases. Reported explicitly so a reader sees this without reading every
+   * diagnostic record — the same silence the diagnostic itself exists to
+   * prevent must not reappear one level up in the totals.
+   */
+  readonly unsupportedFrameworkFiles: number;
   readonly evidenceBundles: number;
   readonly evidenceFragments: number;
   readonly evidenceTruncatedFragments: number;

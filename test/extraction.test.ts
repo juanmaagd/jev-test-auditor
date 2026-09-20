@@ -788,3 +788,73 @@ describe('structural test extraction', () => {
     expect(result.diagnostics).toEqual([]);
   });
 });
+
+describe('unsupported framework reporting (B-1)', () => {
+  it('warns naming bun:test when the framework cannot be attributed and nothing is extracted', () => {
+    const result = extract("import { test } from 'bun:test';\ntest('works', () => {});");
+
+    expect(result.testCases).toEqual([]);
+    expect(result.diagnostics).toHaveLength(1);
+    expect(result.diagnostics[0]).toMatchObject({ code: 'unsupported-framework', severity: 'warning' });
+    expect(result.diagnostics[0]?.message).toContain('bun:test');
+  });
+
+  it('warns naming node:test the same way', () => {
+    const result = extract("import { test } from 'node:test';\ntest('works', () => {});");
+
+    expect(result.testCases).toEqual([]);
+    expect(result.diagnostics[0]).toMatchObject({ code: 'unsupported-framework', severity: 'warning' });
+    expect(result.diagnostics[0]?.message).toContain('node:test');
+  });
+
+  it('states plainly that no framework import was found when the file has none at all', () => {
+    const result = extract('export const helper = 1;');
+
+    expect(result.testCases).toEqual([]);
+    expect(result.diagnostics).toHaveLength(1);
+    expect(result.diagnostics[0]).toMatchObject({ code: 'unsupported-framework', severity: 'warning' });
+    expect(result.diagnostics[0]?.message).toMatch(/no .*framework import/iu);
+  });
+
+  it('names every conflicting framework import when zero cases are extracted', () => {
+    const result = extract("import { expect } from 'vitest';\nimport { fn } from '@jest/globals';");
+
+    expect(result.testCases).toEqual([]);
+    expect(result.diagnostics).toHaveLength(1);
+    const diagnostic = result.diagnostics[0];
+    expect(diagnostic).toMatchObject({ code: 'unsupported-framework', severity: 'warning' });
+    expect(diagnostic?.message).toContain('vitest');
+    expect(diagnostic?.message).toContain('@jest/globals');
+  });
+
+  it('never invents a test case for an unattributable framework', () => {
+    const result = extract("import { test } from 'bun:test';\ntest.each([[1], [2]])('works', () => {});");
+
+    expect(result.testCases).toEqual([]);
+    expect(result.diagnostics.some((diagnostic) => diagnostic.code === 'unsupported-framework')).toBe(true);
+  });
+
+  it('does not warn for a recognized-framework file that legitimately has zero test cases', () => {
+    const result = extract("import { expect } from 'vitest';\nexport const helper = () => expect(1).toBe(1);");
+
+    expect(result.testCases).toEqual([]);
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it('does not warn for an unattributable framework file that still yields cases from bare globals', () => {
+    const result = extract("test('works', () => {});");
+
+    expect(result.testCases).toHaveLength(1);
+    expect(result.testCases[0]).toMatchObject({ framework: 'unknown' });
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it('does not warn for conflicting jest/vitest evidence that still yields test cases', () => {
+    const result = extract(
+      "import { test as a } from 'vitest'; import { test as b } from '@jest/globals'; a('a', () => {}); b('b', () => {});",
+    );
+
+    expect(result.testCases.map((testCase) => testCase.framework)).toEqual(['unknown', 'unknown']);
+    expect(result.diagnostics).toEqual([]);
+  });
+});
