@@ -10,6 +10,8 @@ import {
 } from '../domain/evidence.js';
 import { normalizeRepositoryRelativePath, type ImportRecord } from '../domain/test-understanding.js';
 import type { SourceReadRequest } from '../domain/audit.js';
+import type { AliasMappingEntry, AliasMappingSource, AliasMappings } from '../domain/alias-config.js';
+import { createMemoizingAliasConfigReader, type AliasConfigReader } from './alias-config.js';
 import { isOutsideRootRelative } from './containment.js';
 import { globRegExp, matchesGlob } from './repository-discovery.js';
 import { readSourceFile } from './source-reader.js';
@@ -31,6 +33,20 @@ export interface EvidenceResolutionRequest {
    * read by resolution is never re-read by fragment selection.
    */
   readonly readSource?: (request: SourceReadRequest) => Promise<string>;
+  /**
+   * Injectable, per-directory-cached alias mapping lookup (task A-2,
+   * `odd/tasks/path-alias-resolution.md`), consulted for every non-relative
+   * specifier BEFORE it is classified `bare-specifier`/`alias-specifier`.
+   * Defaults to a fresh {@link createMemoizingAliasConfigReader} built from
+   * this request's `rootDir`/`readSource`, which already dedupes repeated
+   * lookups for the same directory WITHIN this one call (hop 1 and hop 2
+   * alike). A caller running many files in one audit (see
+   * `createAuditEvidencePort` in `src/adapters/evidence-audit-port.ts`)
+   * passes ONE reader shared across every `resolveEvidenceFiles` call in
+   * that run, so a directory's configuration is read at most once per run,
+   * not once per file or per specifier.
+   */
+  readonly getAliasMappings?: AliasConfigReader;
 }
 
 export interface EvidenceResolutionResult {
@@ -74,19 +90,25 @@ function isRelativeSpecifier(specifier: string): boolean {
 }
 
 /**
- * A specifier starting with `@/`, `~/`, or `#` is classified
- * `alias-specifier` (conventional path-alias prefixes). Every other
- * non-relative specifier, including any `@scope/name` (e.g.
+ * The FALLBACK classification for a non-relative specifier that matched no
+ * statically declared alias mapping (see {@link resolveViaAliasMapping} in
+ * this file, task A-2 — every non-relative specifier is first checked
+ * against the importing file's `tsconfig`/`jsconfig` `paths`/`baseUrl`,
+ * `package.json` `imports`, and workspace package names before it ever
+ * reaches this function). A specifier starting with `@/`, `~/`, or `#` is
+ * classified `alias-specifier` (conventional path-alias prefixes). Every
+ * other non-relative specifier, including any `@scope/name` (e.g.
  * `@babel/core`, `@tanstack/react-query`), is classified `bare-specifier`.
- * A scoped alias such as `@app/utils` is reported as `bare-specifier` too:
- * it is structurally indistinguishable from a real scoped npm package
- * without consulting `tsconfig` `paths` or `node_modules`, which this
- * resolver is explicitly forbidden from doing (see the feature scope). A
- * hard-coded allowlist of "known" npm scopes was deliberately rejected —
- * it would silently misreport any unlisted real package (e.g.
- * `@nestjs/core`) as an alias and drift out of date. Misclassifying a
- * scoped alias as bare has no safety impact: both outcomes leave the
- * specifier unresolved and unread; only the diagnostic `reason` differs.
+ * A scoped alias such as `@app/utils` is reported as `bare-specifier` too
+ * when nothing maps it: it is structurally indistinguishable from a real
+ * scoped npm package once no mapping applies. This resolver never resolves
+ * into `node_modules` regardless of classification (the deny list blocks
+ * it even for a mapped target that lands there). A hard-coded allowlist of
+ * "known" npm scopes was deliberately rejected — it would silently
+ * misreport any unlisted real package (e.g. `@nestjs/core`) as an alias and
+ * drift out of date. Misclassifying a scoped alias as bare has no safety
+ * impact: both outcomes leave the specifier unresolved and unread; only the
+ * diagnostic `reason` differs.
  */
 function classifyNonRelativeSpecifier(specifier: string): 'bare-specifier' | 'alias-specifier' {
   if (specifier.startsWith('@/') || specifier.startsWith('~/') || specifier.startsWith('#')) return 'alias-specifier';
@@ -177,32 +199,36 @@ type ResolveOutcome =
   | { readonly kind: 'self' };
 
 /**
- * Resolves one import specifier of one importer file. Order of checks,
- * matching the feature's mandatory rules: relative-specifier gate, lexical
- * containment of the un-extended base, ordered candidate probing with a
- * realpath containment check per existing candidate (catches a symlink
- * escape), then — for the first existing, in-root, regular-file candidate —
- * deny-list gate before any extension-support check, so a denied file is
- * always reported as denied rather than merely "unsupported extension".
+ * {@link ResolveOutcome} plus one internal-only case: every probing
+ * candidate for THIS ONE base path was tried and none existed. Kept
+ * separate from `{ kind: 'unresolved', reason: 'not-found' }` because the
+ * two callers below translate it differently: a single relative specifier
+ * has only one base, so it becomes `not-found` directly; an alias-mapped
+ * specifier may have several target bases tried in order (see
+ * {@link resolveViaAliasMapping}), where `no-candidate` means "try the next
+ * target" rather than "give up".
  */
-async function resolveSpecifier(
+type ProbeOutcome = ResolveOutcome | { readonly kind: 'no-candidate' };
+
+/**
+ * Probes one absolute base path (already containment-checked by the
+ * caller) through the project's ordered extension/index candidates,
+ * applying the feature's mandatory rules in order: a realpath containment
+ * check per existing candidate (catches a symlink escape), then — for the
+ * first existing, in-root, regular-file candidate — the deny-list gate
+ * before any extension-support check, so a denied file is always reported
+ * as denied rather than merely "unsupported extension". Shared by relative
+ * specifiers ({@link resolveRelativeSpecifier}) and every alias-mapped
+ * target ({@link resolveViaAliasMapping}, task A-2): "each candidate target
+ * goes through the existing extension/index probing, the deny list before
+ * any read, and realpath containment" applies identically to both.
+ */
+async function probeBase(
   rootDir: string,
-  importerRepositoryRelativePath: string,
-  specifier: string,
+  base: string,
   denyPatterns: readonly string[],
   testFilePath: string,
-): Promise<ResolveOutcome> {
-  if (!isRelativeSpecifier(specifier)) {
-    return { kind: 'unresolved', reason: classifyNonRelativeSpecifier(specifier) };
-  }
-
-  const importerDirectory = dirname(absoluteFromRepoRelative(rootDir, importerRepositoryRelativePath));
-  const base = resolve(importerDirectory, specifier);
-  const relativeBase = relative(rootDir, base);
-  if (isAbsolute(relativeBase) || isOutsideRootRelative(relativeBase)) {
-    return { kind: 'unresolved', reason: 'outside-root' };
-  }
-
+): Promise<ProbeOutcome> {
   for (const candidate of probingCandidates(base)) {
     let candidateStat;
     try {
@@ -247,7 +273,207 @@ async function resolveSpecifier(
     return { kind: 'resolved', repositoryRelativePath };
   }
 
-  return { kind: 'unresolved', reason: 'not-found' };
+  return { kind: 'no-candidate' };
+}
+
+/** Resolves a relative specifier: lexical containment of the un-extended base, then {@link probeBase}. */
+async function resolveRelativeSpecifier(
+  rootDir: string,
+  importerRepositoryRelativePath: string,
+  specifier: string,
+  denyPatterns: readonly string[],
+  testFilePath: string,
+): Promise<ResolveOutcome> {
+  const importerDirectory = dirname(absoluteFromRepoRelative(rootDir, importerRepositoryRelativePath));
+  const base = resolve(importerDirectory, specifier);
+  const relativeBase = relative(rootDir, base);
+  if (isAbsolute(relativeBase) || isOutsideRootRelative(relativeBase)) {
+    return { kind: 'unresolved', reason: 'outside-root' };
+  }
+
+  const outcome = await probeBase(rootDir, base, denyPatterns, testFilePath);
+  return outcome.kind === 'no-candidate' ? { kind: 'unresolved', reason: 'not-found' } : outcome;
+}
+
+/** Precedence order for alias mechanisms (task A-2's decision): Node subpath `imports` beats tsconfig/jsconfig `paths`, which beats a workspace package name, which beats a bare `baseUrl` catch-all. Applied uniformly to every non-relative specifier — a `#`-prefixed specifier is filtered to the `imports` group structurally (A-1 only ever emits `#`-prefixed `imports` patterns), so no separate branch on the specifier's own prefix is needed. */
+const ALIAS_PRECEDENCE: readonly AliasMappingSource[] = ['imports', 'paths', 'workspace', 'baseUrl'];
+
+interface AliasMatch {
+  readonly entry: AliasMappingEntry;
+  /** The text captured by the pattern's single `*`, or `undefined` for an exact (star-less) pattern match. */
+  readonly capture?: string;
+}
+
+function countAsterisks(pattern: string): number {
+  let count = 0;
+  for (const character of pattern) if (character === '*') count += 1;
+  return count;
+}
+
+/**
+ * TypeScript's own `matchPatternOrExact` rule (`tryParsePatterns` +
+ * `findBestPatternMatch` in the TypeScript compiler), applied within ONE
+ * mechanism's entries at a time (this function is called once per
+ * {@link ALIAS_PRECEDENCE} group, never across groups): an exact
+ * (star-less) pattern equal to the specifier wins outright over any
+ * wildcard pattern, regardless of declaration order; otherwise, among the
+ * wildcard patterns that match, the one with the longest PREFIX (the text
+ * before its single `*`) wins, with ties broken by declaration order. A
+ * pattern containing two or more `*` characters is malformed and never
+ * matches anything (mirrors TypeScript's own `hasZeroOrOneAsteriskCharacter`
+ * guard) — A-1 does not itself validate this, so it is enforced here.
+ */
+function findBestMatch(entries: readonly AliasMappingEntry[], specifier: string): AliasMatch | undefined {
+  for (const entry of entries) {
+    if (countAsterisks(entry.pattern) === 0 && entry.pattern === specifier) return { entry };
+  }
+
+  let best: (AliasMatch & { readonly prefixLength: number }) | undefined;
+  for (const entry of entries) {
+    if (countAsterisks(entry.pattern) !== 1) continue;
+    const starIndex = entry.pattern.indexOf('*');
+    const prefix = entry.pattern.slice(0, starIndex);
+    const suffix = entry.pattern.slice(starIndex + 1);
+    if (!specifier.startsWith(prefix) || !specifier.endsWith(suffix)) continue;
+    if (specifier.length < prefix.length + suffix.length) continue;
+    if (best !== undefined && prefix.length <= best.prefixLength) continue;
+    best = { entry, capture: specifier.slice(prefix.length, specifier.length - suffix.length), prefixLength: prefix.length };
+  }
+  return best;
+}
+
+function substituteTarget(target: string, capture: string | undefined): string {
+  return capture === undefined ? target : target.replace('*', capture);
+}
+
+/**
+ * Task A-2's decision for "Workspace entry points that are build output"
+ * (`odd/tasks/path-alias-resolution.md`): a workspace package's bare-name
+ * entry's targets, as built by `resolveWorkspaceEntries` in
+ * `src/adapters/alias-config.ts`, are always `[declaredEntry?, packageDir]`
+ * — the declared `exports`/`main` entry (if any) first, then the package
+ * directory itself as the plain fallback. This reconstructs `packageDir` as
+ * the LAST element and any declared entry as everything before it (A-1
+ * never emits more than one declared entry, but this tolerates any count),
+ * then reorders the trial sequence to prefer a plausible SOURCE file over a
+ * declared entry that is very commonly generated build output (e.g.
+ * `dist/index.js`, blocked by the `**\/dist/**` deny pattern):
+ * `packageDir/src/index` (probed with the project's normal extension/index
+ * rules) first, then the package directory's own top-level probing
+ * (`packageDir/index.ts` etc., via the same probing on `packageDir`
+ * itself), and only THEN the declared entry — so a real source layout
+ * resolves before ever touching the declared entry, and the declared entry
+ * is reached (and, if it is denied build output, reported `denied` rather
+ * than silently dropped — see {@link resolveViaAliasMapping}) only when no
+ * plausible source file exists at all.
+ */
+function orderedWorkspaceEntryTargets(targets: readonly string[]): readonly string[] {
+  const packageDir = targets[targets.length - 1] ?? '';
+  const declaredEntries = targets.slice(0, -1);
+  return [`${packageDir}/src/index`, packageDir, ...declaredEntries];
+}
+
+/** Ordered target bases to try for one matched alias entry, applying the workspace source-preference reorder ({@link orderedWorkspaceEntryTargets}) only to a workspace package's bare (non-wildcard) name entry — a `name/*` subpath match has no such ambiguity and is substituted as-is. */
+function orderedTargetsFor(match: AliasMatch): readonly string[] {
+  const substituted = match.entry.targets.map((target) => substituteTarget(target, match.capture));
+  const isBareWorkspaceEntry = match.entry.source === 'workspace' && countAsterisks(match.entry.pattern) === 0;
+  return isBareWorkspaceEntry ? orderedWorkspaceEntryTargets(substituted) : substituted;
+}
+
+/**
+ * Resolves a non-relative specifier against the importing file's alias
+ * mapping table (task A-2). Walks {@link ALIAS_PRECEDENCE} in order; for
+ * each mechanism that has a matching entry ({@link findBestMatch}), tries
+ * that entry's targets in declaration order (with the workspace
+ * source-preference reorder applied where relevant), re-checking
+ * containment after wildcard substitution — the DECLARED target string was
+ * already containment-checked by A-1, but the specifier's own captured
+ * portion is caller-controlled text that could contain `../` segments, so
+ * the SUBSTITUTED result must be re-checked here before ever touching the
+ * filesystem — then probing each target exactly like a relative specifier
+ * ({@link probeBase}: extension/index probing, deny list, realpath
+ * containment).
+ *
+ * The first target that produces an existing file (`resolved`, `denied`,
+ * `self`, or a symlink `outside-root`/`unsupported-extension`) is terminal:
+ * the search stops there, whether or not the file could actually be used
+ * as evidence. Divergence from a literal reading of the feature doc's "the
+ * first mechanism that produces an existing, in-root, non-denied file
+ * wins": a `denied` (or escaping) target does NOT fall through to try a
+ * LATER mechanism in this implementation — see this task's report for why
+ * this was chosen over continuing to search. A target that produces no
+ * candidate at all (`no-candidate`) is NOT terminal: the search continues
+ * to the next target, and — once an entry's whole target list is
+ * exhausted — to the next mechanism in {@link ALIAS_PRECEDENCE}.
+ *
+ * Returns `undefined` when no mechanism matched the specifier at all,
+ * letting the caller fall back to {@link classifyNonRelativeSpecifier}.
+ * When at least one `imports`/`paths`/`workspace` entry matched but every
+ * target of every matching entry was `no-candidate`, returns
+ * `alias-mapped-not-found` — a mapping was declared, it just pointed
+ * nowhere. A `baseUrl` catch-all match alone does NOT set this: `baseUrl`
+ * is a search root, not a declared mapping, so an unmatched specifier under
+ * a bare `baseUrl` still falls back to `bare-specifier`/`alias-specifier`
+ * (this matters for every real repository that declares `baseUrl` without
+ * `paths`, e.g. supermarket-pro's backend tsconfig — otherwise `lodash`,
+ * `@nestjs/core`, etc. would all be misreported as a stale alias).
+ */
+async function resolveViaAliasMapping(
+  rootDir: string,
+  aliasMappings: AliasMappings,
+  specifier: string,
+  denyPatterns: readonly string[],
+  testFilePath: string,
+): Promise<ResolveOutcome | undefined> {
+  let matchedDeclaredMapping = false;
+
+  for (const source of ALIAS_PRECEDENCE) {
+    const entries = aliasMappings.entries.filter((entry) => entry.source === source);
+    const match = findBestMatch(entries, specifier);
+    if (match === undefined) continue;
+    if (source !== 'baseUrl') matchedDeclaredMapping = true;
+
+    for (const target of orderedTargetsFor(match)) {
+      const absoluteTarget = resolve(rootDir, ...target.split('/'));
+      const relativeTarget = relative(rootDir, absoluteTarget);
+      if (isAbsolute(relativeTarget) || isOutsideRootRelative(relativeTarget)) {
+        return { kind: 'unresolved', reason: 'outside-root' };
+      }
+
+      const probed = await probeBase(rootDir, absoluteTarget, denyPatterns, testFilePath);
+      if (probed.kind !== 'no-candidate') return probed;
+    }
+  }
+
+  return matchedDeclaredMapping ? { kind: 'unresolved', reason: 'alias-mapped-not-found' } : undefined;
+}
+
+/**
+ * Resolves one import specifier of one importer file: a relative specifier
+ * through {@link resolveRelativeSpecifier}, a non-relative specifier
+ * through the importing file's OWN alias mapping table (fetched via
+ * `getAliasMappings(importerRepositoryRelativePath)` — a hop-2 helper's
+ * specifiers use the HELPER's nearest configuration, never the test file's,
+ * task A-2), falling back to {@link classifyNonRelativeSpecifier} when no
+ * mapping matched at all.
+ */
+async function resolveSpecifier(
+  rootDir: string,
+  importerRepositoryRelativePath: string,
+  specifier: string,
+  denyPatterns: readonly string[],
+  testFilePath: string,
+  getAliasMappings: AliasConfigReader,
+): Promise<ResolveOutcome> {
+  if (isRelativeSpecifier(specifier)) {
+    return resolveRelativeSpecifier(rootDir, importerRepositoryRelativePath, specifier, denyPatterns, testFilePath);
+  }
+
+  const aliasMappings = await getAliasMappings(importerRepositoryRelativePath);
+  const mapped = await resolveViaAliasMapping(rootDir, aliasMappings, specifier, denyPatterns, testFilePath);
+  if (mapped !== undefined) return mapped;
+
+  return { kind: 'unresolved', reason: classifyNonRelativeSpecifier(specifier) };
 }
 
 interface FileCandidate {
@@ -326,17 +552,24 @@ function applyOutcome(
 }
 
 /**
- * Resolves a test file's relative imports into repository-local evidence
- * files: hop 1 is the test file's own imports (as already extracted by the
- * caller); for each hop-1 file classified as a `helper`, its own relative
- * imports are resolved once more as hop 2. Production files, and every
- * hop-2 file regardless of role, are never expanded further. Never
- * executes, `require`s, or `import()`s any repository file — only text
- * reads (via {@link readSourceFile}) and static TypeScript-compiler-API
- * parsing (via {@link importRecordsFor}) of the hop-1 helpers it must read
- * to discover hop-2 imports. See {@link resolveSpecifier} for the
- * per-specifier resolution/containment/deny rules and {@link
- * probingCandidates} for the extension/index probing order.
+ * Resolves a test file's imports into repository-local evidence files: hop
+ * 1 is the test file's own imports (as already extracted by the caller);
+ * for each hop-1 file classified as a `helper`, its own imports are
+ * resolved once more as hop 2. Production files, and every hop-2 file
+ * regardless of role, are never expanded further. A relative specifier
+ * resolves lexically against its importer's directory; a non-relative
+ * specifier is first checked against the IMPORTING file's own statically
+ * declared alias mapping table — `tsconfig`/`jsconfig` `paths`/`baseUrl`,
+ * `package.json` `imports`, and workspace package names (task A-2,
+ * `odd/tasks/path-alias-resolution.md`) — so a hop-2 helper's specifiers
+ * use the helper's own nearest configuration, never the test file's. Never
+ * executes, `require`s, or `import()`s any repository file, or any
+ * configuration file — only text reads (via {@link readSourceFile}) and
+ * static parsing (TypeScript-compiler-API for source, JSONC for
+ * configuration) of the hop-1 helpers and configuration files it must read.
+ * See {@link resolveSpecifier} for the per-specifier resolution/alias/
+ * containment/deny rules and {@link probingCandidates} for the
+ * extension/index probing order.
  */
 export async function resolveEvidenceFiles(request: EvidenceResolutionRequest): Promise<EvidenceResolutionResult> {
   const requestedRoot = resolve(request.rootDir);
@@ -347,6 +580,7 @@ export async function resolveEvidenceFiles(request: EvidenceResolutionRequest): 
   const testFilePath = normalizeRepositoryRelativePath(request.testFilePath);
   const denyPatterns: readonly string[] = [...DEFAULT_EVIDENCE_DENY_PATTERNS, ...(request.deny ?? [])];
   const readSource = request.readSource ?? readSourceFile;
+  const getAliasMappings = request.getAliasMappings ?? createMemoizingAliasConfigReader(request.rootDir, readSource);
 
   const denied: DeniedEvidence[] = [];
   const unresolved: UnresolvedEvidence[] = [];
@@ -357,7 +591,7 @@ export async function resolveEvidenceFiles(request: EvidenceResolutionRequest): 
       applyOutcome({ kind: 'unresolved', reason: 'dynamic-specifier' }, record, testFilePath, 1, hop1Candidates, denied, unresolved);
       continue;
     }
-    const outcome = await resolveSpecifier(rootDir, testFilePath, record.specifier, denyPatterns, testFilePath);
+    const outcome = await resolveSpecifier(rootDir, testFilePath, record.specifier, denyPatterns, testFilePath, getAliasMappings);
     applyOutcome(outcome, record, testFilePath, 1, hop1Candidates, denied, unresolved);
   }
 
@@ -389,7 +623,7 @@ export async function resolveEvidenceFiles(request: EvidenceResolutionRequest): 
         applyOutcome({ kind: 'unresolved', reason: 'dynamic-specifier' }, record, helper.repositoryRelativePath, 2, hop2Candidates, denied, unresolved);
         continue;
       }
-      const outcome = await resolveSpecifier(rootDir, helper.repositoryRelativePath, record.specifier, denyPatterns, testFilePath);
+      const outcome = await resolveSpecifier(rootDir, helper.repositoryRelativePath, record.specifier, denyPatterns, testFilePath, getAliasMappings);
       applyOutcome(outcome, record, helper.repositoryRelativePath, 2, hop2Candidates, denied, unresolved);
     }
   }

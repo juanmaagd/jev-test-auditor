@@ -730,3 +730,52 @@ export async function resolveAliasConfig(request: AliasConfigRequest): Promise<A
     refusals,
   };
 }
+
+/** Injectable, per-directory-cached alias mapping lookup (see {@link createMemoizingAliasConfigReader}). */
+export type AliasConfigReader = (repositoryRelativePath: string) => Promise<AliasMappings>;
+
+/**
+ * Wraps {@link resolveAliasConfig} with an in-memory cache keyed by the
+ * importing file's DIRECTORY (not its full path): every file in the same
+ * directory shares the exact same nearest-config search and merged
+ * `baseUrl`/`paths`/`imports`/workspace table, so this avoids re-walking the
+ * ancestry chain, re-parsing config text, and re-expanding workspace globs
+ * once per specifier or once per file — task A-2's "one config read per
+ * directory per run, not per specifier" requirement
+ * (`odd/tasks/path-alias-resolution.md`). As with
+ * `createMemoizingSourceReader` (`src/adapters/evidence-audit-port.ts`), the
+ * *promise* itself is cached, so concurrent lookups for the same directory
+ * dedupe onto one underlying {@link resolveAliasConfig} call instead of
+ * racing.
+ *
+ * Pass the SAME run-scoped `readSource` used elsewhere in the run (e.g. from
+ * `createMemoizingSourceReader`) so the raw config file reads this performs
+ * are ALSO deduped across every directory that happens to share a config
+ * file. The two caches are complementary, not redundant: this one avoids
+ * redoing the table-building computation itself; the shared reader avoids
+ * redoing the disk read that computation requires.
+ *
+ * Intended to be created once per audit run (see `createAuditEvidencePort`
+ * in `src/adapters/evidence-audit-port.ts`) and passed to every
+ * `resolveEvidenceFiles` call in that run, exactly like the memoizing source
+ * reader; never reused across runs, since a later run may target a
+ * different `rootDir` or see changed configuration.
+ */
+export function createMemoizingAliasConfigReader(
+  rootDir: string,
+  readSource?: (request: SourceReadRequest) => Promise<string>,
+): AliasConfigReader {
+  const cache = new Map<string, Promise<AliasMappings>>();
+  return (repositoryRelativePath: string): Promise<AliasMappings> => {
+    const directory = repoDirOf(normalizeRepositoryRelativePath(repositoryRelativePath));
+    const cached = cache.get(directory);
+    if (cached !== undefined) return cached;
+    const pending = resolveAliasConfig({
+      rootDir,
+      repositoryRelativePath,
+      ...(readSource === undefined ? {} : { readSource }),
+    });
+    cache.set(directory, pending);
+    return pending;
+  };
+}

@@ -49,9 +49,21 @@ export interface DeniedEvidence {
   readonly rule: string;
 }
 
+/**
+ * Why a non-relative or relative import specifier was not resolved to
+ * evidence. `bare-specifier` and `alias-specifier` mean no statically
+ * declared mapping (tsconfig/jsconfig `paths`/`baseUrl`, Node `imports`, or
+ * a workspace package name) matched the specifier at all — `alias-specifier`
+ * for a conventional alias-looking prefix (`@/`, `~/`, `#`), `bare-specifier`
+ * for everything else (ordinary npm package names). `alias-mapped-not-found`
+ * is different: a mapping DID match the specifier, but every one of its
+ * declared targets was missing — a stale or misconfigured mapping, distinct
+ * from an unsupported one (task A-2, `odd/tasks/path-alias-resolution.md`).
+ */
 export type UnresolvedEvidenceReason =
   | 'bare-specifier'
   | 'alias-specifier'
+  | 'alias-mapped-not-found'
   | 'not-found'
   | 'outside-root'
   | 'unsupported-extension'
@@ -79,9 +91,13 @@ export interface OmittedEvidence {
 }
 
 /**
- * A repository-local file reached while resolving a test case's relative
- * imports (Phase 3 import resolution). `hop` is `1` for a direct import of
- * the test file and `2` for a relative import of a hop-1 `helper` file
+ * A repository-local file reached while resolving a test case's imports
+ * (Phase 3 import resolution): a relative import resolved directly, or a
+ * non-relative specifier resolved through a statically declared alias
+ * mapping (tsconfig/jsconfig `paths`/`baseUrl`, Node `imports`, or a
+ * workspace package name — task A-2, `odd/tasks/path-alias-resolution.md`).
+ * `hop` is `1` for a direct import of the test file and `2` for a relative
+ * or mapped import of a hop-1 `helper` file
  * (production files and hop-2 files are never expanded further).
  * `sourceText` is present only when the resolver actually read the file's
  * content, which today is exactly the hop-1 helper files it must inspect to

@@ -3,9 +3,11 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import {
+  readSourceFile,
   resolveEvidenceFiles,
   type ImportKind,
   type ResolvedEvidenceFile,
+  type SourceReadRequest,
   type SourceSpan,
 } from '../src/index.js';
 
@@ -34,6 +36,10 @@ function importRecord(specifier: string | undefined, kind: ImportKind = 'import'
 
 function pathsOf(files: readonly ResolvedEvidenceFile[]): string[] {
   return files.map((file) => file.repositoryRelativePath);
+}
+
+function json(value: unknown): string {
+  return JSON.stringify(value, null, 2);
 }
 
 /** Whether this machine/user can create filesystem symlinks (denied for some CI/sandbox users on some platforms). */
@@ -560,5 +566,350 @@ describe('no execution', () => {
     });
 
     expect(pathsOf(result.files).sort()).toEqual(['src/helpers/dangerous.helper.ts', 'src/lib/dangerous.ts']);
+  });
+
+  it('never executes a paths-mapped target file, only reads and statically parses it', async () => {
+    const root = await fixture({
+      'tsconfig.json': json({ compilerOptions: { baseUrl: '.', paths: { '@lib/*': ['./lib/*'] } } }),
+      'math.test.ts': '',
+      'lib/dangerous.ts': 'throw new Error("must not execute");\nexport const marker = true;',
+    });
+
+    const result = await resolveEvidenceFiles({
+      rootDir: root,
+      testFilePath: 'math.test.ts',
+      imports: [importRecord('@lib/dangerous')],
+    });
+
+    expect(pathsOf(result.files)).toEqual(['lib/dangerous.ts']);
+  });
+});
+
+describe('alias mapping resolution (task A-2)', () => {
+  it('resolves a Node subpath #import specifier via package.json imports', async () => {
+    const root = await fixture({
+      'package.json': json({ imports: { '#review/*': './src/review/*.ts' } }),
+      'src/math.test.ts': '',
+      'src/review/analyzer.ts': 'export const analyzer = true;',
+    });
+
+    const result = await resolveEvidenceFiles({
+      rootDir: root,
+      testFilePath: 'src/math.test.ts',
+      imports: [importRecord('#review/analyzer')],
+    });
+
+    expect(pathsOf(result.files)).toEqual(['src/review/analyzer.ts']);
+    expect(result.unresolved).toEqual([]);
+  });
+
+  it('picks the longest matching paths prefix over a shorter overlapping one', async () => {
+    const root = await fixture({
+      'tsconfig.json': json({
+        compilerOptions: {
+          baseUrl: '.',
+          paths: {
+            '@app/*': ['./generic/*'],
+            '@app/feature/*': ['./specific/*'],
+          },
+        },
+      }),
+      'math.test.ts': '',
+      'specific/widget.ts': 'export const widget = "specific";',
+      'generic/feature/widget.ts': 'export const widget = "generic";',
+    });
+
+    const result = await resolveEvidenceFiles({
+      rootDir: root,
+      testFilePath: 'math.test.ts',
+      imports: [importRecord('@app/feature/widget')],
+    });
+
+    expect(pathsOf(result.files)).toEqual(['specific/widget.ts']);
+  });
+
+  it('prefers an exact star-less paths pattern over a matching wildcard pattern', async () => {
+    const root = await fixture({
+      'tsconfig.json': json({
+        compilerOptions: {
+          baseUrl: '.',
+          paths: {
+            '@app/*': ['./generic/*'],
+            '@app/exact': ['./special/exact-target'],
+          },
+        },
+      }),
+      'math.test.ts': '',
+      'generic/exact.ts': 'export const exact = "generic";',
+      'special/exact-target.ts': 'export const exact = "special";',
+    });
+
+    const result = await resolveEvidenceFiles({
+      rootDir: root,
+      testFilePath: 'math.test.ts',
+      imports: [importRecord('@app/exact')],
+    });
+
+    expect(pathsOf(result.files)).toEqual(['special/exact-target.ts']);
+  });
+
+  it('tries multiple paths targets for one pattern in declaration order', async () => {
+    const root = await fixture({
+      'tsconfig.json': json({
+        compilerOptions: { baseUrl: '.', paths: { '@shared/*': ['./missing/*', './present/*'] } },
+      }),
+      'math.test.ts': '',
+      'present/thing.ts': 'export const thing = true;',
+    });
+
+    const result = await resolveEvidenceFiles({
+      rootDir: root,
+      testFilePath: 'math.test.ts',
+      imports: [importRecord('@shared/thing')],
+    });
+
+    expect(pathsOf(result.files)).toEqual(['present/thing.ts']);
+  });
+
+  it('falls back to the baseUrl catch-all only when no imports/paths/workspace mapping matches', async () => {
+    // paths targets resolve relative to baseUrl's OWN directory whenever a
+    // baseUrl exists anywhere in the chain (TypeScript's real rule, already
+    // applied by A-1 in `buildTsconfigEntries`) — so '@app/*': ['./app/*']
+    // resolves to 'root-src/app/*', not a top-level 'app/*'.
+    const root = await fixture({
+      'tsconfig.json': json({ compilerOptions: { baseUrl: './root-src', paths: { '@app/*': ['./app/*'] } } }),
+      'math.test.ts': '',
+      'root-src/util.ts': 'export const util = true;',
+      'root-src/app/widget.ts': 'export const widget = true;',
+    });
+
+    const result = await resolveEvidenceFiles({
+      rootDir: root,
+      testFilePath: 'math.test.ts',
+      imports: [importRecord('util'), importRecord('@app/widget')],
+    });
+
+    expect(pathsOf(result.files).sort()).toEqual(['root-src/app/widget.ts', 'root-src/util.ts']);
+  });
+
+  it('still classifies an unmapped bare specifier as bare-specifier even when a baseUrl catch-all exists', async () => {
+    const root = await fixture({
+      'tsconfig.json': json({ compilerOptions: { baseUrl: './src' } }),
+      'src/math.test.ts': '',
+    });
+
+    const result = await resolveEvidenceFiles({
+      rootDir: root,
+      testFilePath: 'src/math.test.ts',
+      imports: [importRecord('lodash')],
+    });
+
+    expect(result.files).toEqual([]);
+    expect(result.unresolved).toEqual([{ specifier: 'lodash', reason: 'bare-specifier' }]);
+  });
+
+  it('resolves a workspace package name and a name/* subpath import', async () => {
+    const root = await fixture({
+      'package.json': json({ workspaces: ['packages/*'] }),
+      'packages/common/package.json': json({ name: '@musive/common', main: './index.ts' }),
+      'packages/common/index.ts': 'export const common = true;',
+      'packages/common/utils.ts': 'export const utils = true;',
+      'math.test.ts': '',
+    });
+
+    const result = await resolveEvidenceFiles({
+      rootDir: root,
+      testFilePath: 'math.test.ts',
+      imports: [importRecord('@musive/common'), importRecord('@musive/common/utils')],
+    });
+
+    expect(pathsOf(result.files).sort()).toEqual(['packages/common/index.ts', 'packages/common/utils.ts']);
+  });
+
+  it('prefers a discoverable source entry over a declared dist entry point for a workspace package', async () => {
+    const root = await fixture({
+      'package.json': json({ workspaces: ['packages/*'] }),
+      'packages/common/package.json': json({ name: '@musive/common', main: './dist/index.js' }),
+      'packages/common/dist/index.js': 'throw new Error("must not execute or be read");',
+      'packages/common/src/index.ts': 'export const common = "source";',
+      'math.test.ts': '',
+    });
+
+    const result = await resolveEvidenceFiles({
+      rootDir: root,
+      testFilePath: 'math.test.ts',
+      imports: [importRecord('@musive/common')],
+    });
+
+    expect(pathsOf(result.files)).toEqual(['packages/common/src/index.ts']);
+    expect(result.denied).toEqual([]);
+  });
+
+  it('records a workspace dist-only entry as denied rather than silently dropping it', async () => {
+    const root = await fixture({
+      'package.json': json({ workspaces: ['packages/*'] }),
+      'packages/common/package.json': json({ name: '@musive/common', main: './dist/index.js' }),
+      'packages/common/dist/index.js': 'throw new Error("must not execute or be read");',
+      'math.test.ts': '',
+    });
+
+    const result = await resolveEvidenceFiles({
+      rootDir: root,
+      testFilePath: 'math.test.ts',
+      imports: [importRecord('@musive/common')],
+    });
+
+    expect(result.files).toEqual([]);
+    expect(result.denied).toEqual([
+      { repositoryRelativePath: 'packages/common/dist/index.js', rule: 'deny-list:**/dist/**' },
+    ]);
+    expect(result.unresolved).toEqual([]);
+  });
+
+  it('reports alias-mapped-not-found for a paths specifier whose mapped target does not exist', async () => {
+    const root = await fixture({
+      'tsconfig.json': json({ compilerOptions: { baseUrl: '.', paths: { '@app/*': ['./app/*'] } } }),
+      'math.test.ts': '',
+    });
+
+    const result = await resolveEvidenceFiles({
+      rootDir: root,
+      testFilePath: 'math.test.ts',
+      imports: [importRecord('@app/missing')],
+    });
+
+    expect(result.files).toEqual([]);
+    expect(result.unresolved).toEqual([{ specifier: '@app/missing', reason: 'alias-mapped-not-found' }]);
+  });
+
+  it('denies a paths-mapped target inside a denied directory before reading it', async () => {
+    const root = await fixture({
+      'tsconfig.json': json({ compilerOptions: { baseUrl: '.', paths: { '@secret/*': ['./secrets/*'] } } }),
+      'math.test.ts': '',
+      'secrets/config.ts': 'throw new Error("must not execute or be read");',
+    });
+
+    const result = await resolveEvidenceFiles({
+      rootDir: root,
+      testFilePath: 'math.test.ts',
+      imports: [importRecord('@secret/config')],
+    });
+
+    expect(result.files).toEqual([]);
+    expect(result.denied).toEqual([
+      { repositoryRelativePath: 'secrets/config.ts', rule: 'deny-list:**/secrets/**' },
+    ]);
+  });
+
+  it('denies a paths-mapped target landing inside node_modules before reading it', async () => {
+    const root = await fixture({
+      'tsconfig.json': json({ compilerOptions: { baseUrl: '.', paths: { '@pkg/*': ['./node_modules/some-package/*'] } } }),
+      'math.test.ts': '',
+      'node_modules/some-package/index.ts': 'throw new Error("must not execute or be read");',
+    });
+
+    const result = await resolveEvidenceFiles({
+      rootDir: root,
+      testFilePath: 'math.test.ts',
+      imports: [importRecord('@pkg/index')],
+    });
+
+    expect(result.files).toEqual([]);
+    expect(result.denied).toEqual([
+      { repositoryRelativePath: 'node_modules/some-package/index.ts', rule: 'deny-list:**/node_modules/**' },
+    ]);
+  });
+
+  it('refuses a paths-mapped target whose substituted wildcard segment escapes the repository root', async () => {
+    const root = await fixture({
+      'tsconfig.json': json({ compilerOptions: { baseUrl: '.', paths: { '@lib/*': ['./lib/*'] } } }),
+      'math.test.ts': '',
+    });
+
+    const result = await resolveEvidenceFiles({
+      rootDir: root,
+      testFilePath: 'math.test.ts',
+      imports: [importRecord('@lib/../../../../../../etc/passwd')],
+    });
+
+    expect(result.files).toEqual([]);
+    expect(result.denied).toEqual([]);
+    expect(result.unresolved).toEqual([
+      { specifier: '@lib/../../../../../../etc/passwd', reason: 'outside-root' },
+    ]);
+  });
+
+  it("resolves a hop-2 alias specifier using the helper file's own nearest config, not the test file's", async () => {
+    const root = await fixture({
+      'tsconfig.json': json({ compilerOptions: { baseUrl: '.', paths: { '@shared/*': ['./test-src/*'] } } }),
+      'src/math.test.ts': '',
+      'helpers/tsconfig.json': json({ compilerOptions: { baseUrl: '.', paths: { '@shared/*': ['./helper-src/*'] } } }),
+      'helpers/setup.helper.ts': "import '@shared/util';\nexport const marker = true;",
+      'helpers/helper-src/util.ts': 'export const util = "helper";',
+      'test-src/util.ts': 'export const util = "test";',
+    });
+
+    const result = await resolveEvidenceFiles({
+      rootDir: root,
+      testFilePath: 'src/math.test.ts',
+      imports: [importRecord('../helpers/setup.helper')],
+    });
+
+    expect(pathsOf(result.files).sort()).toEqual(['helpers/helper-src/util.ts', 'helpers/setup.helper.ts']);
+    expect(pathsOf(result.files)).not.toContain('test-src/util.ts');
+  });
+
+  it("reads each importing directory's alias configuration once per run, not once per specifier", async () => {
+    const root = await fixture({
+      'tsconfig.json': json({ compilerOptions: { baseUrl: '.', paths: { '@lib/*': ['./lib/*'] } } }),
+      'src/math.test.ts': '',
+      'lib/a.ts': 'export const a = true;',
+      'lib/b.ts': 'export const b = true;',
+      'lib/c.ts': 'export const c = true;',
+    });
+
+    const reads: string[] = [];
+    const countingReader = async (request: SourceReadRequest): Promise<string> => {
+      reads.push(request.repositoryRelativePath);
+      return readSourceFile(request);
+    };
+
+    const result = await resolveEvidenceFiles({
+      rootDir: root,
+      testFilePath: 'src/math.test.ts',
+      imports: [importRecord('@lib/a'), importRecord('@lib/b'), importRecord('@lib/c')],
+      readSource: countingReader,
+    });
+
+    expect(pathsOf(result.files).sort()).toEqual(['lib/a.ts', 'lib/b.ts', 'lib/c.ts']);
+    expect(reads.filter((path) => path === 'tsconfig.json')).toEqual(['tsconfig.json']);
+  });
+
+  it("adds exactly one more configuration read batch for a helper in a different directory", async () => {
+    const root = await fixture({
+      'tsconfig.json': json({ compilerOptions: { baseUrl: '.', paths: { '@lib/*': ['./lib/*'] } } }),
+      'src/math.test.ts': '',
+      'lib/a.ts': 'export const a = true;',
+      'helpers/tsconfig.json': json({ compilerOptions: { baseUrl: '.', paths: { '@helper-lib/*': ['./helper-lib/*'] } } }),
+      'helpers/setup.helper.ts': "import '@helper-lib/thing';\nexport const marker = true;",
+      'helpers/helper-lib/thing.ts': 'export const thing = true;',
+    });
+
+    const reads: string[] = [];
+    const countingReader = async (request: SourceReadRequest): Promise<string> => {
+      reads.push(request.repositoryRelativePath);
+      return readSourceFile(request);
+    };
+
+    const result = await resolveEvidenceFiles({
+      rootDir: root,
+      testFilePath: 'src/math.test.ts',
+      imports: [importRecord('@lib/a'), importRecord('./../helpers/setup.helper')],
+      readSource: countingReader,
+    });
+
+    expect(pathsOf(result.files).sort()).toEqual(['helpers/setup.helper.ts', 'helpers/helper-lib/thing.ts', 'lib/a.ts'].sort());
+    expect(reads.filter((path) => path === 'tsconfig.json')).toEqual(['tsconfig.json']);
+    expect(reads.filter((path) => path === 'helpers/tsconfig.json')).toEqual(['helpers/tsconfig.json']);
   });
 });

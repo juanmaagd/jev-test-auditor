@@ -6,6 +6,7 @@ import type {
 } from '../domain/audit.js';
 import type { EvidenceBundle } from '../domain/evidence.js';
 import type { Diagnostic } from '../domain/test-understanding.js';
+import { createMemoizingAliasConfigReader, type AliasConfigReader } from './alias-config.js';
 import { resolveEvidenceFiles } from './evidence-resolution.js';
 import { selectEvidence } from './evidence-selection.js';
 import { readSourceFile } from './source-reader.js';
@@ -55,6 +56,13 @@ export function createMemoizingSourceReader(readSource: SourceReader = readSourc
  * test case's `imports` is equivalent to re-scanning the file and is used
  * directly, avoiding a redundant parse.
  *
+ * Also threads ONE shared, directory-cached alias mapping reader (task A-2,
+ * `odd/tasks/path-alias-resolution.md`) through every `resolveEvidenceFiles`
+ * call made by this port instance, lazily created on the first `build()`
+ * call against that call's `rootDir` and reused for the rest of the run —
+ * so a directory's `tsconfig`/`jsconfig`/`package.json` mapping table is
+ * built at most once per audit run, never once per file or per specifier.
+ *
  * Isolation, two levels:
  * - Whole-file: if `resolveEvidenceFiles` itself throws (e.g. a helper read
  *   fails), this method's returned promise rejects. `runAudit` catches that,
@@ -73,10 +81,15 @@ export function createMemoizingSourceReader(readSource: SourceReader = readSourc
  */
 export function createAuditEvidencePort(readSource: SourceReader = readSourceFile): AuditEvidencePort {
   const memoizedRead = createMemoizingSourceReader(readSource);
+  let aliasReader: { readonly rootDir: string; readonly reader: AliasConfigReader } | undefined;
 
   return {
     async build(request: AuditEvidenceBuildRequest): Promise<AuditEvidenceBuildResult> {
       if (request.testCases.length === 0) return { bundles: [], diagnostics: [] };
+
+      if (aliasReader === undefined || aliasReader.rootDir !== request.rootDir) {
+        aliasReader = { rootDir: request.rootDir, reader: createMemoizingAliasConfigReader(request.rootDir, memoizedRead) };
+      }
 
       const resolution = await resolveEvidenceFiles({
         rootDir: request.rootDir,
@@ -84,6 +97,7 @@ export function createAuditEvidencePort(readSource: SourceReader = readSourceFil
         imports: request.testCases[0]?.imports ?? [],
         deny: request.deny,
         readSource: memoizedRead,
+        getAliasMappings: aliasReader.reader,
       });
 
       const bundles: EvidenceBundle[] = [];

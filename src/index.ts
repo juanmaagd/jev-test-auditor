@@ -89,7 +89,9 @@ export {
   type EvidenceResolutionResult,
 } from './adapters/evidence-resolution.js';
 export {
+  createMemoizingAliasConfigReader,
   resolveAliasConfig,
+  type AliasConfigReader,
   type AliasConfigRequest,
 } from './adapters/alias-config.js';
 export {
