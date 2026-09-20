@@ -162,7 +162,7 @@ async function loadSqliteModule(): Promise<typeof import('node:sqlite')> {
 
 // --- Schema / versioned migrations ------------------------------------------------------
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 type Migration = (db: DatabaseSync) => void;
 
@@ -241,6 +241,21 @@ const MIGRATIONS: readonly Migration[] = [
   (db) => {
     db.exec('ALTER TABLE work_items ADD COLUMN cache_key TEXT;');
     db.exec('CREATE INDEX idx_work_items_cache_key ON work_items (cache_key);');
+  },
+  // Phase 6, task P6-1: per-request latency. Both new columns are nullable — deliberately, and
+  // for the identical reason `work_items.cache_key` above is nullable: a completed work item
+  // recorded before this migration ran (a v2 `attempts` row) never captured latency at all, and
+  // this migration must never fabricate a value (a made-up `0`, or an empty `[]`) standing in for
+  // "genuinely measured, and it was zero." `latency_ms` is the whole-call wall-clock total
+  // (`JevEvaluation.latencyMs`, including every internal retry and the backoff wait between
+  // attempts); `attempt_latencies_ms` is that same evaluation's per-attempt breakdown
+  // (`JevEvaluation.attemptLatenciesMs`), stored as a JSON array of milliseconds — the same
+  // "store a JSON-serialized array/object in a TEXT column" convention `raw_answers` already uses
+  // on this exact table, rather than a normalized child table for what is always read back as one
+  // unit alongside its owning attempt.
+  (db) => {
+    db.exec('ALTER TABLE attempts ADD COLUMN latency_ms INTEGER;');
+    db.exec('ALTER TABLE attempts ADD COLUMN attempt_latencies_ms TEXT;');
   },
 ];
 
@@ -377,8 +392,8 @@ function insertWorkItem(
 function insertAttempt(db: DatabaseSync, workItemId: number, evaluation: JevEvaluation): void {
   db.prepare(`
     INSERT INTO attempts
-      (work_item_id, requested_model, responded_model, model_matches_pin, attempts, raw_answers, input_tokens, output_tokens)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      (work_item_id, requested_model, responded_model, model_matches_pin, attempts, raw_answers, input_tokens, output_tokens, latency_ms, attempt_latencies_ms)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     workItemId,
     evaluation.requestedModel,
@@ -388,6 +403,12 @@ function insertAttempt(db: DatabaseSync, workItemId: number, evaluation: JevEval
     JSON.stringify(evaluation.answers),
     evaluation.usage.inputTokens,
     evaluation.usage.outputTokens,
+    // Phase 6, task P6-1: both nullable (see MIGRATIONS[2]'s own doc) — `undefined` on the
+    // in-memory `JevEvaluation` (never produced by the live gateway, only possible for a
+    // hand-built fixture or a value reconstructed from a pre-P6-1 row) stores as a real SQL NULL,
+    // never a fabricated 0 or '[]'.
+    evaluation.latencyMs ?? null,
+    evaluation.attemptLatenciesMs === undefined ? null : JSON.stringify(evaluation.attemptLatenciesMs),
   );
 }
 
@@ -415,11 +436,14 @@ interface StoredAttemptRow {
   readonly raw_answers: string;
   readonly input_tokens: number;
   readonly output_tokens: number;
+  /** Phase 6, task P6-1: NULL for a row recorded before this migration (see MIGRATIONS[2]'s own doc) — never a fabricated 0. */
+  readonly latency_ms: number | null;
+  readonly attempt_latencies_ms: string | null;
 }
 
 function loadAttempt(db: DatabaseSync, workItemId: number): JevEvaluation | undefined {
   const row = db.prepare(`
-    SELECT requested_model, responded_model, model_matches_pin, attempts, raw_answers, input_tokens, output_tokens
+    SELECT requested_model, responded_model, model_matches_pin, attempts, raw_answers, input_tokens, output_tokens, latency_ms, attempt_latencies_ms
     FROM attempts WHERE work_item_id = ?
   `).get(workItemId) as StoredAttemptRow | undefined;
   if (row === undefined) return undefined;
@@ -430,6 +454,11 @@ function loadAttempt(db: DatabaseSync, workItemId: number): JevEvaluation | unde
     answers: JSON.parse(row.raw_answers) as JevEvaluation['answers'],
     usage: { inputTokens: row.input_tokens, outputTokens: row.output_tokens },
     attempts: row.attempts,
+    // Omitted entirely (never `latencyMs: undefined` as an explicit key) for a legacy row that
+    // never captured this data — see `JevEvaluation.latencyMs`'s own doc (`src/domain/jev-gateway.ts`)
+    // for why the field is optional at all.
+    ...(row.latency_ms === null ? {} : { latencyMs: row.latency_ms }),
+    ...(row.attempt_latencies_ms === null ? {} : { attemptLatenciesMs: JSON.parse(row.attempt_latencies_ms) as readonly number[] }),
   };
 }
 

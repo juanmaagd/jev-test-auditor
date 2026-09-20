@@ -79,6 +79,31 @@ export interface JevEvaluation {
   readonly usage: JevUsage;
   /** Total HTTP attempts made for this evaluation, including the first (never zero for a completed evaluation). */
   readonly attempts: number;
+  /**
+   * Wall-clock milliseconds for the whole `evaluate()` call, measured around every internal
+   * attempt AND every backoff wait between them (Phase 6, task P6-1) — so a genuinely slow
+   * provider (one attempt, but a long round trip) reads differently from one that answered fast
+   * but was retried after a 429/529 (several fast attempts, a long total because of the backoff
+   * waits in between). See {@link attemptLatenciesMs} for the per-attempt breakdown that tells
+   * those two cases apart. Never used as a throttle signal — see `runEvaluation`'s own doc
+   * (`src/application/audit.ts`) for why that stays derived exclusively from `attempts`/the typed
+   * error kind, never from a wall-clock heuristic.
+   *
+   * Optional, not because a live gateway call ever omits it (`src/adapters/jev-http-gateway.ts`
+   * always measures it), but because a `JevEvaluation` reconstructed from a store row written
+   * before this field existed (a v2-schema `attempts` row, migrated forward to v3 without this
+   * data ever having been captured) has no latency to report — see
+   * `src/adapters/sqlite-audit-store.ts`'s `loadAttempt`.
+   */
+  readonly latencyMs?: number;
+  /**
+   * One wall-clock millisecond duration per HTTP attempt actually made, in the order those
+   * attempts happened — always the same length as {@link attempts}. Each entry covers exactly one
+   * `attemptOnce` call (`src/adapters/jev-http-gateway.ts`): the request, and reading its whole
+   * response body, but never a backoff wait (those are only reflected in {@link latencyMs}, the
+   * whole-call total). Optional for the same reason `latencyMs` is — see that field's own doc.
+   */
+  readonly attemptLatenciesMs?: readonly number[];
 }
 
 export interface JevGatewayEvaluateOptions {

@@ -192,9 +192,11 @@ describe('createSqliteAuditStore migrations', () => {
         .map((row) => (row as { readonly name: string }).name);
       expect(tables).toEqual(expect.arrayContaining(['runs', 'work_items', 'attempts', 'judgments', 'errors', 'skips', 'schema_meta']));
       const version = (db.prepare('SELECT schema_version FROM schema_meta WHERE id = 1').get() as { readonly schema_version: number }).schema_version;
-      // Phase 5, task P5-2 bumps the schema to version 2 (adds `work_items.cache_key`) — see the
-      // "upgrades a v1 database to v2" test below for the migration-as-upgrade path.
-      expect(version).toBe(2);
+      // Phase 5, task P5-2 bumps the schema to version 2 (adds `work_items.cache_key`); Phase 6,
+      // task P6-1 bumps it again to version 3 (adds `attempts.latency_ms`/`attempt_latencies_ms`)
+      // — see the "upgrades a v1 database to v2" and "upgrades a v2 database to v3" tests below
+      // for the migration-as-upgrade path.
+      expect(version).toBe(3);
     } finally {
       db.close();
     }
@@ -268,11 +270,15 @@ describe('createSqliteAuditStore migrations', () => {
 
     const db = new DatabaseSync(databaseFile);
     try {
+      // A v1 database is migrated all the way to the CURRENT schema version (3, as of Phase 6,
+      // task P6-1) — this is the run-every-pending-migration path, not a stop at 2.
       const version = (db.prepare('SELECT schema_version FROM schema_meta WHERE id = 1').get() as { readonly schema_version: number }).schema_version;
-      expect(version).toBe(2);
+      expect(version).toBe(3);
 
       const columns = db.prepare('PRAGMA table_info(work_items)').all().map((row) => (row as { readonly name: string }).name);
       expect(columns).toContain('cache_key');
+      const attemptColumns = db.prepare('PRAGMA table_info(attempts)').all().map((row) => (row as { readonly name: string }).name);
+      expect(attemptColumns).toEqual(expect.arrayContaining(['latency_ms', 'attempt_latencies_ms']));
 
       const preExisting = db.prepare('SELECT * FROM work_items WHERE test_case_id = ?').get('tc:v1:pre-existing') as Record<string, unknown>;
       expect(preExisting['state']).toBe('skipped');
@@ -280,6 +286,110 @@ describe('createSqliteAuditStore migrations', () => {
       expect(preExisting['cache_key']).toBeNull();
 
       const run = db.prepare('SELECT * FROM runs WHERE id = ?').get('pre-existing-run') as Record<string, unknown>;
+      expect(run['root_dir']).toBe('/repo');
+    } finally {
+      db.close();
+    }
+  });
+
+  // The only test that exercises MIGRATIONS[2] as an actual upgrade (version 2 -> 3), rather than
+  // from-empty or from-v1 (both of which run every pending migration in one pass and alone could
+  // never distinguish "ran the v2-to-v3 migration too" from "only ever knew how to create the
+  // newest schema directly") — Phase 6, task P6-1's own required proof: "a hand-built v2 fixture,
+  // not only by fresh creation."
+  it('upgrades a hand-built v2 database to v3, adding attempts.latency_ms/attempt_latencies_ms without losing a row', async () => {
+    const databaseFile = await tempDatabaseFile();
+    await mkdir(dirname(databaseFile), { recursive: true });
+
+    // Recreate exactly what MIGRATIONS[0] + MIGRATIONS[1] produce (schema version 2: the original
+    // seven tables plus `work_items.cache_key`), plus a schema_meta row pinned at 2 — a faithful
+    // stand-in for a real database written by a pre-P6-1 build.
+    const v2Db = new DatabaseSync(databaseFile);
+    v2Db.exec(`
+      CREATE TABLE runs (
+        id TEXT PRIMARY KEY,
+        root_dir TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        finished_at TEXT
+      ) STRICT;
+    `);
+    v2Db.exec(`
+      CREATE TABLE work_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id TEXT NOT NULL REFERENCES runs(id),
+        test_case_id TEXT NOT NULL,
+        repository_relative_path TEXT NOT NULL,
+        name TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('pending','running','completed','cached','uncertain','skipped','failed')),
+        recorded_at TEXT NOT NULL,
+        cache_key TEXT
+      ) STRICT;
+    `);
+    v2Db.exec('CREATE INDEX idx_work_items_cache_key ON work_items (cache_key);');
+    v2Db.exec(`
+      CREATE TABLE attempts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        work_item_id INTEGER NOT NULL REFERENCES work_items(id),
+        requested_model TEXT NOT NULL,
+        responded_model TEXT NOT NULL,
+        model_matches_pin INTEGER NOT NULL CHECK (model_matches_pin IN (0, 1)),
+        attempts INTEGER NOT NULL,
+        raw_answers TEXT NOT NULL,
+        input_tokens INTEGER NOT NULL,
+        output_tokens INTEGER NOT NULL
+      ) STRICT;
+    `);
+    v2Db.exec(`
+      CREATE TABLE judgments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        work_item_id INTEGER NOT NULL REFERENCES work_items(id),
+        status TEXT NOT NULL,
+        policy_version INTEGER NOT NULL,
+        rubric_version INTEGER NOT NULL,
+        classification TEXT NOT NULL
+      ) STRICT;
+    `);
+    v2Db.exec(`CREATE TABLE errors (id INTEGER PRIMARY KEY AUTOINCREMENT, work_item_id INTEGER NOT NULL REFERENCES work_items(id), kind TEXT NOT NULL, message TEXT NOT NULL) STRICT;`);
+    v2Db.exec(`CREATE TABLE skips (id INTEGER PRIMARY KEY AUTOINCREMENT, work_item_id INTEGER NOT NULL REFERENCES work_items(id), reason TEXT NOT NULL) STRICT;`);
+    v2Db.exec(`CREATE TABLE schema_meta (id INTEGER PRIMARY KEY CHECK (id = 1), schema_version INTEGER NOT NULL) STRICT;`);
+    v2Db.exec('INSERT INTO schema_meta (id, schema_version) VALUES (1, 2)');
+    v2Db.prepare('INSERT INTO runs (id, root_dir, started_at) VALUES (?, ?, ?)').run('pre-v3-run', '/repo', '2026-01-01T00:00:00.000Z');
+    const preExistingWorkItem = v2Db.prepare(
+      'INSERT INTO work_items (run_id, test_case_id, repository_relative_path, name, state, recorded_at, cache_key) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    ).run('pre-v3-run', 'tc:v1:pre-v3', 'a.test.ts', 'pre-v3 test', 'completed', '2026-01-01T00:00:00.000Z', 'ck-pre-v3');
+    // A real pre-P6-1 attempts row — no latency data was ever captured for it, and the migration
+    // must never fabricate any: it stays exactly as it was, with the two new columns present but
+    // NULL, not backfilled with a made-up 0 or duplicated value.
+    v2Db.prepare(`
+      INSERT INTO attempts (work_item_id, requested_model, responded_model, model_matches_pin, attempts, raw_answers, input_tokens, output_tokens)
+      VALUES (?, ?, ?, 1, 1, '{}', 321, 654)
+    `).run(Number(preExistingWorkItem.lastInsertRowid), 'jev-eval-requested-model', 'jev-eval-responded-model');
+    v2Db.close();
+
+    const store = await createSqliteAuditStore({ databaseFile });
+    await store.close();
+
+    const db = new DatabaseSync(databaseFile);
+    try {
+      const version = (db.prepare('SELECT schema_version FROM schema_meta WHERE id = 1').get() as { readonly schema_version: number }).schema_version;
+      expect(version).toBe(3);
+
+      const attemptColumns = db.prepare('PRAGMA table_info(attempts)').all().map((row) => (row as { readonly name: string }).name);
+      expect(attemptColumns).toEqual(expect.arrayContaining(['latency_ms', 'attempt_latencies_ms']));
+
+      const preExisting = db.prepare('SELECT * FROM work_items WHERE test_case_id = ?').get('tc:v1:pre-v3') as Record<string, unknown>;
+      expect(preExisting['state']).toBe('completed');
+      expect(preExisting['cache_key']).toBe('ck-pre-v3');
+
+      const preExistingAttempt = db.prepare('SELECT * FROM attempts WHERE work_item_id = ?').get(preExisting['id'] as number) as Record<string, unknown>;
+      expect(preExistingAttempt['input_tokens']).toBe(321);
+      expect(preExistingAttempt['output_tokens']).toBe(654);
+      // Never fabricated: a row the migration never had latency data for reads back NULL, not 0
+      // and not any other made-up value.
+      expect(preExistingAttempt['latency_ms']).toBeNull();
+      expect(preExistingAttempt['attempt_latencies_ms']).toBeNull();
+
+      const run = db.prepare('SELECT * FROM runs WHERE id = ?').get('pre-v3-run') as Record<string, unknown>;
       expect(run['root_dir']).toBe('/repo');
     } finally {
       db.close();
@@ -318,7 +428,7 @@ describe('createSqliteAuditStore migrations', () => {
     db.close();
 
     await expect(createSqliteAuditStore({ databaseFile })).rejects.toThrow(AuditStoreSchemaVersionError);
-    await expect(createSqliteAuditStore({ databaseFile })).rejects.toMatchObject({ foundVersion: 999, supportedVersion: 2 });
+    await expect(createSqliteAuditStore({ databaseFile })).rejects.toMatchObject({ foundVersion: 999, supportedVersion: 3 });
   });
 
   it('fails with a named, visible error when schema_meta exists but its row is missing or malformed, rather than silently recreating the database', async () => {
@@ -440,7 +550,7 @@ describe('createSqliteAuditStore foreign database protection', () => {
     const db = new DatabaseSync(databaseFile);
     try {
       const version = (db.prepare('SELECT schema_version FROM schema_meta WHERE id = 1').get() as { readonly schema_version: number }).schema_version;
-      expect(version).toBe(2);
+      expect(version).toBe(3);
     } finally {
       db.close();
     }
@@ -576,6 +686,14 @@ function sampleEvaluation(): JevEvaluation {
     },
     usage: { inputTokens: 211, outputTokens: 47 },
     attempts: 9,
+    // Phase 6, task P6-1: two more distinct, non-symmetric fixture values, following the same
+    // discipline as every other field on this fixture (see this function's own comment) — neither
+    // number reuses 9/211/47 (or any other column's fixture value elsewhere in this file), so a
+    // swap between `latency_ms` and any adjacent numeric column (`attempts`, `input_tokens`,
+    // `output_tokens`) in `insertAttempt` (`src/adapters/sqlite-audit-store.ts`) turns this suite
+    // RED instead of going undetected.
+    latencyMs: 8642,
+    attemptLatenciesMs: [1357, 2864, 4421],
   };
 }
 
@@ -618,6 +736,12 @@ describe('createSqliteAuditStore work-item persistence', () => {
       expect(attempt['attempts']).toBe(9);
       expect(attempt['input_tokens']).toBe(211);
       expect(attempt['output_tokens']).toBe(47);
+      // Phase 6, task P6-1: `latency_ms` sits directly next to `attempts`/`input_tokens`/
+      // `output_tokens` — the exact "adjacent numeric columns" danger zone this project's own
+      // Phase 5 self-deceiving-test post-mortems warn about — so it is asserted individually here
+      // too, against its own distinct fixture value (8642), never reused by any other column.
+      expect(attempt['latency_ms']).toBe(8642);
+      expect(JSON.parse(attempt['attempt_latencies_ms'] as string)).toEqual([1357, 2864, 4421]);
       expect(JSON.parse(attempt['raw_answers'] as string)).toEqual(sampleEvaluation().answers);
 
       const judgment = db.prepare('SELECT * FROM judgments WHERE work_item_id = ?').get(workItem['id'] as number) as Record<string, unknown>;
@@ -1083,6 +1207,46 @@ describe('createSqliteAuditStore loadRunState', () => {
     expect(outcome.classification).toEqual(sampleClassification(testCaseId));
   });
 
+  // Phase 6, task P6-1: a completed row written by a pre-P6-1 (schema v2) build never captured
+  // latency at all — `latency_ms`/`attempt_latencies_ms` are NULL for it, exactly like the v2-to-v3
+  // migration itself never backfills them (see the "upgrades a hand-built v2 database to v3" test
+  // above). Reconstructing such a row must report "no latency data," never a fabricated `0` or an
+  // empty array standing in for "genuinely zero" — so this bypasses `recordWorkItem` and writes
+  // the row directly via SQL, the same technique this file's other "shape recordWorkItem itself
+  // never produces" tests use, to prove `loadAttempt` degrades honestly rather than lying.
+  it('reconstructs a legacy completed work item with no captured latency data as having none — never a fabricated 0 or []', async () => {
+    databaseFile = await tempDatabaseFile();
+    store = await createSqliteAuditStore({ databaseFile });
+    const runId = await store.beginRun('/repo');
+    const testCaseId = 'tc:v1:resume-legacy-no-latency' as TestCaseId;
+    const identity = { testCaseId, repositoryRelativePath: 'a.test.ts', name: 'adds numbers' };
+
+    const db = new DatabaseSync(databaseFile);
+    try {
+      const inserted = db.prepare(
+        'INSERT INTO work_items (run_id, test_case_id, repository_relative_path, name, state, recorded_at, cache_key) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      ).run(runId, testCaseId, identity.repositoryRelativePath, identity.name, 'completed', new Date().toISOString(), 'ck-legacy-no-latency');
+      const workItemId = Number(inserted.lastInsertRowid);
+      db.prepare(
+        'INSERT INTO attempts (work_item_id, requested_model, responded_model, model_matches_pin, attempts, raw_answers, input_tokens, output_tokens) VALUES (?, ?, ?, 1, 1, \'{}\', 0, 0)',
+      ).run(workItemId, 'jev-eval-requested-model', 'jev-eval-responded-model');
+      db.prepare(
+        'INSERT INTO judgments (work_item_id, status, policy_version, rubric_version, classification) VALUES (?, ?, ?, ?, ?)',
+      ).run(workItemId, 'healthy', 3, 6, JSON.stringify(sampleClassification(testCaseId)));
+    } finally {
+      db.close();
+    }
+
+    const state = await store.loadRunState(runId);
+    const outcome = state?.terminalWorkItems[0];
+    expect(outcome?.state).toBe('completed');
+    if (outcome?.state !== 'completed') throw new Error('unreachable');
+    expect(outcome.evaluation.latencyMs).toBeUndefined();
+    expect(outcome.evaluation.attemptLatenciesMs).toBeUndefined();
+    expect('latencyMs' in outcome.evaluation).toBe(false);
+    expect('attemptLatenciesMs' in outcome.evaluation).toBe(false);
+  });
+
   it('reconstructs a cached work item\'s reused classification', async () => {
     databaseFile = await tempDatabaseFile();
     store = await createSqliteAuditStore({ databaseFile });
@@ -1353,6 +1517,30 @@ describe('openSqliteAuditStoreForLookup', () => {
       db.close();
 
       await expect(openSqliteAuditStoreForLookup({ databaseFile })).resolves.toEqual({ available: false, reason: 'schema-outdated' });
+    },
+  );
+
+  it(
+    'degrades to { available: false, reason: \'schema-outdated\' } for a hand-built v2 database — the v3 latency '
+    + 'migration must never run during a dry run, and the file must stay byte-identical with no sidecar (Phase 6, task P6-1)',
+    async () => {
+      const databaseFile = await tempDatabaseFile();
+      await mkdir(dirname(databaseFile), { recursive: true });
+      const db = new DatabaseSync(databaseFile);
+      db.exec('CREATE TABLE schema_meta (id INTEGER PRIMARY KEY CHECK (id = 1), schema_version INTEGER NOT NULL) STRICT;');
+      db.exec('INSERT INTO schema_meta (id, schema_version) VALUES (1, 2)');
+      db.close();
+
+      const beforeBytes = await readFile(databaseFile);
+      const beforeHash = createHash('sha256').update(beforeBytes).digest('hex');
+
+      await expect(openSqliteAuditStoreForLookup({ databaseFile })).resolves.toEqual({ available: false, reason: 'schema-outdated' });
+
+      const afterBytes = await readFile(databaseFile);
+      const afterHash = createHash('sha256').update(afterBytes).digest('hex');
+      expect(afterHash).toBe(beforeHash);
+      await expect(stat(`${databaseFile}-wal`)).rejects.toThrow();
+      await expect(stat(`${databaseFile}-shm`)).rejects.toThrow();
     },
   );
 

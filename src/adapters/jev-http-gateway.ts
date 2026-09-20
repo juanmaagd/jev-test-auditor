@@ -260,7 +260,13 @@ function normalizeAnswer(questionId: string, raw: unknown, attempts: number): Je
   throw new JevResponseError(`Jev answer for question "${questionId}" has an unknown type "${String(type)}".`, attempts, { questionId });
 }
 
-function parseSuccessBody(bodyText: string, request: JevRequest, attempts: number): JevEvaluation {
+function parseSuccessBody(
+  bodyText: string,
+  request: JevRequest,
+  attempts: number,
+  latencyMs: number,
+  attemptLatenciesMs: readonly number[],
+): JevEvaluation {
   let parsed: unknown;
   try {
     parsed = JSON.parse(bodyText);
@@ -316,6 +322,8 @@ function parseSuccessBody(bodyText: string, request: JevRequest, attempts: numbe
     answers: normalizedAnswers,
     usage: { inputTokens, outputTokens },
     attempts,
+    latencyMs,
+    attemptLatenciesMs,
   };
 }
 
@@ -367,10 +375,23 @@ export function createJevHttpGateway(options: CreateJevHttpGatewayOptions = {}):
       body: requestBody,
     };
 
+    // P6-1: wall-clock latency measurement, entirely additive around the existing control flow
+    // below — every timeout/abort/retry/backoff decision is untouched (Phase 6 Scope: "must not
+    // change the gateway's existing timeout, abort, or 429/529 backoff behavior"). `startedAtMs`
+    // covers the whole call, including every internal retry and the backoff wait between
+    // attempts; `attemptLatenciesMs` covers only each individual `attemptOnce` call (the request
+    // and reading its whole response body), never a backoff wait — see `JevEvaluation.latencyMs`/
+    // `.attemptLatenciesMs`'s own doc (`src/domain/jev-gateway.ts`) for why both numbers matter.
+    // `nowFn` is the same injectable clock `parseRetryAfterMs` below already uses, never a bare
+    // `Date.now()` call, so a test never depends on the real clock.
+    const startedAtMs = nowFn();
+    const attemptLatenciesMs: number[] = [];
     let attempts = 0;
     for (let retryIndex = 0; ; retryIndex += 1) {
       attempts += 1;
+      const attemptStartedAtMs = nowFn();
       const outcome = await attemptOnce(fetch, baseUrl, init, timeoutMs, sleepFn, callerSignal);
+      attemptLatenciesMs.push(nowFn() - attemptStartedAtMs);
 
       if (outcome.kind === 'aborted') throw new JevAbortError(attempts);
       if (outcome.kind === 'timeout') throw new JevTimeoutError(timeoutMs, attempts);
@@ -387,7 +408,7 @@ export function createJevHttpGateway(options: CreateJevHttpGatewayOptions = {}):
       const { status, headers, bodyText } = outcome;
 
       if (status >= 200 && status < 300) {
-        return parseSuccessBody(bodyText, request, attempts);
+        return parseSuccessBody(bodyText, request, attempts, nowFn() - startedAtMs, attemptLatenciesMs);
       }
       if (status === 401) {
         throw new JevAuthError(attempts);

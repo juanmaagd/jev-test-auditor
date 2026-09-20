@@ -216,6 +216,11 @@ describe('evaluate — happy path', () => {
       },
       usage: { inputTokens: 512, outputTokens: 0 },
       attempts: 1,
+      // `fixture()`'s default `now` (line ~125) is a constant clock, so a single attempt's
+      // wall-clock delta is deterministically 0 — see the "evaluate — latency measurement"
+      // tests below for a clock that actually advances between calls.
+      latencyMs: 0,
+      attemptLatenciesMs: [0],
     });
     expect(globalFetchSpy).not.toHaveBeenCalled();
   });
@@ -381,6 +386,74 @@ describe('evaluate — retry on 429/529', () => {
     expect((error as JevRateLimitError).attempts).toBe(3);
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
+});
+
+/**
+ * A scripted `now` stub for latency tests (P6-1): returns each of `values` in order, one per
+ * call, and throws if called more times than `values` has entries — an over-call is exactly the
+ * kind of drift (an extra or missing `nowFn()` call site) this task's latency instrumentation
+ * must not introduce, so it must fail loudly rather than silently returning `undefined`/`NaN`.
+ */
+function scriptedNow(values: readonly number[]): () => number {
+  let index = 0;
+  return () => {
+    if (index >= values.length) {
+      throw new Error(`scriptedNow: called more times (${index + 1}) than the ${values.length} scripted values allow`);
+    }
+    const value = values[index]!;
+    index += 1;
+    return value;
+  };
+}
+
+describe('evaluate — latency measurement (P6-1)', () => {
+  it('measures a single successful attempt\'s whole-call latency and its own one-entry per-attempt latency, via the injectable clock', async () => {
+    const now = scriptedNow([
+      1_700_000_000_000, // evaluate() call start
+      1_700_000_000_000, // attempt 1 start
+      1_700_000_000_120, // attempt 1 end -> 120ms
+      1_700_000_000_300, // evaluate() call end -> 300ms total
+    ]);
+    const { fetchMock, gateway } = fixture({ now });
+    fetchMock.mockResolvedValue(jsonResponse(200, validSuccessBody));
+
+    const result = await gateway.evaluate(sampleRequest);
+
+    expect(result.attempts).toBe(1);
+    expect(result.attemptLatenciesMs).toEqual([120]);
+    expect(result.latencyMs).toBe(300);
+  });
+
+  it(
+    'on a retried request, records one latency entry per HTTP attempt and a whole-call total that '
+    + 'includes the backoff wait between them — telling "genuinely slow" apart from "fast but throttled"',
+    async () => {
+      const now = scriptedNow([
+        1_700_000_000_000, // evaluate() call start
+        1_700_000_000_000, // attempt 1 (429) start
+        1_700_000_000_050, // attempt 1 end -> 50ms
+        1_700_000_000_600, // attempt 2 start (after the backoff sleep)
+        1_700_000_000_650, // attempt 2 end -> 50ms
+        1_700_000_000_700, // evaluate() call end -> 700ms total
+      ]);
+      const { fetchMock, gateway } = fixture({ now, retry: { random: () => 0 } });
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse(429, {}))
+        .mockResolvedValueOnce(jsonResponse(200, validSuccessBody));
+
+      const result = await gateway.evaluate(sampleRequest);
+
+      expect(result.attempts).toBe(2);
+      // Every per-attempt latency is fast (50ms each) — sum 100ms — but the whole-call total
+      // (700ms) is far larger, because it also covers the backoff wait between attempts. A
+      // caller that only looked at the per-attempt numbers would wrongly conclude the provider
+      // answered quickly every time; the whole-call total is what actually tells this case apart
+      // from a genuinely slow provider.
+      expect(result.attemptLatenciesMs).toEqual([50, 50]);
+      expect(result.latencyMs).toBe(700);
+      expect(result.latencyMs).not.toBe((result.attemptLatenciesMs ?? []).reduce((sum, ms) => sum + ms, 0));
+    },
+  );
 });
 
 describe('evaluate — timeout', () => {
