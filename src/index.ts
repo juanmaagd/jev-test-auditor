@@ -180,6 +180,23 @@ export {
   type JevSleep,
 } from './adapters/jev-http-gateway.js';
 
+export {
+  CLASSIFICATION_LEVELS,
+  CLASSIFICATION_POLICY_V1,
+  classifyEvaluation,
+  validateClassificationPolicy,
+  type ClassificationFinding,
+  type ClassificationLevel,
+  type ClassificationPolicy,
+  type ClassificationResult,
+  type ClassificationTestCaseIdentity,
+  type ClassifyEvaluationInput,
+  type DimensionJudgment,
+  type DimensionJudgmentStatus,
+  type DimensionNeedsReviewReason,
+  type OverallClassificationStatus,
+} from './domain/classification.js';
+
 export { runAudit } from './application/audit.js';
 export {
   type AuditDiagnostic,
