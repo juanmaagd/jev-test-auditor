@@ -2,17 +2,25 @@ import { describe, expect, it } from 'vitest';
 import {
   classifyTestCase,
   estimateDryRun,
+  estimateTokensFromBytes,
   JEV_ESTIMATE_SNAPSHOT,
   JEV_VERIFIED_RATE_LIMITS,
   validateJevEstimateSnapshot,
   type DryRunFileInput,
   type JevEstimateSnapshot,
 } from '../src/domain/estimate.js';
-import { JEV_MODEL_ID } from '../src/domain/rubric.js';
+import { JEV_MODEL_ID, RUBRIC_V1, type Rubric } from '../src/domain/rubric.js';
+import {
+  buildJevQuestions,
+  buildJevRequest,
+  canonicalizeJevRequest,
+  canonicalizeJevRequestQuestions,
+} from '../src/domain/jev-request.js';
 import {
   buildEvidenceBundle,
   canonicalizeEvidenceBundle,
   DEFAULT_EVIDENCE_BUDGET,
+  utf8ByteLength,
   type EvidenceBundle,
 } from '../src/domain/evidence.js';
 import type { TestCase, TestCaseId, TestModifierKind } from '../src/domain/test-understanding.js';
@@ -66,19 +74,72 @@ function smallBundle(testCaseId: string): EvidenceBundle {
   });
 }
 
+/**
+ * Same shape as {@link smallBundle}, but with plain-ASCII (`x`) content of an
+ * exact, caller-chosen byte length — used by the real-world calibration
+ * regression test below to engineer an exact total canonical request byte
+ * count across several test cases (a plain ASCII char never needs JSON
+ * escaping, so each added character contributes exactly one more canonical
+ * byte, verified against the real `buildJevRequest`/`canonicalizeJevRequest`
+ * functions when the fixture was constructed).
+ */
+function contentLengthBundle(testCaseId: string, length: number): EvidenceBundle {
+  return buildEvidenceBundle({
+    testCaseId: testCaseId as TestCaseId,
+    budget: DEFAULT_EVIDENCE_BUDGET,
+    fragments: [{
+      kind: 'test',
+      repositoryRelativePath: 'a.ts',
+      span: zeroSpan,
+      content: 'x'.repeat(length),
+      contentHash: 'h',
+      selectionReason: 'test-body',
+      truncation: { truncated: false, originalBytes: length, includedBytes: length },
+    }],
+    denied: [],
+    unresolved: [],
+    omitted: [],
+  });
+}
+
 describe('JEV_ESTIMATE_SNAPSHOT', () => {
-  it('carries the verified Jev 1.13.0 pricing/overhead facts', () => {
-    expect(JEV_ESTIMATE_SNAPSHOT).toEqual({
-      version: 1,
-      model: 'jev-1.13.0',
-      asOf: '2026-09-19',
-      usdPerMillionInputTokens: 0.042,
-      outputTokensBilled: false,
-      bytesPerToken: { min: 2.5, max: 4.5 },
-      requestOverheadTokens: { min: 620, max: 2440 },
-      maxFollowUpsPerTest: 1,
-      requestTokenCeiling: 64_000,
-    });
+  it(
+    'carries the verified Jev 1.13.0 pricing facts, re-calibrated from one real 11-request run on 2026-09-20 '
+    + '(4.458 measured bytes/token; requestOverheadTokens removed — overhead is now measured from the real '
+    + "rubric-built request, never guessed)",
+    () => {
+      expect(JEV_ESTIMATE_SNAPSHOT).toEqual({
+        version: 2,
+        model: 'jev-1.13.0',
+        asOf: '2026-09-20',
+        usdPerMillionInputTokens: 0.042,
+        outputTokensBilled: false,
+        bytesPerToken: { min: 3.0, max: 4.8 },
+        maxFollowUpsPerTest: 1,
+        requestTokenCeiling: 64_000,
+      });
+    },
+  );
+
+  it(
+    'keeps bytesPerToken.min deliberately conservative (3.0, below the single observed 4.458 sample) because '
+    + 'the two bounds fail asymmetrically: a real ratio above max only overestimates cost (harmless), but a real '
+    + 'ratio below min understates what the user is actually billed — the exact failure this correction exists '
+    + 'to fix. Denser-than-English content (JSON-heavy fixtures, non-Latin/CJK source) can tokenize below the '
+    + 'single English/TypeScript sample this snapshot was calibrated from, so min stays well below it rather '
+    + 'than tight around it. Mutation guard: reverting min to the old 3.5 must fail this exact assertion.',
+    () => {
+      expect(JEV_ESTIMATE_SNAPSHOT.bytesPerToken.min).toBe(3.0);
+      // A hypothetical denser-than-sample ratio (3.2 bytes/token) sits between the old 3.5
+      // floor and the new 3.0 floor: the old bound would have missed it (understating tokens
+      // for that content), the new one still brackets it.
+      const denserThanSampleRatio = 3.2;
+      expect(JEV_ESTIMATE_SNAPSHOT.bytesPerToken.min).toBeLessThanOrEqual(denserThanSampleRatio);
+    },
+  );
+
+  it('never carries a requestOverheadTokens field (deleted: overhead is measured from the real request, not assumed)', () => {
+    expect(Object.hasOwn(JEV_ESTIMATE_SNAPSHOT, 'requestOverheadTokens')).toBe(false);
   });
 
   it('pins model to the exact JEV_MODEL_ID constant (identity, not a re-typed literal) so the estimator can never silently drift from the rubric pin', () => {
@@ -87,6 +148,13 @@ describe('JEV_ESTIMATE_SNAPSHOT', () => {
 
   it('validates without throwing', () => {
     expect(() => validateJevEstimateSnapshot(JEV_ESTIMATE_SNAPSHOT)).not.toThrow();
+  });
+
+  it('brackets the measured real-world ratio (320,360 canonical request bytes / 71,855 billed tokens = 4.458 bytes/token) with margin', () => {
+    const observedBytesPerToken = 320_360 / 71_855;
+    expect(observedBytesPerToken).toBeCloseTo(4.458, 3);
+    expect(JEV_ESTIMATE_SNAPSHOT.bytesPerToken.min).toBeLessThanOrEqual(observedBytesPerToken);
+    expect(JEV_ESTIMATE_SNAPSHOT.bytesPerToken.max).toBeGreaterThanOrEqual(observedBytesPerToken);
   });
 });
 
@@ -146,18 +214,6 @@ describe('validateJevEstimateSnapshot', () => {
     expect(() => validateJevEstimateSnapshot({ ...valid, bytesPerToken: { min: 5, max: 4.5 } })).toThrow(RangeError);
   });
 
-  it('rejects a negative requestOverheadTokens.min', () => {
-    expect(() => validateJevEstimateSnapshot({ ...valid, requestOverheadTokens: { min: -1, max: 100 } })).toThrow(RangeError);
-  });
-
-  it('rejects requestOverheadTokens.min exceeding requestOverheadTokens.max', () => {
-    expect(() => validateJevEstimateSnapshot({ ...valid, requestOverheadTokens: { min: 500, max: 100 } })).toThrow(RangeError);
-  });
-
-  it('allows a zero requestOverheadTokens.min (no overhead floor is valid, if pessimistic)', () => {
-    expect(() => validateJevEstimateSnapshot({ ...valid, requestOverheadTokens: { min: 0, max: 100 } })).not.toThrow();
-  });
-
   it('rejects a negative maxFollowUpsPerTest', () => {
     expect(() => validateJevEstimateSnapshot({ ...valid, maxFollowUpsPerTest: -1 })).toThrow(RangeError);
   });
@@ -213,15 +269,19 @@ describe('estimateDryRun', () => {
     const result = estimateDryRun(JEV_ESTIMATE_SNAPSHOT, []);
 
     expect(result).toEqual({
-      snapshotVersion: 1,
+      snapshotVersion: 2,
       model: 'jev-1.13.0',
-      asOf: '2026-09-19',
+      asOf: '2026-09-20',
       discovered: 0,
       evaluable: 0,
       skipped: { total: 0, byReason: { skip: 0, todo: 0, 'evidence-unavailable': 0 } },
       initialCalls: 0,
       followUpCalls: { min: 0, max: 0 },
       evidenceBytes: 0,
+      requestBytes: 0,
+      // Rubric-only, computed from the default RUBRIC_V1 regardless of how many (if any) test
+      // cases were discovered — see the dedicated golden test below.
+      rubricBytesPerRequest: 26_979,
       estimatedInputTokens: { min: 0, max: 0 },
       estimatedFollowUpInputTokens: { min: 0, max: 0 },
       estimatedUsd: { min: 0, max: 0 },
@@ -230,26 +290,37 @@ describe('estimateDryRun', () => {
     });
   });
 
+  it("pins RUBRIC_V1's own canonical questions-map size at 26,979 bytes (~93% of the real ~29,124-byte average request — see docs/technical-design.md)", () => {
+    expect(utf8ByteLength(canonicalizeJevRequestQuestions(buildJevQuestions(RUBRIC_V1)))).toBe(26_979);
+  });
+
   it('throws RangeError for an invalid snapshot before touching the files', () => {
     expect(() => estimateDryRun({ ...JEV_ESTIMATE_SNAPSHOT, requestTokenCeiling: 0 }, [])).toThrow(RangeError);
   });
 
   it(
-    'computes the exact golden preview for one evaluable test plus one skip, one todo, and one missing-bundle test',
+    'computes the exact golden preview for one evaluable test plus one skip, one todo, and one missing-bundle test, '
+    + 'measuring the real RUBRIC_V1 request instead of guessing an overhead',
     () => {
-      // Hand arithmetic (see class doc on `smallBundle` for the byte count):
-      //   bytes = 477
-      //   perBundleMin = floor(477 / bytesPerToken.max) = floor(477 / 4.5) = floor(106.0) = 106
-      //   perBundleMax = ceil(477 / bytesPerToken.min) = ceil(477 / 2.5) = ceil(190.8) = 191
-      //   initialTokensMin = 106 + 1 * requestOverheadTokens.min(620) = 726
-      //   initialTokensMax = 191 + 1 * requestOverheadTokens.max(2440) = 2631
+      // Hand arithmetic:
+      //   evidenceBytes (bundle-only, unchanged from before this fix) = 477
+      //   requestBytes: the exact canonical `buildJevRequest`+`canonicalizeJevRequest` bytes for this test
+      //     case's bundle against the default RUBRIC_V1 — pinned below by cross-checking against those same
+      //     real functions, not hand-derived, since the exact figure depends on the full 14-question rubric
+      //     text (see `rubricBytesPerRequest`'s own golden test above for that fixed 26,979-byte contribution).
+      //   tokensMin = floor(requestBytes / bytesPerToken.max) = floor(27346 / 4.8) = 5697
+      //   tokensMax = ceil(requestBytes / bytesPerToken.min) = ceil(27346 / 3.0) = 9116
       //   followUpCalls = { min: 0, max: 1 * maxFollowUpsPerTest(1) = 1 }
-      //   followUpTokensMax = initialTokensMax(2631) * maxFollowUpsPerTest(1) = 2631
-      //   usdMin = 726 * 0.042 / 1e6 = 30.492 / 1e6 = 0.000030492
-      //   usdMax = (2631 + 2631) * 0.042 / 1e6 = 5262 * 0.042 / 1e6 = 221.004 / 1e6 = 0.000221004
-      //   bundlesOverCeiling: 191 + 2440 = 2631 <= 64000 -> 0
+      //   followUpTokensMax = initialTokensMax(9116) * maxFollowUpsPerTest(1) = 9116
+      //   usdMin = 5697 * 0.042 / 1e6 = 0.000239274
+      //   usdMax = (9116 + 9116) * 0.042 / 1e6 = 0.000765744
+      //   bundlesOverCeiling: 9116 <= 64000 -> 0
       const bundle = smallBundle('tc:v1:abc');
       expect(Buffer.byteLength(canonicalizeEvidenceBundle(bundle), 'utf8')).toBe(477);
+      const goldenRequestBytes = utf8ByteLength(
+        canonicalizeJevRequest(buildJevRequest({ testCase: testCase('tc:v1:abc', []), bundle, rubric: RUBRIC_V1 })),
+      );
+      expect(goldenRequestBytes).toBe(27_346);
 
       const files: readonly DryRunFileInput[] = [{
         testCases: [
@@ -264,18 +335,20 @@ describe('estimateDryRun', () => {
       const result = estimateDryRun(JEV_ESTIMATE_SNAPSHOT, files);
 
       expect(result).toEqual({
-        snapshotVersion: 1,
+        snapshotVersion: 2,
         model: 'jev-1.13.0',
-        asOf: '2026-09-19',
+        asOf: '2026-09-20',
         discovered: 4,
         evaluable: 1,
         skipped: { total: 3, byReason: { skip: 1, todo: 1, 'evidence-unavailable': 1 } },
         initialCalls: 1,
         followUpCalls: { min: 0, max: 1 },
         evidenceBytes: 477,
-        estimatedInputTokens: { min: 726, max: 2631 },
-        estimatedFollowUpInputTokens: { min: 0, max: 2631 },
-        estimatedUsd: { min: 0.000030492, max: 0.000221004 },
+        requestBytes: goldenRequestBytes,
+        rubricBytesPerRequest: 26_979,
+        estimatedInputTokens: { min: 5697, max: 9116 },
+        estimatedFollowUpInputTokens: { min: 0, max: 9116 },
+        estimatedUsd: { min: 0.000239274, max: 0.000765744 },
         bundlesOverCeiling: 0,
         requestTokenCeiling: 64_000,
       });
@@ -315,10 +388,13 @@ describe('estimateDryRun', () => {
     expect(estimateDryRun(JEV_ESTIMATE_SNAPSHOT, files).bundlesOverCeiling).toBe(0);
   });
 
-  it("excludes a skipped test case's bundle from evidenceBytes/tokens even when one was built", () => {
+  it("excludes a skipped test case's bundle from evidenceBytes/requestBytes/tokens even when one was built", () => {
     // Production always builds evidence for every discovered test case regardless of
     // modifiers (see `src/application/audit.ts`), so a skip/todo test WITH a bundle is
-    // the normal case, not an edge case — its bytes/tokens must never be counted.
+    // the normal case, not an edge case — its bytes/tokens must never be counted. This
+    // also guards the request-bytes path specifically: a skipped test case must never
+    // contribute a second real request's worth of bytes just because it has a bundle
+    // (mutation probe: "count skipped tests" toward requestBytes must fail this test).
     const files: readonly DryRunFileInput[] = [{
       testCases: [testCase('tc:v1:abc', []), testCase('tc:v1:skip-with-bundle', ['skip'])],
       evidence: [smallBundle('tc:v1:abc'), smallBundle('tc:v1:skip-with-bundle')],
@@ -329,8 +405,109 @@ describe('estimateDryRun', () => {
     expect(result.evaluable).toBe(1);
     expect(result.skipped.byReason.skip).toBe(1);
     expect(result.evidenceBytes).toBe(477);
-    expect(result.estimatedInputTokens).toEqual({ min: 726, max: 2631 });
+    expect(result.requestBytes).toBe(27_346);
+    expect(result.estimatedInputTokens).toEqual({ min: 5697, max: 9116 });
   });
+
+  it('measures requestBytes as the exact sum of the real canonical buildJevRequest bytes for every evaluable test case (not evidence bytes)', () => {
+    const bundleA = smallBundle('tc:v1:file-a-1');
+    const bundleB = smallBundle('tc:v1:file-b-1');
+    const files: readonly DryRunFileInput[] = [
+      { testCases: [testCase('tc:v1:file-a-1', [])], evidence: [bundleA] },
+      { testCases: [testCase('tc:v1:file-b-1', [])], evidence: [bundleB] },
+    ];
+
+    const expectedRequestBytes = [
+      { id: 'tc:v1:file-a-1', bundle: bundleA },
+      { id: 'tc:v1:file-b-1', bundle: bundleB },
+    ].reduce((total, { id, bundle }) => {
+      const request = buildJevRequest({ testCase: testCase(id, []), bundle, rubric: RUBRIC_V1 });
+      return total + utf8ByteLength(canonicalizeJevRequest(request));
+    }, 0);
+
+    const result = estimateDryRun(JEV_ESTIMATE_SNAPSHOT, files);
+
+    expect(result.requestBytes).toBe(expectedRequestBytes);
+    // The two identically-shaped bundles under distinct ids produce the same request byte
+    // count each, so requestBytes must be well above evidenceBytes-only accounting once the
+    // rubric's own ~27KB contribution is included per request.
+    expect(result.requestBytes).toBeGreaterThan(result.evidenceBytes * 10);
+  });
+
+  it('injects a custom rubric instead of always defaulting to RUBRIC_V1, changing requestBytes/rubricBytesPerRequest accordingly', () => {
+    const tinyRubric: Rubric = {
+      version: 1,
+      model: JEV_MODEL_ID,
+      dimensions: [{
+        id: 'falsifiability',
+        label: 'Falsifiability',
+        applicability: { id: 'falsifiability.applicable', type: 'noul', instructions: 'Q1?' },
+        quality: { id: 'falsifiability.quality', type: 'score', instructions: 'Q2?', criteria: ['L0', 'L1', 'L2', 'L3'] },
+      }],
+    };
+    const files: readonly DryRunFileInput[] = [{
+      testCases: [testCase('tc:v1:abc', [])],
+      evidence: [smallBundle('tc:v1:abc')],
+    }];
+
+    const defaultResult = estimateDryRun(JEV_ESTIMATE_SNAPSHOT, files);
+    const tinyResult = estimateDryRun(JEV_ESTIMATE_SNAPSHOT, files, tinyRubric);
+
+    expect(tinyResult.rubricBytesPerRequest).toBeLessThan(defaultResult.rubricBytesPerRequest);
+    expect(tinyResult.requestBytes).toBeLessThan(defaultResult.requestBytes);
+    expect(tinyResult.evidenceBytes).toBe(defaultResult.evidenceBytes);
+  });
+
+  it('throws RangeError for an invalid injected rubric before touching the files, even with zero evaluable test cases', () => {
+    const invalidRubric: Rubric = { version: 1, model: 'jev-latest', dimensions: [] };
+
+    expect(() => estimateDryRun(JEV_ESTIMATE_SNAPSHOT, [], invalidRubric)).toThrow(RangeError);
+  });
+
+  it(
+    'contains the real measured 71,855 billed tokens within the estimated range built from 320,360 measured '
+    + 'canonical request bytes across 11 evaluable test cases (the exact totals from the first real Jev run, '
+    + '2026-09-20) — and shows the old evidence-bytes-plus-guessed-overhead model would have MISSED it',
+    () => {
+      // Eleven fixed-width test-case ids so every request's non-content byte overhead is
+      // identical, letting plain ASCII content-length padding control each request's exact
+      // byte count with no escaping side effects (verified: +1 content char == +1 byte).
+      // Content lengths were solved so the 11 requests' real `canonicalizeJevRequest` bytes
+      // sum to exactly 320,360 — the measured total for the first real 11-request Jev run
+      // (see the correction's "Why", 2026-09-20). Ten requests carry 1,754 padding bytes,
+      // one carries 1,761, absorbing the remainder so the sum lands exactly on 320,360.
+      const contentLengths = [1754, 1754, 1754, 1754, 1754, 1754, 1754, 1754, 1754, 1754, 1761];
+      expect(contentLengths).toHaveLength(11);
+
+      const files: readonly DryRunFileInput[] = contentLengths.map((length, index) => {
+        const id = `tc:v1:reqbytes-${String(index).padStart(2, '0')}`;
+        return { testCases: [testCase(id, [])], evidence: [contentLengthBundle(id, length)] };
+      });
+
+      const result = estimateDryRun(JEV_ESTIMATE_SNAPSHOT, files);
+
+      expect(result.evaluable).toBe(11);
+      expect(result.requestBytes).toBe(320_360);
+      expect(result.estimatedInputTokens.min).toBeLessThanOrEqual(71_855);
+      expect(result.estimatedInputTokens.max).toBeGreaterThanOrEqual(71_855);
+
+      // Regression: reconstruct what the OLD (pre-fix) evidence-bytes-plus-guessed-overhead
+      // model would have reported for this exact fixture — it must NOT contain 71,855, the
+      // same failure the real run exposed (measured old estimate there: 12,747-37,523 vs the
+      // 71,855 actual). `estimateTokensFromBytes` is still the same pure conversion function;
+      // only the old snapshot's bytesPerToken/requestOverheadTokens values (now deleted from
+      // the shipped snapshot) are reconstructed here, deliberately, to prove the regression.
+      const oldBytesPerToken = { min: 2.5, max: 4.5 };
+      const oldRequestOverheadTokens = { min: 620, max: 2440 };
+      const oldRange = estimateTokensFromBytes(result.evidenceBytes, oldBytesPerToken);
+      const oldMin = oldRange.min + result.evaluable * oldRequestOverheadTokens.min;
+      const oldMax = oldRange.max + result.evaluable * oldRequestOverheadTokens.max;
+      const oldRangeContains71855 = oldMin <= 71_855 && 71_855 <= oldMax;
+
+      expect(oldRangeContains71855).toBe(false);
+      expect(oldMax).toBeLessThan(71_855);
+    },
+  );
 
   it('sums discovered/evaluable/skipped counts across multiple files', () => {
     const bundleA = smallBundle('tc:v1:file-a-1');

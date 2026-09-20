@@ -9,7 +9,7 @@ import {
   estimateTokensFromBytes,
   JEV_ESTIMATE_SNAPSHOT,
   type JevEstimateSnapshot,
-} from './estimate.js';
+} from './jev-pricing.js';
 import {
   utf8ByteLength,
   type EvidenceBundle,
@@ -247,14 +247,31 @@ export function buildJevRequest(input: BuildJevRequestInput): JevRequest {
   validateRubric(input.rubric);
 
   const state = buildJevState(input.testCase, input.bundle);
+  const questions = buildJevQuestions(input.rubric);
+
+  return { state, model: input.rubric.model, questions };
+}
+
+/**
+ * Composes the wire `questions` map for a whole rubric — one applicability
+ * `noul` question and one quality `score` question per dimension — with no
+ * test case or evidence bundle involved. Extracted out of {@link
+ * buildJevRequest} so a caller that only needs the rubric's own fixed
+ * per-request contribution (every evaluable request sends the exact same
+ * `questions` map for a given rubric) does not need to fabricate a test case
+ * and bundle just to measure it (see `estimateDryRun`'s `rubricBytesPerRequest`
+ * in `src/domain/estimate.ts`). Validates `rubric` first, same as
+ * {@link buildJevRequest}.
+ */
+export function buildJevQuestions(rubric: Rubric): Readonly<Record<string, JevQuestion>> {
+  validateRubric(rubric);
 
   const questions: Record<string, JevQuestion> = {};
-  for (const dimension of input.rubric.dimensions) {
+  for (const dimension of rubric.dimensions) {
     questions[dimension.applicability.id] = toWireQuestion(dimension.applicability);
     questions[dimension.quality.id] = toWireQuestion(dimension.quality);
   }
-
-  return { state, model: input.rubric.model, questions };
+  return questions;
 }
 
 interface CanonicalJevStateFragment {
@@ -354,6 +371,17 @@ export function canonicalizeJevRequest(request: JevRequest): string {
   const questions = Object.fromEntries(canonicalQuestionsPayload(request.questions));
 
   return JSON.stringify({ state, model: request.model, questions });
+}
+
+/**
+ * Canonical (sorted-by-id) JSON serialization of a wire `questions` map on
+ * its own — the exact bytes {@link canonicalizeJevRequest} would embed under
+ * its `questions` key, isolated from `state`/`model` so a caller (see
+ * `estimateDryRun`'s `rubricBytesPerRequest`) can measure the rubric's own
+ * fixed per-request byte contribution without building a full request.
+ */
+export function canonicalizeJevRequestQuestions(questions: Readonly<Record<string, JevQuestion>>): string {
+  return JSON.stringify(Object.fromEntries(canonicalQuestionsPayload(questions)));
 }
 
 /**

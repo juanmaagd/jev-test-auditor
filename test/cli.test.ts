@@ -419,7 +419,7 @@ describe('--dry-run --json', () => {
   it(
     'prints exactly one literal golden JSON line for the fixed golden audit result '
     + '(1 evaluable / 3 skipped [skip:1, todo:1, evidence-unavailable:1]; '
-    + 'tokens 726..2631, follow-up max 2631, usd 0.000030492..0.000221004 — see test/estimate.test.ts for the arithmetic)',
+    + 'tokens 5697..9116, follow-up max 9116, usd 0.000239274..0.000765744 — see test/estimate.test.ts for the arithmetic)',
     async () => {
       const output = captureOutput();
 
@@ -428,13 +428,14 @@ describe('--dry-run --json', () => {
       expect(exitCode).toBe(0);
       expect(output.lines).toHaveLength(1);
       expect(output.lines[0]).toBe(
-        '{"dryRun":true,"reportingOnly":true,"rootDir":"/workspace","model":"jev-1.13.0","snapshotVersion":1,'
-        + '"asOf":"2026-09-19","discovered":4,"evaluable":1,'
+        '{"dryRun":true,"reportingOnly":true,"rootDir":"/workspace","model":"jev-1.13.0","snapshotVersion":2,'
+        + '"asOf":"2026-09-20","discovered":4,"evaluable":1,'
         + '"skipped":{"total":3,"byReason":{"skip":1,"todo":1,"evidence-unavailable":1}},'
         + '"initialCalls":1,"followUpCalls":{"min":0,"max":1},"evidenceBytes":477,'
-        + '"estimatedInputTokens":{"min":726,"max":2631},'
-        + '"estimatedFollowUpInputTokens":{"min":0,"max":2631},'
-        + '"estimatedUsd":{"min":0.000030492,"max":0.000221004},'
+        + '"requestBytes":27346,"rubricBytesPerRequest":26979,'
+        + '"estimatedInputTokens":{"min":5697,"max":9116},'
+        + '"estimatedFollowUpInputTokens":{"min":0,"max":9116},'
+        + '"estimatedUsd":{"min":0.000239274,"max":0.000765744},'
         + '"bundlesOverCeiling":0,"requestTokenCeiling":64000,"networkCalls":0,"filesWritten":0}',
       );
     },
@@ -460,6 +461,9 @@ describe('--dry-run --json', () => {
       initialCalls: 0,
       followUpCalls: { min: 0, max: 0 },
       evidenceBytes: 0,
+      requestBytes: 0,
+      // Rubric-only cost, still reported even with zero discovered test cases (default RUBRIC_V1).
+      rubricBytesPerRequest: 26_979,
       estimatedUsd: { min: 0, max: 0 },
       bundlesOverCeiling: 0,
     });
@@ -492,7 +496,7 @@ describe('--dry-run (human-readable text)', () => {
     expect(output.lines).toHaveLength(1);
     const report = output.lines[0] ?? '';
     expect(report).toContain('jev-1.13');
-    expect(report).toContain('2026-09-19');
+    expect(report).toContain('2026-09-20');
     expect(report).toContain('Discovered test cases: 4');
     expect(report).toContain('Evaluable: 1');
     expect(report).toContain('Skipped: 3 (skip: 1, todo: 1, evidence-unavailable: 1)');
@@ -500,10 +504,14 @@ describe('--dry-run (human-readable text)', () => {
     expect(report).toContain('1');
     expect(report).toContain('Evidence bytes');
     expect(report).toContain('477');
+    expect(report).toContain('Request bytes');
+    expect(report).toContain('27346');
+    expect(report).toContain('Rubric bytes per request');
+    expect(report).toContain('26979');
     expect(report).toContain('Estimated input tokens');
-    expect(report).toContain('726 - 2631');
+    expect(report).toContain('5697 - 9116');
     expect(report).toContain('Estimated follow-up input tokens');
-    expect(report).toContain('Estimated cost in USD (approximate): 0.000030492 - 0.000221004');
+    expect(report).toContain('Estimated cost in USD (approximate): 0.000239274 - 0.000765744');
     expect(report).toContain('No network calls were made');
     expect(report).toContain('nothing was written');
   });

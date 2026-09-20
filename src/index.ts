@@ -130,9 +130,11 @@ export {
 } from './domain/rubric.js';
 export {
   assertJevRequestWithinBudget,
+  buildJevQuestions,
   buildJevRequest,
   buildJevState,
   canonicalizeJevRequest,
+  canonicalizeJevRequestQuestions,
   checkJevRequestBudget,
   JEV_REQUEST_LIMITS,
   type BuildJevRequestInput,

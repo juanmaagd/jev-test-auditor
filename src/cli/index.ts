@@ -95,10 +95,14 @@ Options:
                       --dry-run or --evaluate.
   --dry-run          Print a no-network, no-write aggregate cost/call preview instead of the normal
                       summary: exact discovered/evaluable/skipped-by-reason counts, exact initial
-                      Jev calls (one per evaluable test case) and evidence bytes, and clearly
-                      labeled approximate input-token and USD ranges from a versioned local
-                      pricing/overhead snapshot. Makes no network or provider calls, requires no
-                      API key, and writes nothing to disk. Cannot be combined with
+                      Jev calls (one per evaluable test case), exact evidence bytes and exact real
+                      request bytes (the actual state plus every rubric question, measured by
+                      building each real request locally, never a guessed overhead), and clearly
+                      labeled approximate input-token and USD ranges converted from those request
+                      bytes via a versioned local pricing snapshot. The rubric's own questions
+                      dominate a request's bytes (about 93% for the shipped rubric) — see
+                      "Rubric bytes per request" in the output. Makes no network or provider calls,
+                      requires no API key, and writes nothing to disk. Cannot be combined with
                       --inspect-payloads or --evaluate.
   --evaluate         Opt-in only: sends every evaluable test case's local evidence bundle to
                       TypeSafe's Jev model for real judgment (costs money; nothing is sent without
@@ -199,6 +203,8 @@ function dryRunJsonLine(rootDir: string, estimate: DryRunEstimate): string {
     initialCalls: estimate.initialCalls,
     followUpCalls: estimate.followUpCalls,
     evidenceBytes: estimate.evidenceBytes,
+    requestBytes: estimate.requestBytes,
+    rubricBytesPerRequest: estimate.rubricBytesPerRequest,
     estimatedInputTokens: estimate.estimatedInputTokens,
     estimatedFollowUpInputTokens: estimate.estimatedFollowUpInputTokens,
     estimatedUsd: estimate.estimatedUsd,
@@ -223,6 +229,8 @@ function dryRunTextReport(rootDir: string, estimate: DryRunEstimate): string {
     `Initial Jev calls (one per evaluable test case, exact): ${estimate.initialCalls}`,
     `Follow-up calls (possible range, exact bound): ${estimate.followUpCalls.min} - ${estimate.followUpCalls.max}`,
     `Evidence bytes (canonical, evaluable bundles only, exact): ${estimate.evidenceBytes}`,
+    `Request bytes (canonical, real state + rubric questions, evaluable requests only, exact): ${estimate.requestBytes}`,
+    `Rubric bytes per request (fixed cost of this rubric's own questions, exact): ${estimate.rubricBytesPerRequest}`,
     `Estimated input tokens (approximate): ${estimate.estimatedInputTokens.min} - ${estimate.estimatedInputTokens.max}`,
     `Estimated follow-up input tokens (approximate): ${estimate.estimatedFollowUpInputTokens.min} - ${estimate.estimatedFollowUpInputTokens.max}`,
     `Estimated cost in USD (approximate): ${estimate.estimatedUsd.min} - ${estimate.estimatedUsd.max}`,

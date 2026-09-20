@@ -1,176 +1,34 @@
 import { canonicalizeEvidenceBundle, utf8ByteLength, type EvidenceBundle } from './evidence.js';
-import { JEV_MODEL_ID } from './rubric.js';
+import {
+  buildJevQuestions,
+  buildJevRequest,
+  canonicalizeJevRequest,
+  canonicalizeJevRequestQuestions,
+} from './jev-request.js';
+import {
+  estimateTokensFromBytes,
+  JEV_ESTIMATE_SNAPSHOT,
+  JEV_VERIFIED_RATE_LIMITS,
+  validateJevEstimateSnapshot,
+  type DryRunRange,
+  type JevEstimateSnapshot,
+} from './jev-pricing.js';
+import { RUBRIC_V1, type Rubric } from './rubric.js';
 import type { TestCase, TestCaseId } from './test-understanding.js';
 
-/**
- * A versioned, local snapshot of Jev pricing and per-request overhead
- * assumptions, used only to produce an approximate, clearly-labeled
- * `--dry-run` preview (see {@link estimateDryRun}). Nothing here is a
- * wire-accurate token count: Phase 4 replaces the token math with the exact
- * request `state` and `questions`, and Phase 5 adds cache-hit/billable-call
- * accuracy. `version` lets a later phase detect which snapshot produced a
- * given estimate.
- */
-export interface JevEstimateSnapshot {
-  readonly version: number;
-  readonly model: string;
-  /** ISO date (`YYYY-MM-DD`) the figures below were last confirmed against the provider. */
-  readonly asOf: string;
-  readonly usdPerMillionInputTokens: number;
-  /** Jev's current pricing has no output-token charge; kept explicit so a future paid-output snapshot is a visible, versioned change rather than a silent one — this estimator never adds an output-token cost term. `validateJevEstimateSnapshot` rejects `true` fail-closed: enabling output billing requires adding an output-token count/cost model to `estimateDryRun` first, not just flipping this field. */
-  readonly outputTokensBilled: boolean;
-  /** Bytes-per-token conversion range used to turn exact evidence bytes into an approximate token range. */
-  readonly bytesPerToken: { readonly min: number; readonly max: number };
-  /**
-   * Provisional per-request overhead range (in tokens), standing in for the
-   * rubric system prompt plus all batched questions for one request — one
-   * request evaluates all seven rubric dimensions' Noul and Score questions
-   * together (14 questions), so this is that system prompt plus 14
-   * questions' worth of text. NOT measured against the real Jev rubric
-   * wording — that lands in Phase 4, which replaces this range with a
-   * measured constant from the exact `questions` payload. `min` assumes
-   * terse ~40-token questions plus a compact ~60-token system prompt
-   * (14 * 40 + 60 = 620); `max` assumes verbose ~160-token questions (with
-   * full 0-3 criteria text) plus a larger ~200-token system prompt
-   * (14 * 160 + 200 = 2440).
-   */
-  readonly requestOverheadTokens: { readonly min: number; readonly max: number };
-  /** Upper bound on follow-up requests per evaluable test case; a follow-up is allowed only when an earlier result identifies a specific evidence need (see `docs/technical-design.md`), never an automatic retry. */
-  readonly maxFollowUpsPerTest: number;
-  /** Provider's total per-request token ceiling (state + all batched questions). */
-  readonly requestTokenCeiling: number;
-}
-
-/**
- * Fixed facts as of {@link JevEstimateSnapshot.asOf}: Jev {@link JEV_MODEL_ID}
- * (TypeSafe), USD 0.042 per 1,000,000 input tokens, output tokens unbilled,
- * one request per evaluable test case (one state, all rubric questions
- * batched), and a 64k-token provider request ceiling. `model` reuses
- * {@link JEV_MODEL_ID} directly (never a re-typed literal) so the estimator
- * can never silently drift from the exact pinned model the rubric and every
- * real request use (Phase 4, task P4-4 alignment fix — the estimator
- * previously carried the non-existent alias `jev-1.13`). See
- * `requestOverheadTokens`'s own doc for how its provisional range was
- * derived; every other numeric fact here is a verified pricing/provider
- * fact, not a guess.
- */
-export const JEV_ESTIMATE_SNAPSHOT: JevEstimateSnapshot = {
-  version: 1,
-  model: JEV_MODEL_ID,
-  asOf: '2026-09-19',
-  usdPerMillionInputTokens: 0.042,
-  outputTokensBilled: false,
-  bytesPerToken: { min: 2.5, max: 4.5 },
-  requestOverheadTokens: { min: 620, max: 2440 },
-  maxFollowUpsPerTest: 1,
-  requestTokenCeiling: 64_000,
+// Re-exported for backward compatibility: every existing caller (`src/index.ts`,
+// `src/cli/index.ts`, tests) imports these pricing/conversion primitives from
+// `estimate.js`. Their canonical definitions now live in `./jev-pricing.js` — see
+// that module's own doc for why (breaking a real ES module import cycle with
+// `jev-request.ts`, which `estimateDryRun` below needs to build a real request).
+export {
+  estimateTokensFromBytes,
+  JEV_ESTIMATE_SNAPSHOT,
+  JEV_VERIFIED_RATE_LIMITS,
+  validateJevEstimateSnapshot,
+  type DryRunRange,
+  type JevEstimateSnapshot,
 };
-
-/**
- * Verified TypeSafe/Jev provider rate limits (2026-09-20, docs.typesafe.ai/models):
- * 250,000 input tokens per second and 1,200 requests per minute. Recorded
- * here, next to {@link JEV_ESTIMATE_SNAPSHOT}, as documented facts only —
- * Phase 4 does no adaptive throttling against them (Phase 5's "resilience"
- * concern per `odd/tasks/phase-4-jev-evaluation.md`'s Decisions: "Concurrency
- * in this phase is a fixed bounded pool from existing `concurrency`
- * configuration, with no adaptive throttling"); nothing in this phase reads
- * or enforces these values at runtime.
- */
-export const JEV_VERIFIED_RATE_LIMITS: { readonly tokensPerSecond: number; readonly requestsPerMinute: number } = {
-  tokensPerSecond: 250_000,
-  requestsPerMinute: 1_200,
-};
-
-function isPositiveFinite(value: number): boolean {
-  return Number.isFinite(value) && value > 0;
-}
-
-function validateRange(
-  range: { readonly min: number; readonly max: number },
-  name: string,
-  allowZero: boolean,
-): void {
-  const minValid = Number.isFinite(range.min) && (allowZero ? range.min >= 0 : range.min > 0);
-  const maxValid = Number.isFinite(range.max) && (allowZero ? range.max >= 0 : range.max > 0);
-  if (!minValid) {
-    throw new RangeError(
-      `Jev estimate snapshot ${name}.min must be a ${allowZero ? 'non-negative' : 'positive'} finite number: ${range.min}`,
-    );
-  }
-  if (!maxValid) {
-    throw new RangeError(
-      `Jev estimate snapshot ${name}.max must be a ${allowZero ? 'non-negative' : 'positive'} finite number: ${range.max}`,
-    );
-  }
-  if (range.min > range.max) {
-    throw new RangeError(
-      `Jev estimate snapshot ${name}.min (${range.min}) must not exceed ${name}.max (${range.max})`,
-    );
-  }
-}
-
-/** Validates {@link JevEstimateSnapshot} inputs deterministically, throwing `RangeError` for the first invalid value found. */
-export function validateJevEstimateSnapshot(snapshot: JevEstimateSnapshot): void {
-  if (!Number.isInteger(snapshot.version) || snapshot.version <= 0) {
-    throw new RangeError(`Jev estimate snapshot version must be a positive integer: ${snapshot.version}`);
-  }
-  if (typeof snapshot.model !== 'string' || snapshot.model.length === 0) {
-    throw new RangeError(`Jev estimate snapshot model must be a non-empty string: ${snapshot.model}`);
-  }
-  if (typeof snapshot.asOf !== 'string' || !/^\d{4}-\d{2}-\d{2}$/u.test(snapshot.asOf)) {
-    throw new RangeError(`Jev estimate snapshot asOf must be an ISO date (YYYY-MM-DD): ${snapshot.asOf}`);
-  }
-  if (!isPositiveFinite(snapshot.usdPerMillionInputTokens)) {
-    throw new RangeError(
-      `Jev estimate snapshot usdPerMillionInputTokens must be a positive finite number: ${snapshot.usdPerMillionInputTokens}`,
-    );
-  }
-  if (typeof snapshot.outputTokensBilled !== 'boolean') {
-    throw new RangeError(`Jev estimate snapshot outputTokensBilled must be a boolean: ${snapshot.outputTokensBilled}`);
-  }
-  // Fail-closed: this estimator has no output-token model (no output-token count anywhere
-  // in `estimateDryRun`'s formulas), so a snapshot claiming output tokens ARE billed would
-  // silently under-estimate cost rather than error. Enabling output billing requires adding
-  // an output-token count/estimate to the formula first, not just flipping this field.
-  if (snapshot.outputTokensBilled) {
-    throw new RangeError(
-      'Jev estimate snapshot outputTokensBilled must be false: this estimator has no output-token cost model yet, '
-      + 'so billed output tokens cannot be reflected in estimatedUsd without silently under-estimating',
-    );
-  }
-  validateRange(snapshot.bytesPerToken, 'bytesPerToken', false);
-  validateRange(snapshot.requestOverheadTokens, 'requestOverheadTokens', true);
-  if (!Number.isInteger(snapshot.maxFollowUpsPerTest) || snapshot.maxFollowUpsPerTest < 0) {
-    throw new RangeError(
-      `Jev estimate snapshot maxFollowUpsPerTest must be a non-negative integer: ${snapshot.maxFollowUpsPerTest}`,
-    );
-  }
-  if (!Number.isInteger(snapshot.requestTokenCeiling) || snapshot.requestTokenCeiling <= 0) {
-    throw new RangeError(
-      `Jev estimate snapshot requestTokenCeiling must be a positive integer: ${snapshot.requestTokenCeiling}`,
-    );
-  }
-}
-
-/**
- * Converts an exact UTF-8 byte count into an approximate token range using
- * `bytesPerToken`'s min/max bounds, rounding OUTWARD (`floor` for the
- * fewer-tokens `min` bound, via the larger `bytesPerToken.max` divisor;
- * `ceil` for the more-tokens `max` bound, via the smaller `bytesPerToken.min`
- * divisor) so the reported range never under-covers the true value it
- * approximates. Exported so `src/domain/jev-request.ts`'s provider-budget
- * check (Phase 4, task P4-1) reuses this exact conversion instead of
- * duplicating it; `estimateDryRun` below uses it for the same reason.
- */
-export function estimateTokensFromBytes(
-  bytes: number,
-  bytesPerToken: { readonly min: number; readonly max: number },
-): DryRunRange {
-  return {
-    min: Math.floor(bytes / bytesPerToken.max),
-    max: Math.ceil(bytes / bytesPerToken.min),
-  };
-}
 
 export type DryRunSkippedReason = 'skip' | 'todo' | 'evidence-unavailable';
 
@@ -216,11 +74,6 @@ export interface DryRunSkippedTotals {
   readonly byReason: Readonly<Record<DryRunSkippedReason, number>>;
 }
 
-export interface DryRunRange {
-  readonly min: number;
-  readonly max: number;
-}
-
 export interface DryRunEstimate {
   readonly snapshotVersion: number;
   readonly model: string;
@@ -232,8 +85,12 @@ export interface DryRunEstimate {
   readonly initialCalls: number;
   /** Possible follow-up call range; a follow-up happens only when an earlier result identifies a specific evidence need (never an automatic retry), so the true count is unknown ahead of time. */
   readonly followUpCalls: DryRunRange;
-  /** Exact sum of UTF-8 byte lengths of `canonicalizeEvidenceBundle(bundle)` over every evaluable bundle. */
+  /** Exact sum of UTF-8 byte lengths of `canonicalizeEvidenceBundle(bundle)` over every evaluable bundle. Still reported for its own sake (the local evidence footprint), but no longer what token/cost estimates are derived from — see `requestBytes`. */
   readonly evidenceBytes: number;
+  /** Exact sum of UTF-8 byte lengths of the real `canonicalizeJevRequest(buildJevRequest({testCase, bundle, rubric}))` over every evaluable test case — the actual request Jev would receive (state plus every rubric question), not evidence bytes plus a guessed overhead. This is what `estimatedInputTokens` converts to a token range. */
+  readonly requestBytes: number;
+  /** Exact UTF-8 byte length of just the rubric's own canonical `questions` map (`canonicalizeJevRequestQuestions(buildJevQuestions(rubric))`) — the same for every evaluable request under this rubric, independent of test case count. Reported separately from `requestBytes` so a reader can see how much of each request's cost the rubric itself accounts for (93% for `RUBRIC_V1` against the first real run's average request — see `docs/technical-design.md`). Computed even when `evaluable` is 0: it depends only on the rubric, not on how many test cases were found. */
+  readonly rubricBytesPerRequest: number;
   /** Approximate input-token range for the initial calls only. */
   readonly estimatedInputTokens: DryRunRange;
   /** Approximate additional input-token range contributed by possible follow-up calls (a follow-up re-sends the same state). */
@@ -253,9 +110,10 @@ export interface DryRunEstimate {
  * rounded double, and its `toString()`/`JSON.stringify` output never uses
  * scientific notation for any value this estimator's formulas can produce
  * (the smallest nonzero `estimatedUsd.min` is bounded below by one
- * evaluable call's `requestOverheadTokens.min` priced at
- * `usdPerMillionInputTokens`, comfortably above the ~1e-6 threshold where
- * `Number#toString` would switch to exponential form).
+ * evaluable call's real request tokens — never less than the rubric's own
+ * `rubricBytesPerRequest` alone converted through `bytesPerToken.max` —
+ * priced at `usdPerMillionInputTokens`, comfortably above the ~1e-6
+ * threshold where `Number#toString` would switch to exponential form).
  */
 function roundUsd(value: number): number {
   return Math.round(value * 1_000_000_000) / 1_000_000_000;
@@ -265,19 +123,36 @@ function roundUsd(value: number): number {
  * Builds the aggregate `--dry-run` preview described in
  * `odd/tasks/phase-3-evidence-bundles.md` (task P3-5): exact discovered /
  * evaluable / skipped-by-reason counts, exact initial-call count and
- * evidence bytes, and approximate (clearly separate) token/cost ranges.
- * Throws `RangeError` (via {@link validateJevEstimateSnapshot}) before
- * reading any file when `snapshot` itself is invalid.
+ * evidence/request bytes, and approximate (clearly separate) token/cost
+ * ranges. Throws `RangeError` (via {@link validateJevEstimateSnapshot}, or
+ * via `buildJevQuestions`'s own `validateRubric` call for an invalid
+ * `rubric`) before reading any file when either input is invalid.
  *
- * Approximation method, all provisional until Phase 4 has exact wire
- * `state`/`questions`:
- * - Per evaluable bundle, its canonical byte length converts to a token
- *   range by dividing by `bytesPerToken.{max,min}` — dividing by the larger
+ * `rubric` defaults to {@link RUBRIC_V1} — the same rubric
+ * `buildJevRequest` uses for a real evaluation — so ordinary callers (the
+ * CLI's `--dry-run`) need no override; a caller may inject a different
+ * rubric (e.g. a smaller fixture rubric in a test) to preview its own cost
+ * instead.
+ *
+ * Token/cost method (calibrated 2026-09-20 from the first real Jev run —
+ * see {@link JEV_ESTIMATE_SNAPSHOT}'s own doc for why the previous
+ * evidence-bytes-plus-guessed-overhead method was replaced):
+ * - For every evaluable test case, the real request is built
+ *   (`buildJevRequest({ testCase, bundle, rubric })`) and its exact
+ *   canonical byte length measured (`canonicalizeJevRequest`) — this is
+ *   `requestBytes`, summed across every evaluable test case. Unlike the
+ *   evidence-bundle bytes still reported separately as `evidenceBytes`,
+ *   `requestBytes` includes the full rubric text (all 14 questions for
+ *   `RUBRIC_V1`), which the first real run showed dominates the actual
+ *   request (93% of the average request's bytes) — see
+ *   `rubricBytesPerRequest`.
+ * - Each evaluable test case's own `requestBytes` converts to a token range
+ *   by dividing by `bytesPerToken.{max,min}` — dividing by the larger
  *   bytes-per-token bound gives fewer tokens (the `min` bound), dividing by
  *   the smaller gives more tokens (the `max` bound) — then rounding OUTWARD
  *   (`floor` for `min`, `ceil` for `max`) so the reported range never
- *   under-covers the true value it approximates.
- * - `requestOverheadTokens.{min,max}` is added once per evaluable call.
+ *   under-covers the true value it approximates, and the per-test-case
+ *   ranges are summed into `estimatedInputTokens`.
  * - A follow-up re-sends the same state, so the worst case — every
  *   evaluable test using its full `maxFollowUpsPerTest` follow-up budget,
  *   each costing as much as the initial calls did in aggregate — is
@@ -288,23 +163,29 @@ function roundUsd(value: number): number {
  *   (every possible follow-up), at `usdPerMillionInputTokens`. Jev's output
  *   tokens are unbilled (`outputTokensBilled: false`), so no output-token
  *   term is ever added.
- * - `bundlesOverCeiling` counts evaluable bundles whose own worst-case
- *   single-request tokens (`ceil(bytes / bytesPerToken.min) +
- *   requestOverheadTokens.max`) would exceed `requestTokenCeiling` — a
- *   coarse whole-request check; the finer 32k state-plus-longest-question
- *   provider sub-limit needs per-question text and is a Phase 4 concern.
+ * - `bundlesOverCeiling` counts evaluable test cases whose own real request's
+ *   worst-case tokens (`ceil(requestBytes / bytesPerToken.min)`) would
+ *   exceed `requestTokenCeiling` — a coarse whole-request check; the finer
+ *   32k state-plus-longest-question provider sub-limit needs per-question
+ *   text and is `checkJevRequestBudget`'s concern (`src/domain/jev-request.ts`).
  */
 export function estimateDryRun(
   snapshot: JevEstimateSnapshot,
   files: readonly DryRunFileInput[],
+  rubric: Rubric = RUBRIC_V1,
 ): DryRunEstimate {
   validateJevEstimateSnapshot(snapshot);
+  // Computed unconditionally (even with zero evaluable test cases): it depends only on the
+  // rubric, and validates `rubric` up front (via `buildJevQuestions`'s own `validateRubric`
+  // call) before any file is touched, mirroring the snapshot's own fail-fast validation.
+  const rubricBytesPerRequest = utf8ByteLength(canonicalizeJevRequestQuestions(buildJevQuestions(rubric)));
 
   let discovered = 0;
   let evaluable = 0;
   const skippedByReason: Record<DryRunSkippedReason, number> = { skip: 0, todo: 0, 'evidence-unavailable': 0 };
 
   let evidenceBytes = 0;
+  let requestBytes = 0;
   let initialTokensMin = 0;
   let initialTokensMax = 0;
   let bundlesOverCeiling = 0;
@@ -326,19 +207,22 @@ export function estimateDryRun(
         throw new Error(`unreachable: evaluable test case ${testCase.id} has no evidence bundle`);
       }
       evaluable += 1;
-      const bytes = utf8ByteLength(canonicalizeEvidenceBundle(bundle));
-      evidenceBytes += bytes;
-      const { min: bundleTokensMin, max: bundleTokensMax } = estimateTokensFromBytes(bytes, snapshot.bytesPerToken);
-      initialTokensMin += bundleTokensMin;
-      initialTokensMax += bundleTokensMax;
-      if (bundleTokensMax + snapshot.requestOverheadTokens.max > snapshot.requestTokenCeiling) {
+      evidenceBytes += utf8ByteLength(canonicalizeEvidenceBundle(bundle));
+
+      const request = buildJevRequest({ testCase, bundle, rubric });
+      const testCaseRequestBytes = utf8ByteLength(canonicalizeJevRequest(request));
+      requestBytes += testCaseRequestBytes;
+      const { min: requestTokensMin, max: requestTokensMax } = estimateTokensFromBytes(
+        testCaseRequestBytes,
+        snapshot.bytesPerToken,
+      );
+      initialTokensMin += requestTokensMin;
+      initialTokensMax += requestTokensMax;
+      if (requestTokensMax > snapshot.requestTokenCeiling) {
         bundlesOverCeiling += 1;
       }
     }
   }
-
-  initialTokensMin += evaluable * snapshot.requestOverheadTokens.min;
-  initialTokensMax += evaluable * snapshot.requestOverheadTokens.max;
 
   const followUpCalls: DryRunRange = { min: 0, max: evaluable * snapshot.maxFollowUpsPerTest };
   const followUpTokensMax = initialTokensMax * snapshot.maxFollowUpsPerTest;
@@ -361,6 +245,8 @@ export function estimateDryRun(
     initialCalls: evaluable,
     followUpCalls,
     evidenceBytes,
+    requestBytes,
+    rubricBytesPerRequest,
     estimatedInputTokens: { min: initialTokensMin, max: initialTokensMax },
     estimatedFollowUpInputTokens,
     estimatedUsd,
