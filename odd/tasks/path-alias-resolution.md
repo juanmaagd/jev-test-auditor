@@ -94,19 +94,21 @@ supermarket-pro's unresolved total rose because resolution now reaches further: 
   - Verify each mechanism end to end, precedence, stale mappings, denied targets, root escape attempts, and no execution.
   - Evidence: `ed4f4e5` (`feat: resolve aliased specifiers in evidence`) on `feat/alias-evidence-resolution`; 7 files, 719 additions and 51 deletions (770 authored changed lines, 351 of them tests). Suite 579 tests, typecheck, build, lint, and diff check passed. Observed RED before implementation with all 35 pre-existing resolution tests staying green. Precedence follows TypeScript's real rule: exact star-less patterns beat wildcards, longest matching prefix wins among wildcards, and a matched entry's targets are tried in declaration order. Containment is re-checked after wildcard substitution because the captured text is caller-controlled. Workspace bare names try `packageDir/src/index`, then the package directory, then the declared entry, so a `dist` main is never preferred over source; a dist-only package is reported denied rather than dropped. `alias-mapped-not-found` fires only when a declared mapping matched and every target was missing; a `baseUrl` miss stays `bare-specifier`. Hop 2 uses the helper's own nearest config. Mutations on first-match precedence, skipping the deny check, using the test file's config for hop 2, dropping the new reason, resolving into `node_modules`, and reverting the source preference turned RED.
   - Open question recorded: a denied or out-of-root target is terminal and does not fall through to a later mechanism. Verified empirically inert on the three calibration repositories, but not proven safe in general.
-- [ ] **A-3 — Measure and document the effect**
+- [x] **A-3 — Measure and document the effect**
   - Re-audit the three calibration repositories, record fragments per test and unresolved counts before and after, and update README and technical design.
   - Verify the recorded numbers against a real run.
+  - Evidence: `02e75fe` (`docs: document alias resolution and its measured effect`) on `feat/alias-measurement-docs`; 2 files, 39 authored changed lines, no production code touched. Suite 579 tests, typecheck, build, lint, and diff check passed. The writer re-measured independently, building `bd74fbd` in a throwaway worktree for the before column, and all eight before/after cells matched A-2 exactly; the causal sub-claims were verified from `--inspect-payloads` rather than inferred. Three false claims were removed while checking them: both documents still said only relative specifiers resolve, the import-depth wording contradicted itself, and a first draft wrongly listed `.mjs`/`.cjs`/`.mts`/`.cts` as unresolved when those extensions do probe — the real bun deferral is a discovery-scope limit. The terminal-denial limitation was verified on musive-s1 before being described as inert rather than asserted.
 
 ## Progress
 
-- Current task: **A-3**.
-- Completed tasks: **A-1, A-2**.
-- Running authored count: **2,191**.
+- Current task: **none — feature complete**.
+- Completed tasks: **A-1, A-2, A-3**.
+- Running authored count: **2,230**, against a 1,200-line forecast.
 - Slice ledger:
   - `feat/alias-config-reader`: `86a0a9a` — static alias configuration reader.
   - `feat/alias-evidence-resolution`: `ed4f4e5` — alias matching, precedence, and source-preferring workspace resolution.
+  - `feat/alias-measurement-docs`: `02e75fe` — independently re-measured documentation of the delivered behavior and its limits.
 
 ## Next step
 
-Branch `feat/alias-measurement-docs` from `feat/alias-evidence-resolution` and delegate A-3 to one writer: record the measured table below in README and the technical design, including the supermarket-pro increase and its cause.
+Integrating this chain into `main` is the user's decision. The open evaluation question remains: no `--evaluate` run has happened since aliases resolve, so the effect of richer evidence on `needs-review` rates and on the provisional thresholds is still unmeasured.
