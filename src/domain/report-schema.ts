@@ -405,6 +405,7 @@ export const REPORT_JSON_SCHEMA: JsonSchema = {
   properties: {
     reportVersion: { type: 'integer' },
     rootDir: { type: 'string' },
+    runId: { type: 'string' },
     reportingOnly: { type: 'boolean' },
     complete: { type: 'boolean' },
     incompleteReason: { type: 'string' },

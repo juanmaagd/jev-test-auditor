@@ -133,8 +133,14 @@ function emptyBundle(id: string): EvidenceBundle {
  * — including every token count vs. every latency value — so a swap between any two adjacent
  * fields is independently detectable (Phase 6 Warning: latency next to token counts already
  * produced one defect in this project).
+ *
+ * `overrides` (Phase 6, task P6-2b) lets a test layer `runId`/`resume` on top of this same base
+ * fixture without hand-duplicating it — mirroring the `classification()`/`judgedDimension()`
+ * overrides pattern already used elsewhere in this file. No existing call site passes anything,
+ * so every pre-P6-2b test keeps seeing exactly the same `AuditResult` it always has (no `runId`,
+ * no `resume`) — the honest default shape for a run with no persisted store.
  */
-function mixedResult(): AuditResult {
+function mixedResult(overrides: Partial<AuditResult> = {}): AuditResult {
   const cachedCase = testCase('tc:v1:cached', 'cached case', 'mixed.test.ts');
   const freshCase = testCase('tc:v1:fresh', 'fresh case', 'mixed.test.ts');
   const failedCase = testCase('tc:v1:failed', 'failed case', 'other.test.ts');
@@ -206,15 +212,21 @@ function mixedResult(): AuditResult {
       cacheStatusByTestCaseId,
       latencyByTestCaseId,
     },
+    ...overrides,
   };
 }
 
+// A fresh (non-resumed) run's persisted identity (Phase 6, task P6-2b) — distinct from every other
+// id-shaped string this file uses (`tc:v1:*` test-case ids, `run-*`-style resumed ids elsewhere),
+// so a swap between it and any neighboring field is independently detectable.
+const MIXED_RUN_ID = 'run:v1:mixed-fresh-8a41c2';
+
 describe('buildAuditReport — golden shape and stable key order', () => {
   it('builds the full canonical envelope for a mixed run with a byte-stable key order', () => {
-    const report = buildAuditReport(mixedResult(), context);
+    const report = buildAuditReport(mixedResult({ runId: MIXED_RUN_ID }), context);
 
     expect(JSON.stringify(report)).toBe(
-      '{"reportVersion":1,"rootDir":"/workspace/mixed","reportingOnly":true,"complete":true,'
+      '{"reportVersion":1,"rootDir":"/workspace/mixed","runId":"run:v1:mixed-fresh-8a41c2","reportingOnly":true,"complete":true,'
       + '"versions":{"storeSchema":3,"rubric":2,"policy":2},"modelRequested":"jev-1.13.0",'
       + '"discovery":{"files":[{"path":"mixed.test.ts","framework":"vitest","testCaseCount":2,"dynamicMetadataCount":0,"evidenceBundleCount":2},'
       + '{"path":"other.test.ts","framework":"vitest","testCaseCount":1,"dynamicMetadataCount":0,"evidenceBundleCount":1}],'
@@ -249,8 +261,8 @@ describe('buildAuditReport — golden shape and stable key order', () => {
     );
   });
 
-  it('validates the golden report against the published schema', () => {
-    const report = buildAuditReport(mixedResult(), context);
+  it('validates the golden report against the published schema, runId included', () => {
+    const report = buildAuditReport(mixedResult({ runId: MIXED_RUN_ID }), context);
     const result = validateAgainstSchema(REPORT_JSON_SCHEMA, JSON.parse(JSON.stringify(report)) as unknown);
     expect(result).toEqual({ valid: true, errors: [] });
   });
@@ -319,6 +331,49 @@ describe('buildAuditReport — completeness', () => {
 
     expect(report.complete).toBe(true);
     expect(report.totals.failed).toBe(1);
+  });
+});
+
+describe('buildAuditReport — run identity (Phase 6, task P6-2b)', () => {
+  it('omits runId entirely when AuditResult carries none — never a fabricated placeholder for a run with no persisted identity', () => {
+    const report = buildAuditReport(mixedResult(), context);
+    // `mixedResult()` with no override sets no `runId` at all — the honest default shape for e.g.
+    // an `--evaluate` run with no store wired.
+    expect('runId' in report).toBe(false);
+  });
+
+  it('carries a fresh run\'s AuditResult.runId verbatim onto the report', () => {
+    const report = buildAuditReport(mixedResult({ runId: MIXED_RUN_ID }), context);
+    expect(report.runId).toBe(MIXED_RUN_ID);
+  });
+
+  it(
+    'sources runId and resume.runId independently — a deliberately contradictory fixture proves neither field is derived '
+    + 'from the other (a real `runAudit` result never disagrees like this: see that function\'s own invariant)',
+    () => {
+      const result = mixedResult({
+        runId: 'run:v1:top-level-9c31d4',
+        resume: { runId: 'run:v1:resume-field-4e58a0', outstanding: 1, reused: 0, nothingOutstanding: false },
+      });
+
+      const report = buildAuditReport(result, context);
+
+      expect(report.runId).toBe('run:v1:top-level-9c31d4');
+      expect(report.resume?.runId).toBe('run:v1:resume-field-4e58a0');
+    },
+  );
+
+  it('keeps runId consistent with resume.runId for a genuinely resumed run — the real production shape, where both fields always agree', () => {
+    const sharedRunId = 'run:v1:resumed-consistent-2b77e1';
+    const result = mixedResult({
+      runId: sharedRunId,
+      resume: { runId: sharedRunId, outstanding: 0, reused: 2, nothingOutstanding: true },
+    });
+
+    const report = buildAuditReport(result, context);
+
+    expect(report.runId).toBe(sharedRunId);
+    expect(report.resume?.runId).toBe(sharedRunId);
   });
 });
 

@@ -54,7 +54,7 @@ Start as one package. Extract packages or a public adapter API only after a seco
 
 ### 5. Add persistence, caching, and resilient scheduling
 
-- Introduce SQLite migrations for immutable runs, attempts, judgments, usage, and reports.
+- Introduce SQLite migrations for immutable runs, attempts, judgments, and usage. No separate `reports` table: a run's own persisted identity (the `runs` table's id) travels with the canonical JSON report itself as its top-level `runId` (Phase 6, task P6-2b), which is what lets a report be traced back to its run and correlated with `--resume` without a report-lookup table of its own.
 - Implement the complete content-addressed cache key and `--fresh` behavior.
 - Add bounded concurrency, adaptive throttling, retries, checkpoints, and resume.
 - Verify: migration, cache invalidation, interruption/restart, and terminal-state tests.

@@ -1558,6 +1558,68 @@ describe('per-test-case cache status and latency (Phase 6, task P6-2)', () => {
   );
 });
 
+describe('run identity threaded onto AuditResult (Phase 6, task P6-2b)', () => {
+  it(
+    'threads the store-minted runId onto AuditResult.runId for a fresh (non-resumed) run — captured live from the '
+    + 'store\'s own beginRun return value, never a hardcoded coincidence (Phase 6 Warning 2)',
+    async () => {
+      const baseStore = fakeStore();
+      let mintedRunId: string | undefined;
+      const store: AuditStorePort = {
+        ...baseStore,
+        async beginRun(rootDir: string): Promise<string> {
+          const runId = await baseStore.beginRun(rootDir);
+          mintedRunId = runId;
+          return runId;
+        },
+      };
+      const evaluableCase = testCaseWithModifiers('tc:v1:id-fresh', [], 'id.test.ts');
+      const discovery: DiscoveryResult = { files: [discovered('id.test.ts')], excluded: [], diagnostics: [] };
+      const evaluation = stubEvaluationPort(async (request) => classificationFor(request.testCase.id, { status: 'healthy' }));
+
+      const result = await runAudit(configuration, {
+        discovery: { discover: async () => discovery },
+        sourceReader: { read: async () => 'source' },
+        extractor: { extract: () => ({ testCases: [evaluableCase], dynamicMetadata: [], diagnostics: [] }) },
+        evidence: { build: async (request) => ({ bundles: request.testCases.map((testCase) => emptyBundle(testCase.id)), diagnostics: [] }) },
+        evaluation,
+        store,
+      });
+
+      expect(mintedRunId).toBeDefined();
+      // Compared against the value THIS test captured directly from the store's own return, not
+      // against a value typed into this test — the exact provenance check Warning 2 calls for.
+      expect(result.runId).toBe(mintedRunId);
+    },
+  );
+
+  it('has no runId when ports.evaluation is present but ports.store is absent — a run with no store has no persisted identity to report', async () => {
+    const evaluableCase = testCaseWithModifiers('tc:v1:id-no-store', [], 'id-no-store.test.ts');
+    const discovery: DiscoveryResult = { files: [discovered('id-no-store.test.ts')], excluded: [], diagnostics: [] };
+    const evaluation = stubEvaluationPort(async (request) => classificationFor(request.testCase.id, { status: 'healthy' }));
+
+    const result = await runAudit(configuration, {
+      discovery: { discover: async () => discovery },
+      sourceReader: { read: async () => 'source' },
+      extractor: { extract: () => ({ testCases: [evaluableCase], dynamicMetadata: [], diagnostics: [] }) },
+      evidence: { build: async (request) => ({ bundles: request.testCases.map((testCase) => emptyBundle(testCase.id)), diagnostics: [] }) },
+      evaluation,
+    });
+
+    expect(result.runId).toBeUndefined();
+  });
+
+  it('has no runId for an offline audit (no --evaluate at all), even though a store port happens to be supplied', async () => {
+    const store = fakeStore();
+    const discovery: DiscoveryResult = { files: [discovered('a.test.ts')], excluded: [], diagnostics: [] };
+
+    const result = await runAudit(configuration, { ...portsFor(discovery, async () => 'source', () => extraction('a')), store });
+
+    expect(result.runId).toBeUndefined();
+    expect(store.beginRunCalls).toEqual([]);
+  });
+});
+
 describe('sourceTextByPath exposure (Phase 5, task P5-5)', () => {
   it('exposes each file\'s full raw source text on the result when retainSourceText is true', async () => {
     const discovery: DiscoveryResult = { files: [discovered('a.test.ts'), discovered('b.test.ts')], excluded: [], diagnostics: [] };

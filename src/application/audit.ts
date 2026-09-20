@@ -646,6 +646,9 @@ async function preflightResume(
     return {
       earlyResult: {
         rootDir: request.rootDir,
+        // Phase 6, task P6-2b: this early return continues an existing run identity exactly like
+        // the ordinary resumed path below does — `runId` here is never independent of `resume.runId`.
+        runId,
         files: [],
         excluded: [],
         diagnostics: [],
@@ -816,6 +819,9 @@ export async function runAudit(
   let finalFiles: readonly AuditFileResult[] = results;
   let evaluation: AuditEvaluationResult | undefined;
   let resumeSummary: AuditResumeSummary | undefined;
+  // Phase 6, task P6-2b: hoisted out of the `if` block below so this run's persisted identity (or
+  // its genuine absence) reaches the returned `AuditResult` — see `AuditResult.runId`'s own doc.
+  let runId: string | undefined;
   if (ports.evaluation !== undefined) {
     // Phase 5, task P5-1: `ports.store` is opt-in exactly like `ports.evaluation` (see
     // `AuditStorePort`'s own doc) — `beginRun`/`finishRun` bracket this one run only when a store
@@ -830,7 +836,7 @@ export async function runAudit(
     // at persist time, rather than only at compare time, is the fix itself: re-resolving a raw
     // stored value later would resolve it against the WRONG (resume-time) working directory (see
     // `AuditStorePort.canonicalizeRootDir`'s own doc).
-    const runId = resumeState !== undefined
+    runId = resumeState !== undefined
       ? options.resume
       : ports.store === undefined ? undefined : await ports.store.beginRun(await ports.store.canonicalizeRootDir(request.rootDir));
     // Phase 5, task P5-2: caching is meaningful only alongside persistence (a lookup needs
@@ -883,6 +889,7 @@ export async function runAudit(
   };
   return {
     rootDir: request.rootDir,
+    ...(runId === undefined ? {} : { runId }),
     files: finalFiles,
     excluded,
     diagnostics,

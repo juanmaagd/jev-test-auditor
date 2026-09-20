@@ -21,6 +21,15 @@
  * insertion order (never spread from an intermediate object whose own order could drift), because
  * `JSON.stringify` preserves string-key insertion order — this is what makes the golden tests in
  * `test/report.test.ts`/`test/cli.test.ts` meaningful proof of stability, not merely of content.
+ *
+ * **Run identity, not a `reports` table** (orchestrator decision, Phase 6, task P6-2b): `runId`
+ * mirrors {@link AuditResult.runId} verbatim — present for a fresh run with a store, or a resumed
+ * run (where it always agrees with `resume.runId`), absent when there is no persisted run to name
+ * (no `--evaluate`, no store wired, or evaluation never started). This is the whole answer to the
+ * gap P6-2 itself left open and the Phase 5 implementation plan's work unit 5 never designed: a
+ * report is traced back to its persisted run, and correlated with a later `--resume`, by this one
+ * field — no separate `reports` lookup table is built, because nothing concrete needs one once the
+ * id already travels with the report that names it.
  */
 import {
   EMPTY_AUDIT_EVALUATION_TOTALS,
@@ -128,6 +137,8 @@ export interface AuditReportClassification extends ClassificationResult {
 export interface AuditReport {
   readonly reportVersion: number;
   readonly rootDir: string;
+  /** Mirrors {@link AuditResult.runId} verbatim (Phase 6, task P6-2b) — see that field's own doc for exactly when it is present vs. genuinely absent. Never derived from `resume.runId` below; the two are independent sources that happen to agree for a genuinely resumed run. */
+  readonly runId?: string;
   readonly reportingOnly: true;
   /** `false` only when this run's own evaluation never ran at all (e.g. discovery failed before evaluation could start) — see {@link incompleteReasonFor}. Never `false` merely because some test cases failed, were skipped, needed review, or mismatched the model pin: those are ordinary per-test outcomes this report already carries in full (`totals`, `classifications`, `diagnostics`). */
   readonly complete: boolean;
@@ -244,9 +255,9 @@ function cacheStatusEntries(
 
 /**
  * Builds the canonical report. Field order below is deliberate and load-bearing (see this
- * module's own doc on stable key order): `reportVersion`, `rootDir`, `reportingOnly`, `complete`
- * (+ `incompleteReason`), `versions`, `modelRequested`, `discovery`, `totals`, `latency`,
- * `cacheStatus`, `classifications`, `diagnostics`, `resume`.
+ * module's own doc on stable key order): `reportVersion`, `rootDir`, `runId`, `reportingOnly`,
+ * `complete` (+ `incompleteReason`), `versions`, `modelRequested`, `discovery`, `totals`,
+ * `latency`, `cacheStatus`, `classifications`, `diagnostics`, `resume`.
  */
 export function buildAuditReport(result: AuditResult, context: AuditReportContext): AuditReport {
   const evaluation = result.evaluation;
@@ -273,6 +284,7 @@ export function buildAuditReport(result: AuditResult, context: AuditReportContex
   return {
     reportVersion: REPORT_VERSION,
     rootDir: result.rootDir,
+    ...(result.runId === undefined ? {} : { runId: result.runId }),
     reportingOnly: true,
     complete: incompleteReason === undefined,
     ...(incompleteReason === undefined ? {} : { incompleteReason }),

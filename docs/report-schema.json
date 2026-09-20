@@ -22,6 +22,9 @@
     "rootDir": {
       "type": "string"
     },
+    "runId": {
+      "type": "string"
+    },
     "reportingOnly": {
       "type": "boolean"
     },

@@ -739,6 +739,23 @@ export interface AuditEvaluationResult {
 
 export interface AuditResult {
   readonly rootDir: string;
+  /**
+   * This run's persisted identity (Phase 6, task P6-2b) — present whenever there is a durable run
+   * to identify: a fresh, non-resumed `--evaluate` run with a store present (the exact id
+   * {@link AuditStorePort.beginRun} minted, the same id every `recordWorkItem` call for this run
+   * uses) or a resumed run, where it equals `resume.runId` below (a resumed run continues an
+   * existing identity, it never mints a new one — `runAudit` never assigns the two independently).
+   * `undefined` exactly when there is no persisted run to name: an offline audit (no
+   * `--evaluate`), an `--evaluate` run with no store wired at all, or a run whose evaluation never
+   * started at all (e.g. discovery failed before `ports.evaluation` was ever reached) — never a
+   * fabricated placeholder id for any of those, matching this codebase's established convention
+   * for "genuinely absent" (see e.g. {@link TestCaseLatency.attemptLatenciesMs}'s own doc). This is
+   * what lets a canonical report (`src/domain/report.ts`'s `buildAuditReport`) be traced back to
+   * the store it was persisted under, and correlated with a later `--resume`, without a separate
+   * `reports` lookup table — the gap the Phase 5 implementation plan left open, closed by this
+   * field rather than by that table (see the Phase 6 feature document's own decision record).
+   */
+  readonly runId?: string;
   readonly files: readonly AuditFileResult[];
   readonly excluded: readonly ExcludedTestFile[];
   readonly diagnostics: readonly AuditDiagnostic[];

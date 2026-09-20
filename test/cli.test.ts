@@ -1911,10 +1911,21 @@ describe('resume wiring (Phase 5, task P5-4)', () => {
 
       const resumedReport = JSON.parse(resumeOutput.lines[0]!) as Record<string, unknown>;
       expect(resumedReport['resume']).toEqual({ runId, outstanding: 1, reused: 1 });
+      // Phase 6, task P6-2b: the resumed report's own top-level runId agrees with the id it was
+      // asked to resume — the same identity `resume.runId` above already names.
+      expect(resumedReport['runId']).toBe(runId);
+      // The baseline run persisted to a SEPARATE database (`baselineDb`), so it minted its own,
+      // genuinely different, run id — that the two differ is correct, not a bug, so both are
+      // excluded from the byte-for-byte comparison below only after being verified individually.
+      expect(typeof baselineReport['runId']).toBe('string');
+      expect(baselineReport['runId']).not.toBe(runId);
       // Same final report as an uninterrupted run over the same fixture — everything except the
-      // resume-specific metadata this task deliberately adds matches byte-for-byte (compared as
-      // parsed objects here to isolate that one intentional, documented difference).
+      // resume-specific metadata this task deliberately adds, and each run's own distinct persisted
+      // identity, matches byte-for-byte (compared as parsed objects here to isolate those two
+      // intentional, documented differences).
       delete resumedReport['resume'];
+      delete resumedReport['runId'];
+      delete baselineReport['runId'];
       expect(resumedReport).toEqual(baselineReport);
     },
   );

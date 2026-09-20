@@ -295,29 +295,40 @@ describe('--resume rootDir identity (defect fix, 2026-09-20)', () => {
     expect(result.resume?.nothingOutstanding).toBe(false);
   });
 
-  it('canonicalizes rootDir BEFORE calling beginRun for a fresh (non-resume) run, never persisting the raw request string directly', async () => {
-    // Proves canonicalization happens at PERSIST time, not only at compare time — the distinction
-    // this defect fix depends on (see `AuditStorePort.canonicalizeRootDir`'s own doc for why
-    // resolving only at comparison time is the wrong fix).
-    const base = countingStore();
-    const beginRunCalls: string[] = [];
-    const store: AuditStorePort = {
-      ...base,
-      async beginRun(rootDir: string): Promise<string> {
-        beginRunCalls.push(rootDir);
-        return base.beginRun(rootDir);
-      },
-      async canonicalizeRootDir(rootDir: string): Promise<string> {
-        return `${rootDir}::canonical`;
-      },
-    };
-    const discovery: DiscoveryResult = { files: [discovered('a.test.ts')], excluded: [], diagnostics: [] };
-    const evaluation = stubEvaluationPort(async (request) => classificationFor(request.testCase.id));
+  it(
+    'canonicalizes rootDir BEFORE calling beginRun for a fresh (non-resume) run, never persisting the raw request string '
+    + 'directly, and threads the exact minted id onto AuditResult.runId (Phase 6, task P6-2b)',
+    async () => {
+      // Proves canonicalization happens at PERSIST time, not only at compare time — the distinction
+      // this defect fix depends on (see `AuditStorePort.canonicalizeRootDir`'s own doc for why
+      // resolving only at comparison time is the wrong fix).
+      const base = countingStore();
+      const beginRunCalls: string[] = [];
+      const mintedRunIds: string[] = [];
+      const store: AuditStorePort = {
+        ...base,
+        async beginRun(rootDir: string): Promise<string> {
+          beginRunCalls.push(rootDir);
+          const runId = await base.beginRun(rootDir);
+          mintedRunIds.push(runId);
+          return runId;
+        },
+        async canonicalizeRootDir(rootDir: string): Promise<string> {
+          return `${rootDir}::canonical`;
+        },
+      };
+      const discovery: DiscoveryResult = { files: [discovered('a.test.ts')], excluded: [], diagnostics: [] };
+      const evaluation = stubEvaluationPort(async (request) => classificationFor(request.testCase.id));
 
-    await runAudit(configuration, portsFor(discovery, [testCase('tc:v1:a')], evaluation, store));
+      const result = await runAudit(configuration, portsFor(discovery, [testCase('tc:v1:a')], evaluation, store));
 
-    expect(beginRunCalls).toEqual([`${configuration.rootDir}::canonical`]);
-  });
+      expect(beginRunCalls).toEqual([`${configuration.rootDir}::canonical`]);
+      expect(mintedRunIds).toHaveLength(1);
+      // Captured directly from the store's own `beginRun` return, independently of `result.runId`
+      // — provenance, not a coincidence (Phase 6 Warning 2).
+      expect(result.runId).toBe(mintedRunIds[0]);
+    },
+  );
 });
 
 describe('--resume nothing outstanding (Phase 5, task P5-4)', () => {
@@ -342,6 +353,9 @@ describe('--resume nothing outstanding (Phase 5, task P5-4)', () => {
 
     expect(discoveryCalls).toBe(0);
     expect(result.resume).toEqual({ runId: 'run-done', outstanding: 0, reused: 0, nothingOutstanding: true });
+    // Phase 6, task P6-2b: this already-finished early return continues the SAME identity it was
+    // asked to resume — never absent, never a freshly minted one.
+    expect(result.runId).toBe('run-done');
     expect(result.evaluation).toBeUndefined();
   });
 });
@@ -421,6 +435,9 @@ describe('--resume completes only outstanding items (Phase 5, task P5-4)', () =>
       // cached, failed) — the skipped item is not "reused," it is simply not re-recorded, since
       // skip/evaluable status is always freshly recomputed from the current source either way.
       expect(result.resume).toEqual({ runId: 'run-partial', outstanding: 2, reused: 3, nothingOutstanding: false });
+      // Phase 6, task P6-2b: a resumed run's top-level runId always agrees with resume.runId — it
+      // continues the identity it was asked to resume, never mints a new one.
+      expect(result.runId).toBe('run-partial');
 
       // The reused failed item's diagnostic is reconstructed with the SAME kind/message it was
       // originally recorded with — never a fresh, different-looking one.
@@ -459,6 +476,7 @@ describe('--resume completes only outstanding items (Phase 5, task P5-4)', () =>
       expect(dispatched).toEqual([driftedCase.id]);
       expect(result.evaluation?.totals).toMatchObject({ evaluated: 1, failed: 0, skipped: { total: 0 } });
       expect(result.resume).toEqual({ runId: 'run-drift', outstanding: 1, reused: 0, nothingOutstanding: false });
+      expect(result.runId).toBe('run-drift');
     },
   );
 
@@ -480,6 +498,7 @@ describe('--resume completes only outstanding items (Phase 5, task P5-4)', () =>
     const result = await runAudit({ ...configuration, concurrency: 1 }, portsFor(discovery, [only], evaluation, store), { resume: 'run-all-terminal' });
 
     expect(result.resume).toEqual({ runId: 'run-all-terminal', outstanding: 0, reused: 1, nothingOutstanding: true });
+    expect(result.runId).toBe('run-all-terminal');
     expect(result.evaluation?.totals).toMatchObject({ evaluated: 1, cached: 0, failed: 0 });
   });
 });
