@@ -450,11 +450,132 @@ function toDimension(text: DimensionText): RubricDimension {
  * each (14 questions total), pinned to {@link JEV_MODEL_ID}. Validate with
  * {@link validateRubric} before composing a request from it (see
  * `buildJevRequest` in `src/domain/jev-request.ts`, which does this itself).
+ *
+ * Superseded as the active rubric by {@link RUBRIC_V2} (task C-2 of
+ * `odd/tasks/classification-calibration.md`); kept exported, unchanged, and
+ * still fully tested, because the 2026-09-20 discrimination-fixture
+ * recording (`test/fixtures/recorded/discrimination-raw-2026-09-20.json`,
+ * replayed by `test/classification-replay.test.ts`) is real provider output
+ * captured against this exact wording — recomputing its verdicts requires
+ * this exact `Rubric` value to keep existing, not a v2 stand-in.
  */
 export const RUBRIC_V1: Rubric = {
   version: 1,
   model: JEV_MODEL_ID,
   dimensions: DIMENSION_TEXT.map(toDimension),
+};
+
+/**
+ * Task C-2 (`odd/tasks/classification-calibration.md`) rewrites of the two
+ * applicability questions measured to exclude themselves on real evidence
+ * (see the task doc's "Measured evidence"): `determinism-isolation`
+ * (applicability 0.13-0.20 on 5 of 11 discrimination-fixture tests,
+ * including the one deliberately written to violate determinism) and
+ * `falsifiability` (applicability 0.33-0.49, just under the 0.5 cut, on
+ * several tests including a healthy control asserting an exact value).
+ *
+ * Both v1 questions asked, in effect, "is every possible influence on this
+ * dimension visible?" — a question evidence bundles are deliberately built
+ * to answer "no" to, since they carry only the test's own body plus a
+ * minimal helper/production-seam/mock-target slice (`src/domain/evidence.ts`),
+ * never the whole repository. The task doc's decision: "Applicability
+ * questions must ask whether the shown evidence supports a judgment, not
+ * whether every possible influence is visible. Absence of visible shared
+ * state is evidence about determinism, not a reason to abstain." Both
+ * rewrites below implement that decision directly, and each keeps a
+ * concrete `false` criterion — inapplicable only when the test's own body
+ * (`determinism-isolation`) or its assertions/exercised behavior
+ * (`falsifiability`) are not shown in the evidence at all — so a genuinely
+ * evidence-starved test still abstains rather than becoming
+ * unconditionally applicable.
+ *
+ * `determinism-isolation`'s wording is deliberately scoped to what
+ * `buildJevState` (`src/domain/jev-request.ts`) can actually put in front of
+ * the model: the test's own body (a `kind: 'test'` fragment) and, when
+ * evidence selection includes one, an in-scope hook fragment tagged
+ * `selectionReason: 'hook-in-scope'` (`src/domain/evidence.ts`) — never a
+ * structured `hooks` record, which `buildJevState` deliberately omits. The
+ * question is worded around "the test's own body" being shown, not around
+ * "hooks being shown", so a test with no in-scope hook at all is not read as
+ * missing evidence.
+ *
+ * `falsifiability`'s wording separates two things v1 conflated: the test's
+ * own assertions and what they are wired to (visible whenever the test body
+ * is shown) from the deeper production implementation behind that behavior
+ * (frequently not shown, since evidence selection sends only a minimal
+ * seam). A falsifiability judgment needs the former, not the latter.
+ */
+const V2_APPLICABILITY_OVERRIDES: Readonly<Partial<Record<RubricDimensionId, { readonly instructions: string; readonly criteria: NoulCriteria }>>> = {
+  'determinism-isolation': {
+    instructions:
+      'Decide whether the evidence shown supports a judgment on determinism and isolation for this specific '
+      + "test — not whether every possible external influence on it has been ruled out. Inspect the test's own "
+      + 'body, together with any in-scope hook fragment the evidence includes, for concrete hazards: real '
+      + 'wall-clock time, unseeded randomness, uncontrolled network access, the filesystem, environment '
+      + 'variables, or state written to or read from module-level or otherwise shared scope. If the body and '
+      + 'any hooks shown contain none of these hazards, that absence is itself evidence the test is '
+      + 'self-contained — treat it as support for a determinism judgment, not as a reason to abstain because '
+      + "some other, unshown part of the codebase could theoretically interact with it. This question is "
+      + "inapplicable only when the test's own body is not shown at all, so there is nothing to inspect for a "
+      + 'hazard in the first place.',
+    criteria: {
+      true:
+        "The test's own body is shown — together with any in-scope hook fragment the evidence includes, if "
+        + 'there is one — so it can be inspected for a determinism or isolation hazard, whether or not one is '
+        + 'actually found there.',
+      false:
+        "The test's own body is not shown in the evidence at all, so there is nothing to inspect for a "
+        + 'determinism or isolation hazard.',
+    },
+  },
+  falsifiability: {
+    instructions:
+      'Decide whether the evidence shown supports a judgment on falsifiability — not whether the full '
+      + 'production implementation behind the tested behavior has been shown. Falsifiability asks whether '
+      + "breaking the specific behavior the test names would break its assertions, and that can be judged "
+      + "concretely once the test's own assertions and the call or behavior they are wired to are visible, even "
+      + 'when the deeper implementation behind that call is not shown. Sufficient evidence means the assertions '
+      + 'and what they are checking against are visible, so it is possible to reason about what would make them '
+      + 'fail. This question is inapplicable only when the assertions themselves, or the behavior they '
+      + 'exercise, are not shown at all — never merely because the code behind that behavior is absent from the '
+      + 'evidence.',
+    criteria: {
+      true:
+        "The test's assertions and the behavior or call they are wired to are visible, enough to reason "
+        + 'concretely about what would make them fail — even when the deeper implementation behind that '
+        + 'behavior is not shown.',
+      false:
+        "The test's assertions, or the behavior they exercise, are not shown in the evidence at all, so there "
+        + 'is nothing to reason about what would make the test fail.',
+    },
+  },
+};
+
+const DIMENSION_TEXT_V2: readonly DimensionText[] = DIMENSION_TEXT.map((text) => {
+  const override = V2_APPLICABILITY_OVERRIDES[text.id];
+  if (override === undefined) return text;
+  return {
+    ...text,
+    applicabilityInstructions: override.instructions,
+    applicabilityCriteria: override.criteria,
+  };
+});
+
+/**
+ * The shipped, active rubric as of task C-2 (`odd/tasks/classification-calibration.md`):
+ * identical to {@link RUBRIC_V1} in every field except the two rewritten
+ * applicability questions above (`determinism-isolation`, `falsifiability`)
+ * — every other dimension's applicability text, every dimension's quality
+ * text, every label, and every question id are inherited byte-for-byte from
+ * {@link RUBRIC_V1} via {@link DIMENSION_TEXT} (see `test/rubric.test.ts`,
+ * which asserts that inheritance directly). Every real `--evaluate` request
+ * construction (`src/adapters/jev-evaluation-port.ts`) uses this rubric, not
+ * {@link RUBRIC_V1}.
+ */
+export const RUBRIC_V2: Rubric = {
+  version: 2,
+  model: JEV_MODEL_ID,
+  dimensions: DIMENSION_TEXT_V2.map(toDimension),
 };
 
 function nonEmpty(value: string): boolean {

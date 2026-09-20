@@ -222,10 +222,22 @@ export const CLASSIFICATION_POLICY_V1: ClassificationPolicyV1 = {
  *
  * No accuracy claim is made for either number; `odd/tasks/classification-calibration.md`
  * task C-3 re-measures this policy against the live pr-hero subset.
+ *
+ * `rubricVersion` is pinned to `2` (task C-2 of `odd/tasks/classification-calibration.md`,
+ * which shipped `RUBRIC_V2` as the active rubric): `sideMin`/`criticalMin`
+ * were derived from `judgeDimensionV2`'s `probabilities` distribution over
+ * the four quality levels, which C-2 never touches — C-2 rewrites only two
+ * dimensions' applicability questions, never any quality question's wording
+ * or the shape of its answer — so these thresholds carry forward unchanged
+ * from the v1-recorded evidence they were derived from. `RUBRIC_V1` (kept
+ * exported for the recorded-answer replay test — see its own doc) is no
+ * longer a valid pairing for this policy; `test/classification-replay.test.ts`
+ * exercises this exact V2 threshold logic against the v1 recording through
+ * an explicit, documented `rubricVersion` override, not through this pin.
  */
 export const CLASSIFICATION_POLICY_V2: ClassificationPolicyV2 = {
   version: 2,
-  rubricVersion: 1,
+  rubricVersion: 2,
   applicabilityMin: 0.5,
   sideMin: 0.65,
   criticalMin: 0.5,

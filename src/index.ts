@@ -132,6 +132,7 @@ export {
   RUBRIC_QUALITY_LEVEL_COUNT,
   RUBRIC_QUALITY_LEVELS,
   RUBRIC_V1,
+  RUBRIC_V2,
   validateRubric,
   type NoulCriteria,
   type Rubric,

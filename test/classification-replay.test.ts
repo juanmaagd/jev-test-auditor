@@ -60,7 +60,28 @@ function toEvaluation(recorded: RecordedEvaluation): JevEvaluation {
   };
 }
 
+/**
+ * `CLASSIFICATION_POLICY_V2` pinned back to `RUBRIC_V1.version` (task C-2 of
+ * `odd/tasks/classification-calibration.md` re-pinned the real, exported
+ * `CLASSIFICATION_POLICY_V2.rubricVersion` to `2`, matching the shipped
+ * `RUBRIC_V2`). This replay's own `rubric` argument below really is
+ * `RUBRIC_V1` — the recording is real provider output captured against that
+ * exact wording — so replaying it needs a policy value whose `rubricVersion`
+ * says so too, or `classifyEvaluation`'s own version-consistency guard
+ * (correctly) refuses to run it. This override is not a loophole around
+ * that guard: `judgeDimensionV2` (the actual boundary-mass logic this
+ * replay is verifying) reads only the quality answer's `probabilities`
+ * distribution, never `rubricVersion` — and task C-2 never touches any
+ * quality question's wording — so replaying v1-recorded quality answers
+ * through these exact thresholds is the identical computation task C-1
+ * verified; only the label on the pin changes. The real production guard is
+ * still exercised elsewhere (`test/jev-evaluation-port.test.ts`,
+ * `test/classification.test.ts`'s dedicated mismatch tests).
+ */
+const V2_THRESHOLDS_ON_V1_RECORDING = { ...CLASSIFICATION_POLICY_V2, rubricVersion: RUBRIC_V1.version };
+
 function classify(recorded: RecordedEvaluation, policy: typeof CLASSIFICATION_POLICY_V1 | typeof CLASSIFICATION_POLICY_V2) {
+  const effectivePolicy = policy === CLASSIFICATION_POLICY_V2 ? V2_THRESHOLDS_ON_V1_RECORDING : policy;
   return classifyEvaluation({
     testCase: {
       testCaseId: recorded.testCaseId as TestCaseId,
@@ -69,7 +90,7 @@ function classify(recorded: RecordedEvaluation, policy: typeof CLASSIFICATION_PO
     },
     evaluation: toEvaluation(recorded),
     rubric: RUBRIC_V1,
-    policy,
+    policy: effectivePolicy,
   });
 }
 
@@ -120,6 +141,13 @@ const EXPECTED_TABLE: readonly {
 ];
 
 describe('classification replay — discrimination fixture (2026-09-20, recorded)', () => {
+  it('sanity-checks that the real shipped CLASSIFICATION_POLICY_V2 is pinned to rubric v2, not v1 (task C-2)', () => {
+    // Documents exactly why `classify` above needs `V2_THRESHOLDS_ON_V1_RECORDING`: the real,
+    // exported policy no longer pairs with `RUBRIC_V1` directly.
+    expect(CLASSIFICATION_POLICY_V2.rubricVersion).toBe(2);
+    expect(CLASSIFICATION_POLICY_V2.rubricVersion).not.toBe(RUBRIC_V1.version);
+  });
+
   it('sanity-checks the fixture is the expected capture before trusting any replayed verdict', () => {
     expect(FIXTURE.evaluations).toHaveLength(11);
     expect(FIXTURE.rubricVersion).toBe(RUBRIC_V1.version);

@@ -8,7 +8,7 @@ import {
   JEV_REQUEST_LIMITS,
   type JevRequest,
 } from '../src/domain/jev-request.js';
-import { JEV_MODEL_ID, RUBRIC_V1, type Rubric } from '../src/domain/rubric.js';
+import { JEV_MODEL_ID, RUBRIC_V1, RUBRIC_V2, type Rubric } from '../src/domain/rubric.js';
 import {
   buildEvidenceBundle,
   DEFAULT_EVIDENCE_BUDGET,
@@ -362,6 +362,38 @@ describe('checkJevRequestBudget / assertJevRequestWithinBudget', () => {
     expect(maxBundle.totals.includedBytes).toBe(DEFAULT_EVIDENCE_BUDGET.maxBundleBytes);
 
     const maxRequest = buildJevRequest({ testCase: goldenTestCase, bundle: maxBundle, rubric: RUBRIC_V1 });
+    const check = checkJevRequestBudget(maxRequest);
+
+    expect(check.withinTotal).toBe(true);
+    expect(check.withinStatePlusLongestQuestion).toBe(true);
+  });
+
+  it('fits the shipped RUBRIC_V2 request within both default limits at the maximum evidence bundle size (task C-2)', () => {
+    // Same maximal bundle as the RUBRIC_V1 case above, against the rubric task C-2 actually ships
+    // (src/adapters/jev-evaluation-port.ts): proves the rewritten determinism-isolation/falsifiability
+    // applicability questions did not push a real, maximally-sized request over either provider ceiling.
+    const maxFragmentContent = 'x'.repeat(DEFAULT_EVIDENCE_BUDGET.maxFragmentBytes);
+    const maxFragment = (kind: EvidenceFragment['kind'], path: string): EvidenceFragment => fragment({
+      kind,
+      repositoryRelativePath: path,
+      content: maxFragmentContent,
+      truncation: {
+        truncated: false,
+        originalBytes: DEFAULT_EVIDENCE_BUDGET.maxFragmentBytes,
+        includedBytes: DEFAULT_EVIDENCE_BUDGET.maxFragmentBytes,
+      },
+    });
+    const maxBundle = bundle('tc:v1:golden', {
+      fragments: [
+        maxFragment('test', 'a.test.ts'),
+        maxFragment('helper', 'b.ts'),
+        maxFragment('production-seam', 'c.ts'),
+        maxFragment('mock-target', 'd.ts'),
+      ],
+    });
+    expect(maxBundle.totals.includedBytes).toBe(DEFAULT_EVIDENCE_BUDGET.maxBundleBytes);
+
+    const maxRequest = buildJevRequest({ testCase: goldenTestCase, bundle: maxBundle, rubric: RUBRIC_V2 });
     const check = checkJevRequestBudget(maxRequest);
 
     expect(check.withinTotal).toBe(true);

@@ -9,7 +9,7 @@ import {
   type DryRunFileInput,
   type JevEstimateSnapshot,
 } from '../src/domain/estimate.js';
-import { JEV_MODEL_ID, RUBRIC_V1, type Rubric } from '../src/domain/rubric.js';
+import { JEV_MODEL_ID, RUBRIC_V1, RUBRIC_V2, type Rubric } from '../src/domain/rubric.js';
 import {
   buildJevQuestions,
   buildJevRequest,
@@ -279,9 +279,9 @@ describe('estimateDryRun', () => {
       followUpCalls: { min: 0, max: 0 },
       evidenceBytes: 0,
       requestBytes: 0,
-      // Rubric-only, computed from the default RUBRIC_V1 regardless of how many (if any) test
-      // cases were discovered — see the dedicated golden test below.
-      rubricBytesPerRequest: 26_979,
+      // Rubric-only, computed from the default RUBRIC_V2 (task C-2) regardless of how many (if
+      // any) test cases were discovered — see the dedicated golden test below.
+      rubricBytesPerRequest: 27_701,
       estimatedInputTokens: { min: 0, max: 0 },
       estimatedFollowUpInputTokens: { min: 0, max: 0 },
       estimatedUsd: { min: 0, max: 0 },
@@ -294,33 +294,38 @@ describe('estimateDryRun', () => {
     expect(utf8ByteLength(canonicalizeJevRequestQuestions(buildJevQuestions(RUBRIC_V1)))).toBe(26_979);
   });
 
+  it("pins RUBRIC_V2's own canonical questions-map size at 27,701 bytes (task C-2's rewritten determinism-isolation/falsifiability applicability questions add 722 bytes over RUBRIC_V1)", () => {
+    expect(utf8ByteLength(canonicalizeJevRequestQuestions(buildJevQuestions(RUBRIC_V2)))).toBe(27_701);
+  });
+
   it('throws RangeError for an invalid snapshot before touching the files', () => {
     expect(() => estimateDryRun({ ...JEV_ESTIMATE_SNAPSHOT, requestTokenCeiling: 0 }, [])).toThrow(RangeError);
   });
 
   it(
     'computes the exact golden preview for one evaluable test plus one skip, one todo, and one missing-bundle test, '
-    + 'measuring the real RUBRIC_V1 request instead of guessing an overhead',
+    + 'measuring the real RUBRIC_V2 request instead of guessing an overhead',
     () => {
       // Hand arithmetic:
-      //   evidenceBytes (bundle-only, unchanged from before this fix) = 477
+      //   evidenceBytes (bundle-only, unaffected by the rubric) = 477
       //   requestBytes: the exact canonical `buildJevRequest`+`canonicalizeJevRequest` bytes for this test
-      //     case's bundle against the default RUBRIC_V1 — pinned below by cross-checking against those same
-      //     real functions, not hand-derived, since the exact figure depends on the full 14-question rubric
-      //     text (see `rubricBytesPerRequest`'s own golden test above for that fixed 26,979-byte contribution).
-      //   tokensMin = floor(requestBytes / bytesPerToken.max) = floor(27346 / 4.8) = 5697
-      //   tokensMax = ceil(requestBytes / bytesPerToken.min) = ceil(27346 / 3.0) = 9116
+      //     case's bundle against the default RUBRIC_V2 (task C-2) — pinned below by cross-checking against
+      //     those same real functions, not hand-derived, since the exact figure depends on the full
+      //     14-question rubric text (see `rubricBytesPerRequest`'s own golden test above for that fixed
+      //     27,701-byte contribution).
+      //   tokensMin = floor(requestBytes / bytesPerToken.max) = floor(28068 / 4.8) = 5847
+      //   tokensMax = ceil(requestBytes / bytesPerToken.min) = ceil(28068 / 3.0) = 9356
       //   followUpCalls = { min: 0, max: 1 * maxFollowUpsPerTest(1) = 1 }
-      //   followUpTokensMax = initialTokensMax(9116) * maxFollowUpsPerTest(1) = 9116
-      //   usdMin = 5697 * 0.042 / 1e6 = 0.000239274
-      //   usdMax = (9116 + 9116) * 0.042 / 1e6 = 0.000765744
-      //   bundlesOverCeiling: 9116 <= 64000 -> 0
+      //   followUpTokensMax = initialTokensMax(9356) * maxFollowUpsPerTest(1) = 9356
+      //   usdMin = 5847 * 0.042 / 1e6 = 0.000245574
+      //   usdMax = (9356 + 9356) * 0.042 / 1e6 = 0.000785904
+      //   bundlesOverCeiling: 9356 <= 64000 -> 0
       const bundle = smallBundle('tc:v1:abc');
       expect(Buffer.byteLength(canonicalizeEvidenceBundle(bundle), 'utf8')).toBe(477);
       const goldenRequestBytes = utf8ByteLength(
-        canonicalizeJevRequest(buildJevRequest({ testCase: testCase('tc:v1:abc', []), bundle, rubric: RUBRIC_V1 })),
+        canonicalizeJevRequest(buildJevRequest({ testCase: testCase('tc:v1:abc', []), bundle, rubric: RUBRIC_V2 })),
       );
-      expect(goldenRequestBytes).toBe(27_346);
+      expect(goldenRequestBytes).toBe(28_068);
 
       const files: readonly DryRunFileInput[] = [{
         testCases: [
@@ -345,10 +350,10 @@ describe('estimateDryRun', () => {
         followUpCalls: { min: 0, max: 1 },
         evidenceBytes: 477,
         requestBytes: goldenRequestBytes,
-        rubricBytesPerRequest: 26_979,
-        estimatedInputTokens: { min: 5697, max: 9116 },
-        estimatedFollowUpInputTokens: { min: 0, max: 9116 },
-        estimatedUsd: { min: 0.000239274, max: 0.000765744 },
+        rubricBytesPerRequest: 27_701,
+        estimatedInputTokens: { min: 5847, max: 9356 },
+        estimatedFollowUpInputTokens: { min: 0, max: 9356 },
+        estimatedUsd: { min: 0.000245574, max: 0.000785904 },
         bundlesOverCeiling: 0,
         requestTokenCeiling: 64_000,
       });
@@ -405,8 +410,8 @@ describe('estimateDryRun', () => {
     expect(result.evaluable).toBe(1);
     expect(result.skipped.byReason.skip).toBe(1);
     expect(result.evidenceBytes).toBe(477);
-    expect(result.requestBytes).toBe(27_346);
-    expect(result.estimatedInputTokens).toEqual({ min: 5697, max: 9116 });
+    expect(result.requestBytes).toBe(28_068);
+    expect(result.estimatedInputTokens).toEqual({ min: 5847, max: 9356 });
   });
 
   it('measures requestBytes as the exact sum of the real canonical buildJevRequest bytes for every evaluable test case (not evidence bytes)', () => {
@@ -421,7 +426,7 @@ describe('estimateDryRun', () => {
       { id: 'tc:v1:file-a-1', bundle: bundleA },
       { id: 'tc:v1:file-b-1', bundle: bundleB },
     ].reduce((total, { id, bundle }) => {
-      const request = buildJevRequest({ testCase: testCase(id, []), bundle, rubric: RUBRIC_V1 });
+      const request = buildJevRequest({ testCase: testCase(id, []), bundle, rubric: RUBRIC_V2 });
       return total + utf8ByteLength(canonicalizeJevRequest(request));
     }, 0);
 
@@ -434,7 +439,7 @@ describe('estimateDryRun', () => {
     expect(result.requestBytes).toBeGreaterThan(result.evidenceBytes * 10);
   });
 
-  it('injects a custom rubric instead of always defaulting to RUBRIC_V1, changing requestBytes/rubricBytesPerRequest accordingly', () => {
+  it('injects a custom rubric instead of always defaulting to RUBRIC_V2, changing requestBytes/rubricBytesPerRequest accordingly', () => {
     const tinyRubric: Rubric = {
       version: 1,
       model: JEV_MODEL_ID,
@@ -484,7 +489,11 @@ describe('estimateDryRun', () => {
         return { testCases: [testCase(id, [])], evidence: [contentLengthBundle(id, length)] };
       });
 
-      const result = estimateDryRun(JEV_ESTIMATE_SNAPSHOT, files);
+      // The real first Jev run this reproduces (2026-09-20) was made under RUBRIC_V1 — the rubric
+      // shipped at the time — so `RUBRIC_V1` is passed explicitly here regardless of what
+      // `estimateDryRun`'s own default rubric is today (RUBRIC_V2, as of task C-2). This test is
+      // about reproducing that historical measurement exactly, not about previewing today's default.
+      const result = estimateDryRun(JEV_ESTIMATE_SNAPSHOT, files, RUBRIC_V1);
 
       expect(result.evaluable).toBe(11);
       expect(result.requestBytes).toBe(320_360);

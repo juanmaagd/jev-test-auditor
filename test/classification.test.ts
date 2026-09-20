@@ -9,7 +9,7 @@ import {
   type ClassificationTestCaseIdentity,
   type DimensionJudgment,
 } from '../src/domain/classification.js';
-import { JEV_MODEL_ID, type Rubric, type RubricDimension, type RubricDimensionId, type RubricNoulQuestion, type RubricScoreQuestion } from '../src/domain/rubric.js';
+import { JEV_MODEL_ID, RUBRIC_V2, type Rubric, type RubricDimension, type RubricDimensionId, type RubricNoulQuestion, type RubricScoreQuestion } from '../src/domain/rubric.js';
 import type { JevAnswer, JevEvaluation, JevNoulAnswer, JevScoreAnswer } from '../src/domain/jev-gateway.js';
 import type { TestCaseId } from '../src/domain/test-understanding.js';
 
@@ -50,6 +50,15 @@ const RUBRIC_TWO: Rubric = {
   model: JEV_MODEL_ID,
   dimensions: [dim('falsifiability', 'Falsifiability'), dim('behavioral-focus', 'Behavioral focus')],
 };
+
+/**
+ * `RUBRIC_TWO`, pinned to `CLASSIFICATION_POLICY_V2.rubricVersion` (`2`) so
+ * the "V2 overall status" tests below — which use `CLASSIFICATION_POLICY_V2`
+ * directly, not through `judgeOne` — pass `classifyEvaluation`'s own
+ * rubric/policy version-consistency guard. Same synthetic dimensions and
+ * generic question text as `RUBRIC_TWO`; only `version` differs.
+ */
+const RUBRIC_TWO_V2: Rubric = { ...RUBRIC_TWO, version: CLASSIFICATION_POLICY_V2.rubricVersion };
 
 const TEST_CASE: ClassificationTestCaseIdentity = {
   testCaseId: 'tc:v1:abc' as TestCaseId,
@@ -110,7 +119,16 @@ function evaluation(answers: Record<string, JevAnswer>, overrides: Partial<JevEv
   };
 }
 
-/** Builds an evaluation over `RUBRIC_ONE`'s single `falsifiability` dimension and returns its judgment. */
+/**
+ * Builds an evaluation over `RUBRIC_ONE`'s single `falsifiability` dimension
+ * and returns its judgment. `RUBRIC_ONE`'s `version` is overridden to match
+ * `policy.rubricVersion` for this call only: `RUBRIC_ONE` is a synthetic,
+ * generic-text fixture unrelated to the real `RUBRIC_V1`/`RUBRIC_V2` wording
+ * either policy version was actually calibrated against, so pinning its
+ * `version` field to whichever policy is under test exercises that policy's
+ * real judging logic without also having to duplicate the fixture per
+ * policy version.
+ */
 function judgeOne(
   answers: Record<string, JevAnswer>,
   policy: ClassificationPolicy = CLASSIFICATION_POLICY_V1,
@@ -119,7 +137,7 @@ function judgeOne(
   const result = classifyEvaluation({
     testCase: TEST_CASE,
     evaluation: evaluation(answers, evalOverrides),
-    rubric: RUBRIC_ONE,
+    rubric: { ...RUBRIC_ONE, version: policy.rubricVersion },
     policy,
   });
   const judgment = result.dimensions[0];
@@ -696,9 +714,10 @@ describe('classifyEvaluation — determinism', () => {
 // =============================================================================
 
 describe('CLASSIFICATION_POLICY_V2', () => {
-  it('is versioned 2, tied to rubric version 1, and validates without throwing', () => {
+  it('is versioned 2, tied to the shipped rubric version (RUBRIC_V2, task C-2), and validates without throwing', () => {
     expect(CLASSIFICATION_POLICY_V2.version).toBe(2);
-    expect(CLASSIFICATION_POLICY_V2.rubricVersion).toBe(1);
+    expect(CLASSIFICATION_POLICY_V2.rubricVersion).toBe(2);
+    expect(CLASSIFICATION_POLICY_V2.rubricVersion).toBe(RUBRIC_V2.version);
     expect(() => validateClassificationPolicy(CLASSIFICATION_POLICY_V2)).not.toThrow();
   });
 
@@ -1028,7 +1047,7 @@ describe('classifyEvaluation — V2 overall status', () => {
         'behavioral-focus.applicable': noulAnswer(0.9),
         'behavioral-focus.quality': scoreAnswerWithProbabilities(3, { '0': 0, '1': 0, '2': 0, '3': 1 }), // strong
       }),
-      rubric: RUBRIC_TWO,
+      rubric: RUBRIC_TWO_V2,
       policy: CLASSIFICATION_POLICY_V2,
     });
     expect(result.status).toBe('misleading');
@@ -1043,7 +1062,7 @@ describe('classifyEvaluation — V2 overall status', () => {
         'behavioral-focus.applicable': noulAnswer(0.9),
         'behavioral-focus.quality': scoreAnswerWithProbabilities(0, { '0': 1, '1': 0, '2': 0, '3': 0 }), // misleading
       }),
-      rubric: RUBRIC_TWO,
+      rubric: RUBRIC_TWO_V2,
       policy: CLASSIFICATION_POLICY_V2,
     });
     expect(result.status).toBe('misleading');
@@ -1058,7 +1077,7 @@ describe('classifyEvaluation — V2 overall status', () => {
         'behavioral-focus.applicable': noulAnswer(0.9),
         'behavioral-focus.quality': scoreAnswerWithProbabilities(3, { '0': 0, '1': 0, '2': 0, '3': 1 }), // strong
       }),
-      rubric: RUBRIC_TWO,
+      rubric: RUBRIC_TWO_V2,
       policy: CLASSIFICATION_POLICY_V2,
     });
     expect(result.status).toBe('healthy');
@@ -1073,7 +1092,7 @@ describe('classifyEvaluation — V2 overall status', () => {
         'behavioral-focus.applicable': noulAnswer(0.9),
         'behavioral-focus.quality': scoreAnswerWithProbabilities(3, { '0': 0, '1': 0, '2': 0, '3': 1 }), // strong
       }),
-      rubric: RUBRIC_TWO,
+      rubric: RUBRIC_TWO_V2,
       policy: CLASSIFICATION_POLICY_V2,
     });
     expect(result.status).toBe('needs-review');
@@ -1096,7 +1115,7 @@ describe('classifyEvaluation — V2 input validation', () => {
     expect(() => classifyEvaluation({
       testCase: TEST_CASE,
       evaluation: evaluation(FULLY_APPLICABLE_STRONG),
-      rubric: { ...RUBRIC_ONE, version: 2 },
+      rubric: { ...RUBRIC_ONE, version: 1 },
       policy: CLASSIFICATION_POLICY_V2,
     })).toThrow(RangeError);
   });

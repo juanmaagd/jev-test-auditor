@@ -13,7 +13,7 @@ import {
   type DryRunRange,
   type JevEstimateSnapshot,
 } from './jev-pricing.js';
-import { RUBRIC_V1, type Rubric } from './rubric.js';
+import { RUBRIC_V2, type Rubric } from './rubric.js';
 import type { TestCase, TestCaseId } from './test-understanding.js';
 
 // Re-exported for backward compatibility: every existing caller (`src/index.ts`,
@@ -128,11 +128,12 @@ function roundUsd(value: number): number {
  * via `buildJevQuestions`'s own `validateRubric` call for an invalid
  * `rubric`) before reading any file when either input is invalid.
  *
- * `rubric` defaults to {@link RUBRIC_V1} — the same rubric
- * `buildJevRequest` uses for a real evaluation — so ordinary callers (the
- * CLI's `--dry-run`) need no override; a caller may inject a different
- * rubric (e.g. a smaller fixture rubric in a test) to preview its own cost
- * instead.
+ * `rubric` defaults to {@link RUBRIC_V2} — the same rubric
+ * `buildJevRequest` uses for a real evaluation (`src/adapters/jev-evaluation-port.ts`,
+ * since task C-2 of `odd/tasks/classification-calibration.md`) — so ordinary
+ * callers (the CLI's `--dry-run`) need no override; a caller may inject a
+ * different rubric (e.g. a smaller fixture rubric in a test) to preview its
+ * own cost instead.
  *
  * Token/cost method (calibrated 2026-09-20 from the first real Jev run —
  * see {@link JEV_ESTIMATE_SNAPSHOT}'s own doc for why the previous
@@ -143,8 +144,8 @@ function roundUsd(value: number): number {
  *   `requestBytes`, summed across every evaluable test case. Unlike the
  *   evidence-bundle bytes still reported separately as `evidenceBytes`,
  *   `requestBytes` includes the full rubric text (all 14 questions for
- *   `RUBRIC_V1`), which the first real run showed dominates the actual
- *   request (93% of the average request's bytes) — see
+ *   the shipped rubric), which the first real run under `RUBRIC_V1` showed
+ *   dominates the actual request (93% of the average request's bytes) — see
  *   `rubricBytesPerRequest`.
  * - Each evaluable test case's own `requestBytes` converts to a token range
  *   by dividing by `bytesPerToken.{max,min}` — dividing by the larger
@@ -172,7 +173,7 @@ function roundUsd(value: number): number {
 export function estimateDryRun(
   snapshot: JevEstimateSnapshot,
   files: readonly DryRunFileInput[],
-  rubric: Rubric = RUBRIC_V1,
+  rubric: Rubric = RUBRIC_V2,
 ): DryRunEstimate {
   validateJevEstimateSnapshot(snapshot);
   // Computed unconditionally (even with zero evaluable test cases): it depends only on the

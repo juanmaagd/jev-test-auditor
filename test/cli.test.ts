@@ -453,7 +453,7 @@ describe('--dry-run --json', () => {
   it(
     'prints exactly one literal golden JSON line for the fixed golden audit result '
     + '(1 evaluable / 3 skipped [skip:1, todo:1, evidence-unavailable:1]; '
-    + 'tokens 5697..9116, follow-up max 9116, usd 0.000239274..0.000765744 — see test/estimate.test.ts for the arithmetic)',
+    + 'tokens 5847..9356, follow-up max 9356, usd 0.000245574..0.000785904 — see test/estimate.test.ts for the arithmetic)',
     async () => {
       const output = captureOutput();
 
@@ -466,10 +466,10 @@ describe('--dry-run --json', () => {
         + '"asOf":"2026-09-20","discovered":4,"evaluable":1,'
         + '"skipped":{"total":3,"byReason":{"skip":1,"todo":1,"evidence-unavailable":1}},'
         + '"initialCalls":1,"followUpCalls":{"min":0,"max":1},"evidenceBytes":477,'
-        + '"requestBytes":27346,"rubricBytesPerRequest":26979,'
-        + '"estimatedInputTokens":{"min":5697,"max":9116},'
-        + '"estimatedFollowUpInputTokens":{"min":0,"max":9116},'
-        + '"estimatedUsd":{"min":0.000239274,"max":0.000765744},'
+        + '"requestBytes":28068,"rubricBytesPerRequest":27701,'
+        + '"estimatedInputTokens":{"min":5847,"max":9356},'
+        + '"estimatedFollowUpInputTokens":{"min":0,"max":9356},'
+        + '"estimatedUsd":{"min":0.000245574,"max":0.000785904},'
         + '"bundlesOverCeiling":0,"requestTokenCeiling":64000,"networkCalls":0,"filesWritten":0}',
       );
     },
@@ -496,8 +496,8 @@ describe('--dry-run --json', () => {
       followUpCalls: { min: 0, max: 0 },
       evidenceBytes: 0,
       requestBytes: 0,
-      // Rubric-only cost, still reported even with zero discovered test cases (default RUBRIC_V1).
-      rubricBytesPerRequest: 26_979,
+      // Rubric-only cost, still reported even with zero discovered test cases (default RUBRIC_V2).
+      rubricBytesPerRequest: 27_701,
       estimatedUsd: { min: 0, max: 0 },
       bundlesOverCeiling: 0,
     });
@@ -539,13 +539,13 @@ describe('--dry-run (human-readable text)', () => {
     expect(report).toContain('Evidence bytes');
     expect(report).toContain('477');
     expect(report).toContain('Request bytes');
-    expect(report).toContain('27346');
+    expect(report).toContain('28068');
     expect(report).toContain('Rubric bytes per request');
-    expect(report).toContain('26979');
+    expect(report).toContain('27701');
     expect(report).toContain('Estimated input tokens');
-    expect(report).toContain('5697 - 9116');
+    expect(report).toContain('5847 - 9356');
     expect(report).toContain('Estimated follow-up input tokens');
-    expect(report).toContain('Estimated cost in USD (approximate): 0.000239274 - 0.000765744');
+    expect(report).toContain('Estimated cost in USD (approximate): 0.000245574 - 0.000785904');
     expect(report).toContain('No network calls were made');
     expect(report).toContain('nothing was written');
   });
@@ -784,10 +784,13 @@ describe('--evaluate', () => {
     /**
      * Every `.applicable` noul answer is `0.1` — below `applicabilityMin` of
      * `0.5`, shared unchanged by `CLASSIFICATION_POLICY_V1` and the shipped
-     * `CLASSIFICATION_POLICY_V2` — so every one of RUBRIC_V1's 7 dimensions is
-     * judged `not-applicable` and its `.quality` score/probabilities are never
-     * read (the score answers below are structurally valid but their value
-     * never matters). Walking `classifyEvaluation`'s branches by hand for this
+     * `CLASSIFICATION_POLICY_V2` — so every one of the shipped rubric's 7
+     * dimensions is judged `not-applicable` and its `.quality`
+     * score/probabilities are never read (the score answers below are
+     * structurally valid but their value never matters, and this stays true
+     * regardless of a dimension's exact applicability wording, so it is
+     * unaffected by task C-2's `determinism-isolation`/`falsifiability`
+     * rewrite). Walking `classifyEvaluation`'s branches by hand for this
      * fixed input: every dimension takes the `applicabilityProbability <
      * policy.applicabilityMin` branch of `judgeDimensionV2` (`status:
      * 'not-applicable'`, `applicable: false`, `level`/`score`/`confidence`/
@@ -797,8 +800,9 @@ describe('--evaluate', () => {
      * zero `applicableDimensions`, which is the `applicableDimensions.length
      * === 0` branch, giving the overall `status: 'needs-review'`;
      * `isFindingWorthy` never matches a `not-applicable` judgment, so
-     * `findings: []`. This golden therefore stays green across the V1→V2
-     * production wiring switch except for `policyVersion` itself.
+     * `findings: []`. This golden therefore stays green across both the
+     * V1→V2 policy wiring switch (task C-1) and the V1→V2 rubric wiring
+     * switch (task C-2) except for `policyVersion`/`rubricVersion` themselves.
      */
     function fixedAnswersGateway(): JevGatewayPort {
       return {
@@ -909,7 +913,7 @@ describe('--evaluate', () => {
           + '{"dimensionId":"falsifiability","dimensionLabel":"Falsifiability","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
           + '{"dimensionId":"refactor-resistance","dimensionLabel":"Refactor resistance","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
           + '{"dimensionId":"test-double-quality","dimensionLabel":"Test-double quality","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"}],'
-          + '"findings":[],"policyVersion":2,"rubricVersion":1,'
+          + '"findings":[],"policyVersion":2,"rubricVersion":2,'
           + '"model":{"requested":"jev-1.13.0","responded":"jev-1.13.0","matchesPin":true},'
           + '"usage":{"inputTokens":100,"outputTokens":0},'
           + '"evidence":{"fragments":0,"truncatedFragments":0,"denied":0,"unresolved":0,"omitted":0}}],'
@@ -1181,7 +1185,7 @@ describe('--evaluate', () => {
           + '{"dimensionId":"test-double-quality","dimensionLabel":"Test-double quality","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"}],'
           + '"findings":[{"testCaseId":"tc:v1:misleading-case","repositoryRelativePath":"mixed.test.ts","name":"misleading case","dimensionId":"falsifiability","dimensionLabel":"Falsifiability","level":"misleading","score":0,"confidence":0.9,"applicabilityProbability":0.9,"status":"judged",'
           + '"probabilities":{"0":0.85,"1":0.1,"2":0.03,"3":0.02},"deficientMass":0.95,"acceptableMass":0.05,"criticalMass":0.85}],'
-          + '"policyVersion":2,"rubricVersion":1,'
+          + '"policyVersion":2,"rubricVersion":2,'
           + '"model":{"requested":"jev-1.13.0","responded":"jev-1.13.0","matchesPin":true},'
           + '"usage":{"inputTokens":150,"outputTokens":2},'
           + '"evidence":{"fragments":1,"truncatedFragments":0,"denied":0,"unresolved":0,"omitted":0}},'
@@ -1195,7 +1199,7 @@ describe('--evaluate', () => {
           + '{"dimensionId":"falsifiability","dimensionLabel":"Falsifiability","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
           + '{"dimensionId":"refactor-resistance","dimensionLabel":"Refactor resistance","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
           + '{"dimensionId":"test-double-quality","dimensionLabel":"Test-double quality","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"}],'
-          + '"findings":[],"policyVersion":2,"rubricVersion":1,'
+          + '"findings":[],"policyVersion":2,"rubricVersion":2,'
           + '"model":{"requested":"jev-1.13.0","responded":"jev-1.13.0","matchesPin":true},'
           + '"usage":{"inputTokens":90,"outputTokens":1},'
           + '"evidence":{"fragments":2,"truncatedFragments":1,"denied":1,"unresolved":1,"omitted":1}}],'

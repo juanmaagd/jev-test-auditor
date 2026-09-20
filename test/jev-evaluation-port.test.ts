@@ -5,7 +5,7 @@ import type { AuditEvaluationRequest } from '../src/domain/audit.js';
 import { buildEvidenceBundle, DEFAULT_EVIDENCE_BUDGET, type EvidenceBundle } from '../src/domain/evidence.js';
 import type { JevAnswer, JevEvaluation, JevGatewayPort } from '../src/domain/jev-gateway.js';
 import type { JevRequest } from '../src/domain/jev-request.js';
-import { JEV_MODEL_ID, RUBRIC_V1 } from '../src/domain/rubric.js';
+import { JEV_MODEL_ID, RUBRIC_V2 } from '../src/domain/rubric.js';
 import type { TestCase, TestCaseId } from '../src/domain/test-understanding.js';
 
 const zeroSpan = { start: { line: 1, column: 1 }, end: { line: 1, column: 2 } };
@@ -41,7 +41,7 @@ function bundleFor(testCaseId: string): EvidenceBundle {
   });
 }
 
-/** Fixed, deterministic answers for every RUBRIC_V1 question: every `.applicable` noul is low (0.1, below `applicabilityMin` 0.5, shared by V1 and V2), so every dimension is `not-applicable` and the `.quality` score is never read regardless of policy version. */
+/** Fixed, deterministic answers for every RUBRIC_V2 question: every `.applicable` noul is low (0.1, below `applicabilityMin` 0.5, shared by V1 and V2), so every dimension is `not-applicable` and the `.quality` score is never read regardless of policy version. */
 function fixedAnswersGateway(recordedRequests: JevRequest[]): JevGatewayPort {
   return {
     async evaluate(request: JevRequest): Promise<JevEvaluation> {
@@ -78,7 +78,7 @@ function fixedAnswersGateway(recordedRequests: JevRequest[]): JevGatewayPort {
 }
 
 describe('createJevEvaluationPort', () => {
-  it('builds the request from RUBRIC_V1, calls the gateway, and classifies the result with CLASSIFICATION_POLICY_V2 — matching classifyEvaluation applied by hand to the same gateway response', async () => {
+  it('builds the request from RUBRIC_V2, calls the gateway, and classifies the result with CLASSIFICATION_POLICY_V2 — matching classifyEvaluation applied by hand to the same gateway response', async () => {
     const recordedRequests: JevRequest[] = [];
     const gateway = fixedAnswersGateway(recordedRequests);
     const port = createJevEvaluationPort(gateway);
@@ -94,7 +94,7 @@ describe('createJevEvaluationPort', () => {
     const expected = classifyEvaluation({
       testCase: { testCaseId: request.testCase.id, repositoryRelativePath: request.testCase.repositoryRelativePath, name: request.testCase.name },
       evaluation: expectedEvaluation,
-      rubric: RUBRIC_V1,
+      rubric: RUBRIC_V2,
       policy: CLASSIFICATION_POLICY_V2,
     });
     expect(result).toEqual(expected);
@@ -105,6 +105,11 @@ describe('createJevEvaluationPort', () => {
     // regression that reverts src/adapters/jev-evaluation-port.ts to CLASSIFICATION_POLICY_V1
     // fails here even if some future change made the two policies coincidentally agree elsewhere.
     expect(result.policyVersion).toBe(CLASSIFICATION_POLICY_V2.version);
+    // Asserts the shipped path's rubric version directly (task C-2): a regression that reverts
+    // src/adapters/jev-evaluation-port.ts to RUBRIC_V1 while CLASSIFICATION_POLICY_V2.rubricVersion
+    // stays pinned to 2 would throw RangeError from classifyEvaluation's own version guard before
+    // this assertion is even reached, which is itself the guard this test exists to exercise.
+    expect(result.rubricVersion).toBe(RUBRIC_V2.version);
   });
 
   it('propagates a gateway rejection untouched (no wrapping, no swallowing) so the application layer sees the original typed error', async () => {
