@@ -47,6 +47,8 @@ Path aliases are the norm, not an edge case. The three repositories available fo
 
 ## Decisions
 
+- A workspace package whose declared entry point is generated output (musive-s1's `@musive/common` points at `packages/common/dist/index.js`, matched by the `**/dist/**` deny pattern) keeps the package directory as a fallback target; A-2 decides how to prefer source over build output.
+
 - Mapping precedence for a specifier: subpath `imports` (a `#` prefix is unambiguous) → tsconfig `paths` → workspace package name → `baseUrl`-relative. The first mechanism that produces an existing, in-root, non-denied file wins; document it.
 - A specifier that a mapping resolved to a path that does not exist becomes `alias-mapped-not-found`, distinct from an unmapped alias, so a reader can tell a stale config from an unsupported one.
 - Mappings are read once per run and cached by directory; the cache is part of the same run-scoped reader already used for source files.
@@ -72,9 +74,10 @@ Path aliases are the norm, not an edge case. The three repositories available fo
 
 ## Tasks
 
-- [ ] **A-1 — Read alias configuration statically**
+- [x] **A-1 — Read alias configuration statically**
   - Locate the nearest `tsconfig`/`jsconfig` and `package.json` for a file, parse JSONC, follow in-root `extends` chains, and build a deterministic mapping table with `baseUrl`, `paths`, subpath `imports`, and workspace package names.
   - Verify nearest-config selection, `extends` chains and cycles, out-of-root and `node_modules` refusal, malformed JSON, missing fields, and cache behavior.
+  - Evidence: `86a0a9a` (`feat: read path alias configuration statically`) on `feat/alias-config-reader`; 4 files, 1,421 additions (1,421 authored changed lines, 563 of them tests). Suite 562 tests, typecheck, build, lint, and diff check passed. Observed RED before implementation. Nearest config wins with no cross-tree merging; `tsconfig` beats `jsconfig` at the same level; `package.json` `imports` uses its own nearest search; workspaces are read only from the root. `extends` follows strings and arrays left to right, child overrides parent wholesale, and `paths` resolve against the directory of whichever config supplies the effective `baseUrl` — tested in both directions. Condition preference for `imports` is `default`, `import`, `node`; unsupported conditions are recorded, never guessed. Review corrections: `config-unreadable` was declared but never emitted for a symlinked target escaping the root, and an absolute `extends` was being read as repository-root-relative, which let a decoy `<root>/etc/passwd.json` be inherited; both fixed with RED tests, the second including realpath handling for macOS `/tmp`. Mutations on root-first search, ignoring `baseUrl` for `paths`, following `extends` outside the root or into `node_modules`, dropping the cycle guard, ignoring condition preference, and restoring the root-relative absolute reading turned RED. Verified against the real repositories: pr-hero 16 `imports` entries, supermarket-pro frontend 6 `paths`, backend `baseUrl` only, musive-s1 8 inherited `paths` plus 10 workspace entries, zero refusals in all four.
 - [ ] **A-2 — Resolve mapped specifiers in evidence resolution**
   - Apply the mapping table before declaring a specifier unresolved, keeping probing, deny, and containment unchanged, and refine unresolved reasons.
   - Verify each mechanism end to end, precedence, stale mappings, denied targets, root escape attempts, and no execution.
@@ -84,10 +87,12 @@ Path aliases are the norm, not an edge case. The three repositories available fo
 
 ## Progress
 
-- Current task: **A-1**.
-- Completed tasks: none.
-- Running authored count: 0.
+- Current task: **A-2**.
+- Completed tasks: **A-1**.
+- Running authored count: **1,421**.
+- Slice ledger:
+  - `feat/alias-config-reader`: `86a0a9a` — static alias configuration reader.
 
 ## Next step
 
-Delegate A-1 to one writer with strict TDD, then review before the work-unit commit.
+Branch `feat/alias-evidence-resolution` from `feat/alias-config-reader` and delegate A-2 to one writer with strict TDD, then review before the work-unit commit.
