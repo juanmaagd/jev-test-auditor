@@ -1,8 +1,10 @@
 # jev-test-auditor
 
-`jev-test-auditor` is a local-first CLI for auditing the semantic quality of existing JavaScript and TypeScript tests. The pipeline discovers supported test files, reads them without executing project code, extracts deterministic structural test understanding, and — for every extracted test case — selects a minimal, provenance-aware local evidence bundle (the test body plus the smallest useful helper and production fragments it references). By default nothing built here is sent anywhere: discovery, extraction, evidence selection, and the default `audit` summary are entirely offline and need no API key. Real Jev evaluation is opt-in only (`audit --evaluate`, see below) — nothing leaves this machine unless that flag is passed. Persistence, caching, resilience, HTML reports, and benchmarks/calibration are later phases.
+`jev-test-auditor` is a local-first CLI for auditing the semantic quality of existing JavaScript and TypeScript tests. The pipeline discovers supported test files, reads them without executing project code, extracts deterministic structural test understanding, and — for every extracted test case — selects a minimal, provenance-aware local evidence bundle (the test body plus the smallest useful helper and production fragments it references). By default nothing built here is sent anywhere: discovery, extraction, evidence selection, and the default `audit` summary are entirely offline and need no API key. Real Jev evaluation is opt-in only (`audit --evaluate`, see below) — nothing leaves this machine unless that flag is passed, and `--evaluate` also persists its results to a local SQLite database (see "Audit store" below). Caching, resume, adaptive scheduling, HTML reports, and benchmarks/calibration are later phases.
 
 ## Quick path
+
+Requires Node **>=22.13.0** — `audit --evaluate`'s local persistence (see "Audit store" below) uses the built-in `node:sqlite` module, unflagged only as of that release; it remains Stability 1.2 (release candidate).
 
 From the repository root:
 
@@ -34,7 +36,7 @@ jev-test-auditor --help
 | `audit --inspect-payloads` | Prints the same summary line first, then one JSON line per selected evidence bundle (`canonicalizeEvidenceBundle` output), ordered by file path then test-case order. This is the local evidence state selected on disk — fragments, provenance, denials, truncation — **not** the Jev wire request shape, and it makes no network call either way. Cannot be combined with `--dry-run` or `--evaluate`. |
 | `audit --dry-run` | Prints a no-network, no-write aggregate cost/call preview **instead of** the normal summary: exact discovered/evaluable/skipped-by-reason counts, exact initial Jev calls (one per evaluable test case), exact evidence bytes and exact real request bytes (the actual `state` plus every rubric question, measured by building each real request locally), plus clearly labeled *approximate* input-token and USD ranges converted from those request bytes via a versioned local pricing snapshot. Makes no network or provider call, requires no API key, and writes nothing to disk. Cannot be combined with `--inspect-payloads` or `--evaluate`. |
 | `audit --dry-run --json` | Same dry-run preview as one machine-readable JSON line (stable key order) instead of the human-readable text report. Requires `--dry-run`. |
-| `audit --evaluate` | Opt-in only. Sends every evaluable test case's local evidence bundle to TypeSafe's Jev model for a real semantic judgment, replacing the normal summary with a terminal evaluation report (status counts, skipped-by-reason, failed count, total usage input tokens, and the responded model id). Requires `TYPESAFE_API_KEY`; its absence is a usage error (exit 1, no network attempted). Cannot be combined with `--dry-run` or `--inspect-payloads`. See "Jev evaluation" below. |
+| `audit --evaluate` | Opt-in only. Sends every evaluable test case's local evidence bundle to TypeSafe's Jev model for a real semantic judgment, replacing the normal summary with a terminal evaluation report (status counts, skipped-by-reason, failed count, total usage input tokens, and the responded model id), and persists the run locally to SQLite (see "Audit store" below). Requires `TYPESAFE_API_KEY`; its absence is a usage error (exit 1, no network attempted). Cannot be combined with `--dry-run` or `--inspect-payloads`. See "Jev evaluation" below. |
 | `audit --evaluate --json` | Same evaluation run as one deterministic canonical JSON line instead of the terminal report: per-test classification, per-dimension judgments, findings, model requested/responded/matchesPin, usage, policy/rubric versions, and evidence provenance counts. Requires `--evaluate`. |
 | `audit --json` (alone) | Usage error (exit 1): `--json` requires `--dry-run` or `--evaluate`. |
 | `auth login` | Stores a TypeSafe API key locally for this tool. Reads from a no-echo interactive prompt when stdin is a TTY; reads one trimmed line from stdin otherwise, so automation/CI can pipe a key in. **Never** accepts the key as a command-line argument — see "Local API key storage" below. |
@@ -75,6 +77,15 @@ The default summary's `totals` include evidence counters (`evidenceBundles`, `ev
 - **Classification thresholds are provisional and versioned, not calibrated claims.** See "Classification policy" below for how a dimension's level and the overall verdict are actually decided, and the measured results recorded there.
 - **`needs-review` means uncertainty, not a passing or failing grade.** It covers a model-pin mismatch, a dimension with a low-confidence or missing answer, or a test case where every dimension came back not-applicable — insufficient evidence or certainty, never an invented score.
 - **A model-pin mismatch is always reported, never hidden**: every request pins the exact `jev-1.13.0` model id, and each classification's `model.matchesPin` — plus the run-level `modelMismatches` count in `--evaluate --json` — surfaces any response that answered with a different model.
+
+## Audit store (SQLite persistence)
+
+`audit --evaluate` persists every terminal work-item outcome to a local, per-user SQLite database, in addition to printing the evaluation report: runs, work items and their terminal states, attempts (raw answers and token usage), normalized judgments, errors, and skips. **The API key never reaches the database.**
+
+- **Strictly opt-in.** An audit without `--evaluate` creates no database file and no config directory at all — the store is only constructed after a usable API key has already resolved, exactly like the evaluation port it is gated behind.
+- **Storage location**: the same per-user config home convention as the stored API key (see "Local API key storage" above) — POSIX: `$XDG_CONFIG_HOME/jev-test-auditor`, or `~/.config/jev-test-auditor` when unset; Windows: `%APPDATA%\jev-test-auditor` — under its own `audit-store.sqlite3` file (so it never collides with `credentials.json`), inside a directory created owner-only (`0o700` on POSIX; Windows does not enforce this, same as the credentials directory above). Overridable with the `store.databasePath` configuration key (`store: { databasePath: '/custom/path.sqlite3' }`), the same override pattern as `evidence: { maxFragmentBytes, maxBundleBytes }` below.
+- **Append-only.** No run, work item, attempt, judgment, error, or skip record is ever updated or deleted once written — history accumulates across every `--evaluate` run. The one exception is a run's own `finished_at` marker, set once when that run completes; it never rewrites a fact already recorded about a test case.
+- **Not yet built**: content-addressed caching, `--fresh`, `--resume`, and adaptive scheduling — see "Delivery phases" below.
 
 ## Classification policy
 
@@ -141,7 +152,7 @@ On the discrimination fixture, `determinism-isolation` applicability rose from b
 | 2. Test understanding | Discover and parse Jest/Vitest/bun:test tests into deterministic structural test understanding (test cases, imports, mocks, assertions). | **Completed** |
 | 3. Evidence and context | For every extracted test case, resolve its relative imports safely and select the smallest useful helper/production-seam evidence within configured budgets, exposed locally through `--inspect-payloads`, plus a no-network `--dry-run` cost/call estimate. | **Completed** |
 | 4. Jev evaluation MVP | Versioned rubric and request composition, a TypeSafe HTTP gateway, deterministic non-compensatory classification, opt-in `audit --evaluate` wiring with terminal and canonical JSON reporting, and local per-user API key storage (`auth login`/`status`/`logout`). | **Completed** |
-| 5. Persistence, caching, and resilience | SQLite run store and cache, `--fresh`/resume, adaptive scheduling, and provider-throttling resilience. | Planned; not implemented |
+| 5. Persistence, caching, and resilience | SQLite run store and cache, `--fresh`/resume, adaptive scheduling, and provider-throttling resilience. | **In progress** — SQLite run store shipped (task P5-1, see "Audit store" above); cache, `--fresh`/`--resume`, and adaptive scheduling not yet built |
 | 6. HTML reporting | Self-contained offline HTML renderer embedding the canonical JSON report. | Planned; not implemented |
 | 7. Benchmarks and calibration | Deterministic benchmark corpus, executable oracles, and calibrating the classification policy's provisional thresholds. | Planned; not implemented |
 
@@ -182,7 +193,7 @@ On the discrimination fixture, `determinism-isolation` applicability rose from b
 - Discovery is repository-local and lexical. Generated/vendor/build paths, symlink escapes, and conservative E2E signals are excluded explicitly.
 - A test file whose framework cannot be attributed is reported (`unsupported-framework` diagnostic, `totals.unsupportedFrameworkFiles`), never silently treated as zero tests — see "Current CLI" above.
 - The audit pipeline is reporting-only: it never executes audited source, package scripts, test runners, or configuration modules. Read and parse diagnostics are emitted in JSON and do not fail the audit.
-- Phases 2 and 3 emit structural test understanding and local evidence bundles only, with no network access. Phase 4 adds real Jev evaluation and classification, opt-in only via `--evaluate`. Persistence, caching, resilience, HTML reports, and SQLite remain future phases.
+- Phases 2 and 3 emit structural test understanding and local evidence bundles only, with no network access. Phase 4 adds real Jev evaluation and classification, opt-in only via `--evaluate`. Phase 5 adds local SQLite persistence of evaluation results, also behind `--evaluate` (see "Audit store" above); caching, resume, adaptive scheduling, HTML reports, and benchmarks/calibration remain future work.
 - CI is reporting-only in V1; findings do not fail a build.
 - Normal operation is autonomous and does not require human-in-the-loop labeling or approval.
 

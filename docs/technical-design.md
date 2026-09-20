@@ -164,22 +164,42 @@ On the discrimination fixture, `determinism-isolation` applicability rose from b
 
 ## Persistence and cache
 
-SQLite uses migrations and append-only evaluation records.
+**Delivered (Phase 5, task P5-1).** `audit --evaluate` persists every terminal work-item outcome to a local, per-user SQLite database through `AuditStorePort` (`src/domain/audit.ts`), implemented by the `node:sqlite` adapter `src/adapters/sqlite-audit-store.ts`. Schema version 1 uses migrations (idempotent on re-open, transactional) to create seven tables:
 
-| Table group | Contents |
+| Table | Contents |
 | --- | --- |
-| Catalog | repositories, test cases, evidence bundles, rubric/model identities. |
-| Execution | audit runs, work items, attempts, usage, errors, and checkpoints. |
-| Results | raw answers, normalized judgments, findings, and report manifests. |
-| Evaluation | fixture operators, oracle proofs, benchmark runs, metrics, and comparisons. |
+| `runs` | One row per audit run: `id`, `root_dir`, `started_at`, `finished_at`. |
+| `work_items` | One row per test case reaching a terminal state, referencing its run; `state` is `CHECK`-constrained to the full seven-value `WORK_ITEM_STATES` enum, though P5-1 itself only ever writes `completed`, `failed`, or `skipped` — see "Scheduling and recovery" below. |
+| `attempts` | One row per completed work item: requested/responded model, whether the response matched the pin, attempt count, raw answers (JSON), and input/output token usage. |
+| `judgments` | One row per completed work item: status, policy/rubric versions, and the full classification (JSON). |
+| `errors` | One row per failed work item: error kind and message. |
+| `skips` | One row per skipped work item: the skip reason. |
+| `schema_meta` | One row (`id = 1`) recording the store's current `schema_version`. |
 
-The cache key hashes normalized test source, evidence bundle, rubric/questions, exact model, and policy-relevant request options. `--fresh` bypasses lookup but writes a new immutable result. Git stores benchmark fixtures and expected operator metadata; JSONL exports make SQLite data portable.
+**Why an explicit `schema_meta` table, not `PRAGMA user_version`.** `PRAGMA user_version` is a raw integer any SQLite database can already be using for its own purposes; a foreign database that happens to set that pragma for something unrelated could be misread as an audit store already at some schema version, and adopted or migrated incorrectly. An explicit `schema_meta` table with this adapter's own row shape is unambiguous: its absence on a database that already holds other tables means "not ours," never "version 0" — a genuinely empty database (no tables at all) still migrates normally.
+
+**Two named failure types**, both exported from `src/domain/audit.ts`, so no raw native error ever escapes to a caller:
+
+- `AuditStoreSchemaVersionError` — the store's recorded `schema_version` is *newer* than this build's supported `SCHEMA_VERSION`. Never migrated backwards, never silently recreated.
+- `AuditStoreCorruptError` — every other way the store cannot be opened safely: a missing or malformed `schema_meta` row (absent row, or a `schema_version` that is not a non-negative integer); a database that already holds user tables but no `schema_meta` table at all — a foreign database, refused rather than silently adopted; and any native `node:sqlite` driver failure wrapped by `wrapNativeSqliteError` — a file that is not a SQLite database, a directory in place of the file, or a read-only file.
+
+**`node:sqlite` is loaded through a dynamic import inside a narrow suppression window**, not a static `import { DatabaseSync } from 'node:sqlite'`. A static import evaluates the module — and emits its one-time `ExperimentalWarning` ("SQLite is an experimental feature and might change at any time") — before the adapter's own code has run at all, so nothing in this module could ever wrap or suppress it. `withSqliteExperimentalWarningSuppressed` instead wraps `process.emitWarning` only for the duration of `import('node:sqlite')`, filtering out exactly the sqlite experimental-feature warning shape (`isSqliteExperimentalWarning`); every other warning — including a *different* `ExperimentalWarning` — still reaches the user unchanged, by construction rather than by convention. A shared patch and depth counter, not a naive per-call save/restore, keep this correct under overlapping concurrent calls to `createSqliteAuditStore`.
+
+**`AuditEvaluationPort.evaluate` returns both the raw evaluation and the derived classification** (`{ evaluation, classification }`, widened from Phase 4's classification-only result), because the store persists raw answers (`attempts.raw_answers`) as records distinct from normalized judgments (`judgments.classification`) — recomputing a policy without another Jev call needs the raw answers kept, not only the final verdict.
+
+**`finishRun` is the adapter's only row mutation** — it sets a run's own `finished_at` column exactly once, when that run completes. This does not violate the append-only guarantee: a run is a single logical fact ("this run happened, and finished at time T"), completed once; no method here ever updates or deletes a previously written run, work item, attempt, judgment, error, or skip record.
+
+**Not yet built (P5-2), forward-looking design only.** The complete content-addressed cache key will hash normalized test source, evidence bundle, rubric/questions, exact model, and policy-relevant request options; `--fresh` will bypass lookup but still write a new immutable result. Nothing in the shipped code computes this key, looks anything up by it, or produces a `cached` work item yet.
+
+Further out, and equally unbuilt: report manifests (Phase 6, "HTML reporting", see "Reports" below) and the benchmark-history tables — fixture operators, oracle proofs, benchmark runs, metrics, comparisons, and their JSONL export (Phase 7, "Benchmarks and calibration", see "Deterministic evaluation" and "Benchmark agent-review skill" below). Schema version 1 has no tables for any of this yet.
 
 ## Scheduling and recovery
 
-A bounded worker pool observes request and token budgets. Provider throttling reduces concurrency; successful windows may restore it up to the configured ceiling. Transient failures use bounded exponential backoff with jitter. Each terminal work-item state is committed immediately, allowing an interrupted run to resume by run ID.
+**Not yet built.** Evaluation still runs through Phase 4's fixed-size `runBoundedPool` (`src/application/audit.ts`), sized from `configuration.concurrency`, with no adaptive throttling and no request/token budget observation beyond the gateway's own per-call timeout, abort, and 429/529 backoff (`src/adapters/jev-http-gateway.ts`). What P5-1 added is a persistence *hook* on top of that unchanged pool: each work item's terminal outcome (`completed`, `failed`, or `skipped`) is written to the store immediately as that item finishes, so already-terminal work survives a later crash — but nothing yet reads those rows back. There is no `--resume` flag, no reload of outstanding work items, and no way to continue an interrupted run without re-auditing every test case from the start.
 
-States are `pending`, `running`, `completed`, `cached`, `uncertain`, `skipped`, or `failed`. Only completed and valid cached judgments participate in quality classification.
+States remain `pending`, `running`, `completed`, `cached`, `uncertain`, `skipped`, or `failed` — the schema's `CHECK` constraint and the domain's `WORK_ITEM_STATES` admit all seven from the start (P5-1), so a later phase never needs a backward-incompatible migration just to widen it, but only `completed`, `failed`, and `skipped` are actually produced today. `pending`/`running` are scheduler checkpoints reserved for P5-3; `cached`/`uncertain` are cache-lookup outcomes reserved for P5-2. Only `completed` and a valid `cached` judgment participate in quality classification.
+
+P5-3 will replace `runBoundedPool` with a scheduler that observes request/token budgets, reduces concurrency under provider throttling, and restores it after a clean window (never above the configured ceiling), committing each terminal work-item state immediately — keeping the gateway's own retry untouched. P5-4 will add `--resume <runId>`, reloading outstanding work items from the store and completing only those.
 
 ## Reports
 

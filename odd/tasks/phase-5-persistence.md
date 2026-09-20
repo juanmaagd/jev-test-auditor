@@ -115,6 +115,7 @@ The first real run measured roughly 72k input tokens for 11 test cases. Without 
 
 - What produces the `uncertain` work-item state is still undefined. The schema's `CHECK` constraint and `WORK_ITEM_STATES` admit it for forward compatibility only; P5-2 must either define it as a cache-lookup outcome or say plainly that nothing produces it yet.
 - The store now persists error messages to disk, where Phase 4 kept them as in-memory diagnostics. That raises the stakes on the gateway's existing `redact()` and deserves a deliberate look during P5-2, even though this phase changed nothing about it.
+- `store.databasePath` is documented as a configuration key, but nothing in the CLI argument parser or a configuration-file loader reaches it: like the pre-existing `evidence` keys, it is only settable by a library consumer calling `resolveConfiguration()`. The gap predates this phase and was not introduced by P5-1, but Phase 5 adds the first key a user has a concrete reason to change, so the README phrasing should either gain a CLI surface or say plainly that these keys are programmatic only.
 
 ## Next step
 
