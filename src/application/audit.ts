@@ -13,6 +13,7 @@ import {
   type AuditResumeSummary,
   type AuditDiagnostic,
   type AuditFileResult,
+  type AuditStoreCachedJudgment,
   type AuditStorePort,
   type AuditStoreRunState,
   type AuditStoreWorkItemIdentity,
@@ -22,7 +23,7 @@ import type { ClassificationResult, OverallClassificationStatus } from '../domai
 import { classifyTestCase, type DryRunSkippedReason } from '../domain/estimate.js';
 import { createAdaptiveConcurrencyController, DEFAULT_ADAPTIVE_CONCURRENCY_RESTORE_WINDOW, type ThrottleSignal } from '../domain/scheduler.js';
 import type { ResolvedScheduleConfiguration } from '../domain/config.js';
-import type { Diagnostic, TestCase } from '../domain/test-understanding.js';
+import type { Diagnostic, TestCase, TestCaseId } from '../domain/test-understanding.js';
 import type { EvidenceBundle } from '../domain/evidence.js';
 import type { JevEvaluation } from '../domain/jev-gateway.js';
 import {
@@ -554,6 +555,18 @@ export interface RunAuditOptions {
    * fresh run.
    */
   readonly resume?: string;
+  /**
+   * Retains every discovered file's full raw source text and exposes it on
+   * `AuditResult.sourceTextByPath` (Phase 5, task P5-5) — the one ingredient
+   * a cache-aware `audit --dry-run` preview needs to compute each evaluable
+   * test case's content-addressed cache key without re-reading every file.
+   * `false` by default: an ordinary audit (including `--evaluate`, which
+   * already builds this map internally for its own cache-key lookups) never
+   * pays for retaining every file's content past the run it was read for,
+   * and never grows a new field on its result, unless a caller explicitly
+   * asks for it.
+   */
+  readonly retainSourceText?: boolean;
 }
 
 const EMPTY_AUDIT_TOTALS = {
@@ -685,10 +698,13 @@ export async function runAudit(
   // `src/adapters/cache-key.ts`'s own doc on why `state.fragments` alone is not enough), which
   // `AuditFileResult` itself never carries — deliberately: retaining full raw source there would
   // let it leak into `AuditResult`/JSON reports and hold every file's content in memory for the
-  // whole run. This map is local to `runAudit`, discarded once evaluation finishes, and populated
-  // only when evaluation was actually requested at all (`ports.evaluation !== undefined`), since
-  // an offline audit never consults it.
-  const sourceTextByPath: Map<string, string> | undefined = ports.evaluation === undefined ? undefined : new Map();
+  // whole run. This map is local to `runAudit`, discarded once evaluation finishes (unless
+  // `options.retainSourceText` says otherwise — see below), and populated when either evaluation
+  // was actually requested at all (`ports.evaluation !== undefined`, for its own internal
+  // cache-key lookups) or a caller explicitly asked to retain it (Phase 5, task P5-5: a
+  // cache-aware `audit --dry-run` preview, which has no evaluation port of its own).
+  const needsSourceText = ports.evaluation !== undefined || options.retainSourceText === true;
+  const sourceTextByPath: Map<string, string> | undefined = needsSourceText ? new Map() : undefined;
 
   for (const discovered of files) {
     let sourceText: string;
@@ -855,5 +871,53 @@ export async function runAudit(
     reportingOnly: true,
     ...(evaluation === undefined ? {} : { evaluation }),
     ...(resumeSummary === undefined ? {} : { resume: resumeSummary }),
+    ...(options.retainSourceText === true && sourceTextByPath !== undefined ? { sourceTextByPath } : {}),
   };
+}
+
+/**
+ * Computes the set of currently evaluable test-case ids that already have a
+ * stored judgment under their content-addressed cache key (Phase 5, task
+ * P5-5) — the one piece of I/O a cache-aware `audit --dry-run` preview
+ * needs before calling `estimateDryRun` (`src/domain/estimate.ts`, a pure
+ * domain function that never touches a store itself).
+ *
+ * Reuses `collectEvaluableItems` (the exact same "what counts as
+ * evaluable" `runEvaluation` above uses) and, for each item, computes its
+ * key through the caller-supplied `cacheKeyPort` and looks it up through
+ * the caller-supplied `lookup` — the identical two calls `runEvaluation`
+ * itself makes before a real dispatch (`cache.port.computeKey(...)` then
+ * `store.lookup(cacheKey)`). Calling the exact same functions with the
+ * exact same inputs, rather than independently re-deriving an equivalent
+ * key, is what guarantees a dry run's reported billable count agrees with
+ * what a subsequent real `--evaluate` run over the same fixture and the
+ * same store actually dispatches — by construction, not by careful
+ * duplication that could quietly drift.
+ *
+ * `sourceTextByPath` must be the same per-file raw source map `runAudit`
+ * itself can expose (`RunAuditOptions.retainSourceText`,
+ * `AuditResult.sourceTextByPath`). An evaluable item whose file's source is
+ * missing here is simply skipped — never counted as a hit, never looked up
+ * at all — the same "believed unreachable, handled gracefully" posture
+ * `runEvaluation` takes for the identical gap (a file that failed to read
+ * never reaches `collectEvaluableItems` at all, so in practice this never
+ * triggers for real discovered files; it degrades a plumbing gap to "this
+ * one item is not cache-aware" rather than crashing the whole preview).
+ */
+export async function computeDryRunCacheHits(
+  files: readonly AuditFileResult[],
+  sourceTextByPath: ReadonlyMap<string, string>,
+  cacheKeyPort: AuditCacheKeyPort,
+  lookup: (cacheKey: string) => Promise<AuditStoreCachedJudgment | undefined>,
+): Promise<ReadonlySet<TestCaseId>> {
+  const { items } = collectEvaluableItems(files);
+  const hits = new Set<TestCaseId>();
+  for (const item of items) {
+    const sourceText = sourceTextByPath.get(item.testCase.repositoryRelativePath);
+    if (sourceText === undefined) continue;
+    const cacheKey = cacheKeyPort.computeKey({ testCase: item.testCase, bundle: item.bundle }, sourceText);
+    const hit = await lookup(cacheKey);
+    if (hit !== undefined) hits.add(item.testCase.id);
+  }
+  return hits;
 }

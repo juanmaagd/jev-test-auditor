@@ -81,8 +81,24 @@ export interface DryRunEstimate {
   readonly discovered: number;
   readonly evaluable: number;
   readonly skipped: DryRunSkippedTotals;
-  /** One initial Jev call per evaluable test case, exact. */
+  /**
+   * One initial Jev call per evaluable test case that is not already served
+   * from the content-addressed cache (Phase 5, task P5-5) — exact. Equals
+   * `evaluable` when `estimateDryRun` was called with no cache-hit set (the
+   * common case: no audit store exists yet, so nothing could be excluded).
+   */
   readonly initialCalls: number;
+  /**
+   * Count of evaluable test cases served from an existing content-addressed
+   * cache instead of a fresh Jev request (Phase 5, task P5-5), already
+   * excluded from `initialCalls`/`followUpCalls`/`estimatedInputTokens`/
+   * `estimatedFollowUpInputTokens`/`estimatedUsd` above. Present (even as
+   * `0`) only when `estimateDryRun` was given a `cacheHitTestCaseIds` set at
+   * all — its own doc explains why "0 hits, but consulted" and "not
+   * consulted" are deliberately distinguishable rather than collapsed to
+   * the same reported shape.
+   */
+  readonly cacheHits?: number;
   /** Possible follow-up call range; a follow-up happens only when an earlier result identifies a specific evidence need (never an automatic retry), so the true count is unknown ahead of time. */
   readonly followUpCalls: DryRunRange;
   /** Exact sum of UTF-8 byte lengths of `canonicalizeEvidenceBundle(bundle)` over every evaluable bundle. Still reported for its own sake (the local evidence footprint), but no longer what token/cost estimates are derived from — see `requestBytes`. */
@@ -169,11 +185,31 @@ function roundUsd(value: number): number {
  *   exceed `requestTokenCeiling` — a coarse whole-request check; the finer
  *   32k state-plus-longest-question provider sub-limit needs per-question
  *   text and is `checkJevRequestBudget`'s concern (`src/domain/jev-request.ts`).
+ *
+ * `cacheHitTestCaseIds` (Phase 5, task P5-5) is plain data, never a port or
+ * a filesystem read — this function stays a pure domain function with no
+ * I/O. The application/CLI layer is the one that actually opens the audit
+ * store, computes each evaluable test case's content-addressed cache key
+ * (`AuditCacheKeyPort`), looks it up (`AuditStorePort.lookup`), and hands in
+ * the resulting set of test-case ids that hit; `estimateDryRun` itself never
+ * touches a store. When `undefined` (no audit store was found, or none was
+ * consulted at all), every evaluable test case is billable — byte-identical
+ * to this function's behavior before this task. When supplied (even an
+ * empty `Set`, meaning "consulted, found nothing"), a test case whose id is
+ * in the set is excluded from `initialCalls`/`followUpCalls`/
+ * `estimatedInputTokens`/`estimatedFollowUpInputTokens`/`estimatedUsd` and
+ * counted in `cacheHits` instead; `evaluable`/`evidenceBytes`/`requestBytes`/
+ * `rubricBytesPerRequest`/`bundlesOverCeiling` stay scoped to every
+ * evaluable test case regardless — they describe the discovered work itself,
+ * not what would be billed for it. An id with no matching evaluable test
+ * case (e.g. stale content since renamed or deleted) is simply never
+ * matched; it can never produce a negative count.
  */
 export function estimateDryRun(
   snapshot: JevEstimateSnapshot,
   files: readonly DryRunFileInput[],
   rubric: Rubric = RUBRIC_V2,
+  cacheHitTestCaseIds?: ReadonlySet<TestCaseId>,
 ): DryRunEstimate {
   validateJevEstimateSnapshot(snapshot);
   // Computed unconditionally (even with zero evaluable test cases): it depends only on the
@@ -190,6 +226,8 @@ export function estimateDryRun(
   let initialTokensMin = 0;
   let initialTokensMax = 0;
   let bundlesOverCeiling = 0;
+  let billableCalls = 0;
+  let cacheHitCount = 0;
 
   for (const file of files) {
     const bundlesByTestCaseId = new Map<TestCaseId, EvidenceBundle>(
@@ -217,15 +255,25 @@ export function estimateDryRun(
         testCaseRequestBytes,
         snapshot.bytesPerToken,
       );
-      initialTokensMin += requestTokensMin;
-      initialTokensMax += requestTokensMax;
       if (requestTokensMax > snapshot.requestTokenCeiling) {
         bundlesOverCeiling += 1;
+      }
+
+      // Phase 5, task P5-5: a cache hit is excluded from the billable token/cost math and
+      // counted separately instead — see `cacheHitTestCaseIds`'s own doc above. With no set
+      // supplied at all, `cacheHitTestCaseIds?.has(...)` is always `false`, so every evaluable
+      // test case falls into the `else` branch exactly as it did before this task.
+      if (cacheHitTestCaseIds?.has(testCase.id) === true) {
+        cacheHitCount += 1;
+      } else {
+        billableCalls += 1;
+        initialTokensMin += requestTokensMin;
+        initialTokensMax += requestTokensMax;
       }
     }
   }
 
-  const followUpCalls: DryRunRange = { min: 0, max: evaluable * snapshot.maxFollowUpsPerTest };
+  const followUpCalls: DryRunRange = { min: 0, max: billableCalls * snapshot.maxFollowUpsPerTest };
   const followUpTokensMax = initialTokensMax * snapshot.maxFollowUpsPerTest;
   const estimatedFollowUpInputTokens: DryRunRange = { min: 0, max: followUpTokensMax };
 
@@ -243,7 +291,8 @@ export function estimateDryRun(
     discovered,
     evaluable,
     skipped: { total: skippedTotal, byReason: skippedByReason },
-    initialCalls: evaluable,
+    initialCalls: billableCalls,
+    ...(cacheHitTestCaseIds === undefined ? {} : { cacheHits: cacheHitCount }),
     followUpCalls,
     evidenceBytes,
     requestBytes,

@@ -23,10 +23,11 @@
  * the audited repository and never receives the API key — nothing in
  * {@link AuditStoreWorkItemOutcome} carries one.
  */
-import { mkdir, realpath } from 'node:fs/promises';
+import { mkdir, realpath, stat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import type { DatabaseSync } from 'node:sqlite';
 import {
   AuditStoreCorruptError,
@@ -242,6 +243,24 @@ const MIGRATIONS: readonly Migration[] = [
     db.exec('CREATE INDEX idx_work_items_cache_key ON work_items (cache_key);');
   },
 ];
+
+/**
+ * The cache-hit lookup query (Phase 5, task P5-2's rule — see
+ * `AuditStorePort.lookup`'s own doc in `src/domain/audit.ts`), shared
+ * verbatim between the live store's own `lookup` below and the read-only
+ * `--dry-run` reader (`openSqliteAuditStoreForLookup`, Phase 5, task P5-5):
+ * one module-level constant, not two hand-copied query strings, so the two
+ * can never silently drift apart and disagree on what counts as a hit.
+ */
+const LOOKUP_CACHED_JUDGMENT_SQL = `
+  SELECT j.classification AS classification
+  FROM work_items w
+  JOIN attempts a ON a.work_item_id = w.id
+  JOIN judgments j ON j.work_item_id = w.id
+  WHERE w.state = 'completed' AND w.cache_key = ? AND a.model_matches_pin = 1
+  ORDER BY w.id DESC
+  LIMIT 1
+`;
 
 function schemaMetaTableExists(db: DatabaseSync): boolean {
   return db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_meta'").get() !== undefined;
@@ -587,15 +606,7 @@ export async function createSqliteAuditStore(options: CreateSqliteAuditStoreOpti
     },
 
     async lookup(cacheKey: string): Promise<AuditStoreCachedJudgment | undefined> {
-      const row = db.prepare(`
-        SELECT j.classification AS classification
-        FROM work_items w
-        JOIN attempts a ON a.work_item_id = w.id
-        JOIN judgments j ON j.work_item_id = w.id
-        WHERE w.state = 'completed' AND w.cache_key = ? AND a.model_matches_pin = 1
-        ORDER BY w.id DESC
-        LIMIT 1
-      `).get(cacheKey) as { readonly classification: string } | undefined;
+      const row = db.prepare(LOOKUP_CACHED_JUDGMENT_SQL).get(cacheKey) as { readonly classification: string } | undefined;
       if (row === undefined) return undefined;
       return { classification: JSON.parse(row.classification) as AuditStoreCachedJudgment['classification'] };
     },
@@ -650,6 +661,132 @@ export async function createSqliteAuditStore(options: CreateSqliteAuditStoreOpti
         finished: runRow.finished_at !== null,
         terminalWorkItems,
       };
+    },
+
+    async close(): Promise<void> {
+      db.close();
+    },
+  };
+}
+
+/**
+ * The narrow, strictly read-only surface `openSqliteAuditStoreForLookup`
+ * (below) returns: exactly the one operation `audit --dry-run` needs
+ * (Phase 5, task P5-5), and nothing that could write. Deliberately not the
+ * full {@link AuditStorePort} — a dry run has no run to begin, no work item
+ * to record, and must never be handed a shape whose other methods even
+ * *look* callable for those.
+ */
+export interface AuditStoreReadOnlyLookup {
+  lookup(cacheKey: string): Promise<AuditStoreCachedJudgment | undefined>;
+  /** Releases the underlying read-only database handle. Safe to call once. */
+  close(): Promise<void>;
+}
+
+/**
+ * Opens the audit store strictly for a `--dry-run` cache-hit preview (Phase
+ * 5, task P5-5) — the store's own scope constraint carried through from
+ * `--evaluate` applies just as strictly here: a dry run "may read an
+ * existing store, but must never create one, never migrate one, and never
+ * write anything" (`odd/tasks/phase-5-persistence.md`, task P5-5). Verified
+ * empirically against this Node's real `node:sqlite` (see this task's own
+ * evidence in the feature document, not assumed from documentation):
+ *
+ * - `stat`s `options.databaseFile` first, and returns `undefined`
+ *   immediately when it does not exist — the one case the task names
+ *   explicitly ("no store exists yet"). This never even loads `node:sqlite`
+ *   (no `ExperimentalWarning`, no native open attempt against a path that
+ *   is not there), unlike `createSqliteAuditStore`, which always opens
+ *   (and, if needed, creates) the file.
+ * - When the file exists, opens it through a `file:` URI (built with
+ *   `pathToFileURL`, never raw string concatenation — a `#`/`?`/`%` in the
+ *   resolved path, e.g. inside `XDG_CONFIG_HOME`, would otherwise corrupt a
+ *   hand-built URI) carrying `immutable=1`, plus `{ readOnly: true }` as a
+ *   second, independent guard. `immutable=1` is the load-bearing piece,
+ *   empirically confirmed both ways: `readOnly: true` alone still makes
+ *   SQLite create `-shm`/`-wal` sidecar files for a WAL-mode database on the
+ *   very first `SELECT` (it needs the wal-index to read a consistent
+ *   snapshot), while `immutable=1` alone (no `readOnly` option at all)
+ *   already refuses a write attempt outright ("attempt to write a readonly
+ *   database") and creates no sidecar — `immutable=1` tells SQLite the file
+ *   will not change and to skip that locking/indexing machinery entirely.
+ *   `readOnly: true` is kept anyway as defense-in-depth at the `node:sqlite`
+ *   binding level, not because it is independently necessary. Verified to
+ *   create no sidecar file and leave the main file byte-identical (hash
+ *   and size), both against a cleanly closed store and one still holding an
+ *   uncheckpointed `-wal` file from another live connection.
+ * - **Known, documented limitation of `immutable=1`**: it also means a row
+ *   sitting only in an uncheckpointed `-wal` sidecar (the store did not
+ *   close cleanly since that write — see P5-3's own WAL evidence) is
+ *   invisible to this read-only reader; it reads only the main database
+ *   file's own last-checkpointed content. This can only ever make a dry
+ *   run UNDER-report cache hits (report a test case as billable that a
+ *   subsequent real `--evaluate` — which opens the store normally and does
+ *   see the WAL — would actually find cached), never the reverse. The
+ *   required "billable count matches what a subsequent real run issues"
+ *   guarantee holds for the ordinary case this task verifies: sequential
+ *   CLI invocations, each of which closes its store cleanly (`runCli`'s own
+ *   `finally`), so by the time a later `--dry-run`/`--evaluate` opens the
+ *   file, everything is already checkpointed into it.
+ * - **Schema compatibility**, decided by "what would a subsequent real
+ *   `--evaluate` against this exact file do?" (never a separate policy):
+ *   a version newer than this build supports, or a store `readSchemaVersion`
+ *   already rejects as corrupt/foreign (a malformed `schema_meta` row, or
+ *   user tables with no `schema_meta` at all) — `--evaluate` would refuse
+ *   these too (`AuditStoreSchemaVersionError`/`AuditStoreCorruptError`), so
+ *   this function throws the identical named error rather than silently
+ *   reporting a happy "N billable" preview a real run could never actually
+ *   produce; the CLI's existing `--evaluate` catch already handles both
+ *   (readable message, exit 1, no stack trace) and is reused unchanged for
+ *   `--dry-run`. A version OLDER than this build's `SCHEMA_VERSION` (no
+ *   `cache_key` column can exist yet) can never contain a hit, and a
+ *   subsequent real `--evaluate` would simply migrate it forward first and
+ *   then dispatch every evaluable test case — so this degrades to
+ *   `undefined` ("not consulted"), matching that outcome exactly, rather
+ *   than failing. A native open failure once the file is known to exist
+ *   (not a SQLite database, a directory, unreadable permissions, ...) is
+ *   wrapped the same way a writable open of the same file would fail for
+ *   `--evaluate`, for the same reason.
+ */
+export async function openSqliteAuditStoreForLookup(
+  options: CreateSqliteAuditStoreOptions,
+): Promise<AuditStoreReadOnlyLookup | undefined> {
+  try {
+    await stat(options.databaseFile);
+  } catch {
+    return undefined;
+  }
+
+  const sqliteModule = await loadSqliteModule();
+  const immutableUrl = new URL(pathToFileURL(options.databaseFile).href);
+  immutableUrl.searchParams.set('immutable', '1');
+
+  let db: DatabaseSync;
+  try {
+    db = new sqliteModule.DatabaseSync(immutableUrl.href, { readOnly: true });
+  } catch (error) {
+    throw wrapNativeSqliteError(error, options.databaseFile);
+  }
+
+  try {
+    const version = readSchemaVersion(db);
+    if (version > SCHEMA_VERSION) {
+      throw new AuditStoreSchemaVersionError(version, SCHEMA_VERSION);
+    }
+    if (version < SCHEMA_VERSION) {
+      db.close();
+      return undefined;
+    }
+  } catch (error) {
+    db.close();
+    throw isAuditStoreError(error) ? error : wrapNativeSqliteError(error, options.databaseFile);
+  }
+
+  return {
+    async lookup(cacheKey: string): Promise<AuditStoreCachedJudgment | undefined> {
+      const row = db.prepare(LOOKUP_CACHED_JUDGMENT_SQL).get(cacheKey) as { readonly classification: string } | undefined;
+      if (row === undefined) return undefined;
+      return { classification: JSON.parse(row.classification) as AuditStoreCachedJudgment['classification'] };
     },
 
     async close(): Promise<void> {

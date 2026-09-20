@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { runAudit } from '../src/index.js';
+import { computeDryRunCacheHits } from '../src/application/audit.js';
 import { createAuditCacheKeyPort } from '../src/adapters/cache-key.js';
 import type {
   AuditEvaluationPort,
   AuditEvaluationRequest,
   AuditEvidenceBuildRequest,
   AuditEvidenceBuildResult,
+  AuditFileResult,
   AuditPorts,
   AuditRequest,
   AuditStorePort,
@@ -1481,5 +1483,152 @@ describe('content-addressed caching (Phase 5, task P5-2)', () => {
     expect(evaluateCalls).toBe(2); // still no new request
     expect(third.evaluation?.classifications[0]?.status).toBe('weak');
     expect(third.evaluation?.totals).toMatchObject({ evaluated: 0, cached: 1 });
+  });
+});
+
+describe('sourceTextByPath exposure (Phase 5, task P5-5)', () => {
+  it('exposes each file\'s full raw source text on the result when retainSourceText is true', async () => {
+    const discovery: DiscoveryResult = { files: [discovered('a.test.ts'), discovered('b.test.ts')], excluded: [], diagnostics: [] };
+    const sources: Record<string, string> = { 'a.test.ts': 'source-a', 'b.test.ts': 'source-b' };
+
+    const result = await runAudit(
+      configuration,
+      portsFor(
+        discovery,
+        async (path) => sources[path] ?? '',
+        (path) => extraction(path.replace('.test.ts', '')),
+      ),
+      { retainSourceText: true },
+    );
+
+    expect(result.sourceTextByPath?.get('a.test.ts')).toBe('source-a');
+    expect(result.sourceTextByPath?.get('b.test.ts')).toBe('source-b');
+  });
+
+  it('omits sourceTextByPath entirely (undefined) when retainSourceText is not set — no behavior change for an ordinary offline audit', async () => {
+    const discovery: DiscoveryResult = { files: [discovered('a.test.ts')], excluded: [], diagnostics: [] };
+
+    const result = await runAudit(configuration, portsFor(discovery, async () => 'source', () => extraction('a')));
+
+    expect(result.sourceTextByPath).toBeUndefined();
+  });
+
+  it(
+    'still omits sourceTextByPath from the result during --evaluate when retainSourceText is not set, even though the map is '
+    + 'genuinely built and non-empty internally for the evaluation port\'s own cache-key lookups — the exposure gate is independent '
+    + 'of whether the map happens to exist, not merely "is it undefined"',
+    async () => {
+      const evaluableCase = testCaseWithModifiers('tc:v1:hidden', [], 'hidden.test.ts');
+      const discovery: DiscoveryResult = { files: [discovered('hidden.test.ts')], excluded: [], diagnostics: [] };
+      const evaluation = stubEvaluationPort(async (request) => classificationFor(request.testCase.id));
+
+      const result = await runAudit(configuration, {
+        discovery: { discover: async () => discovery },
+        sourceReader: { read: async () => 'internal-only-source' },
+        extractor: { extract: () => ({ testCases: [evaluableCase], dynamicMetadata: [], diagnostics: [] }) },
+        evidence: { build: async (request) => ({ bundles: request.testCases.map((testCase) => emptyBundle(testCase.id)), diagnostics: [] }) },
+        evaluation,
+      }); // no retainSourceText
+
+      expect(result.sourceTextByPath).toBeUndefined();
+    },
+  );
+
+  it('also exposes sourceTextByPath during --evaluate when retainSourceText is explicitly requested, independent of the evaluation port', async () => {
+    const evaluableCase = testCaseWithModifiers('tc:v1:retain', [], 'retain.test.ts');
+    const discovery: DiscoveryResult = { files: [discovered('retain.test.ts')], excluded: [], diagnostics: [] };
+    const evaluation = stubEvaluationPort(async (request) => classificationFor(request.testCase.id));
+
+    const result = await runAudit(configuration, {
+      discovery: { discover: async () => discovery },
+      sourceReader: { read: async () => 'evaluate-source' },
+      extractor: { extract: () => ({ testCases: [evaluableCase], dynamicMetadata: [], diagnostics: [] }) },
+      evidence: { build: async (request) => ({ bundles: request.testCases.map((testCase) => emptyBundle(testCase.id)), diagnostics: [] }) },
+      evaluation,
+    }, { retainSourceText: true });
+
+    expect(result.sourceTextByPath?.get('retain.test.ts')).toBe('evaluate-source');
+  });
+});
+
+describe('computeDryRunCacheHits (Phase 5, task P5-5)', () => {
+  it(
+    'reports exactly the currently evaluable test cases whose real cache key already has a stored judgment, '
+    + 'using the same AuditCacheKeyPort/AuditStorePort.lookup a real dispatch would use',
+    async () => {
+      const store = fakeStore();
+      const cacheKeyPort = createAuditCacheKeyPort();
+      const testCaseA = testCaseWithModifiers('tc:v1:hits-a', [], 'hits.test.ts');
+      const testCaseB: TestCase = { ...testCaseA, id: 'tc:v1:hits-b' as TestCaseId, name: 'hits-b' };
+      const discovery: DiscoveryResult = { files: [discovered('hits.test.ts')], excluded: [], diagnostics: [] };
+      const evaluation = stubEvaluationPort(async (request) => classificationFor(request.testCase.id));
+
+      // A real --evaluate pass populates the store for testCaseA only.
+      await runAudit(configuration, {
+        discovery: { discover: async () => discovery },
+        sourceReader: { read: async () => 'shared-source' },
+        extractor: { extract: () => ({ testCases: [testCaseA], dynamicMetadata: [], diagnostics: [] }) },
+        evidence: { build: async (request) => ({ bundles: request.testCases.map((testCase) => emptyBundle(testCase.id)), diagnostics: [] }) },
+        evaluation,
+        store,
+        cacheKey: cacheKeyPort,
+      }, { retainSourceText: true });
+
+      // A dry-run-style pass discovers BOTH testCaseA (already cached) and testCaseB (never
+      // evaluated) over the exact same source text and store.
+      const dryRunResult = await runAudit(configuration, portsFor(
+        discovery,
+        async () => 'shared-source',
+        () => ({ testCases: [testCaseA, testCaseB], dynamicMetadata: [], diagnostics: [] }),
+      ), { retainSourceText: true });
+
+      const hits = await computeDryRunCacheHits(
+        dryRunResult.files,
+        dryRunResult.sourceTextByPath ?? new Map(),
+        cacheKeyPort,
+        store.lookup,
+      );
+
+      expect(hits.has(testCaseA.id)).toBe(true);
+      expect(hits.has(testCaseB.id)).toBe(false);
+      expect(hits.size).toBe(1);
+    },
+  );
+
+  it('never counts a hit for a test case whose file source is missing from the map (defensive; mirrors runEvaluation\'s own "believed unreachable" gap)', async () => {
+    const store = fakeStore();
+    const cacheKeyPort = createAuditCacheKeyPort();
+    const testCase = testCaseWithModifiers('tc:v1:no-source', [], 'no-source.test.ts');
+    const files: readonly AuditFileResult[] = [{
+      discovered: discovered('no-source.test.ts'),
+      testCases: [testCase],
+      dynamicMetadata: [],
+      diagnostics: [],
+      evidence: [emptyBundle(testCase.id)],
+    }];
+
+    const hits = await computeDryRunCacheHits(files, new Map(), cacheKeyPort, store.lookup);
+
+    expect(hits.size).toBe(0);
+    expect(store.lookupCalls).toEqual([]);
+  });
+
+  it('never calls lookup for a skipped test case (only evaluable items are candidates)', async () => {
+    const store = fakeStore();
+    const cacheKeyPort = createAuditCacheKeyPort();
+    const skipCase = testCaseWithModifiers('tc:v1:skip-only', ['skip'], 'skip-only.test.ts');
+    const files: readonly AuditFileResult[] = [{
+      discovered: discovered('skip-only.test.ts'),
+      testCases: [skipCase],
+      dynamicMetadata: [],
+      diagnostics: [],
+      evidence: [],
+    }];
+    const sourceTextByPath = new Map([['skip-only.test.ts', 'source']]);
+
+    const hits = await computeDryRunCacheHits(files, sourceTextByPath, cacheKeyPort, store.lookup);
+
+    expect(hits.size).toBe(0);
+    expect(store.lookupCalls).toEqual([]);
   });
 });

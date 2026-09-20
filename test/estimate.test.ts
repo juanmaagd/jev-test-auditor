@@ -534,3 +534,144 @@ describe('estimateDryRun', () => {
     expect(result.initialCalls).toBe(2);
   });
 });
+
+/**
+ * Phase 5, task P5-5: feeding per-test-case cache-hit lookups into
+ * `estimateDryRun` so `initialCalls`/estimated tokens/estimated cost count
+ * only billable requests, and cache hits are reported separately. The
+ * fourth parameter is plain data (`ReadonlySet<TestCaseId>`) — this stays a
+ * pure domain function, no I/O, no port; the application/CLI layer performs
+ * the real store lookups and hands the resulting set of hit ids in.
+ *
+ * Every fixture below deliberately gives its evaluable test cases distinct,
+ * non-symmetric content lengths and picks a hit count that differs from
+ * both `evaluable` and `billable` (this phase's own carried-forward
+ * warning: a fixture where two of these numbers coincide lets a swapped
+ * field pass unnoticed).
+ */
+describe('estimateDryRun cache-aware billing (Phase 5, task P5-5)', () => {
+  it('with no cache-hit set supplied, omits cacheHits entirely and initialCalls/tokens/cost still cover every evaluable test case (unchanged from before this task)', () => {
+    const files: readonly DryRunFileInput[] = [{
+      testCases: [testCase('tc:v1:abc', [])],
+      evidence: [smallBundle('tc:v1:abc')],
+    }];
+
+    const result = estimateDryRun(JEV_ESTIMATE_SNAPSHOT, files);
+
+    expect('cacheHits' in result).toBe(false);
+    expect(result.initialCalls).toBe(1);
+    expect(result.estimatedInputTokens).toEqual({ min: 5847, max: 9356 });
+  });
+
+  it('an explicitly empty cache-hit set means "consulted, zero hits": cacheHits is 0 (present), distinct from an omitted/not-consulted field', () => {
+    const files: readonly DryRunFileInput[] = [{
+      testCases: [testCase('tc:v1:abc', [])],
+      evidence: [smallBundle('tc:v1:abc')],
+    }];
+
+    const result = estimateDryRun(JEV_ESTIMATE_SNAPSHOT, files, RUBRIC_V2, new Set());
+
+    expect('cacheHits' in result).toBe(true);
+    expect(result.cacheHits).toBe(0);
+    expect(result.initialCalls).toBe(1);
+  });
+
+  it(
+    'excludes cache-hit test cases from initialCalls/followUpCalls/estimated tokens/estimated cost, while '
+    + 'evaluable/evidenceBytes/requestBytes/rubricBytesPerRequest/bundlesOverCeiling still cover every evaluable test case',
+    () => {
+      // Three evaluable test cases with deliberately different content lengths (never identical),
+      // plus one skipped test: evaluable(3) != billable(2) != cacheHits(1), and the hit is the
+      // MIDDLE test case, not the first or last, so a first-only/off-by-one bug cannot pass by luck.
+      const bundleA = contentLengthBundle('tc:v1:cache-a', 10);
+      const bundleB = contentLengthBundle('tc:v1:cache-b', 50);
+      const bundleC = contentLengthBundle('tc:v1:cache-c', 200);
+      const files: readonly DryRunFileInput[] = [{
+        testCases: [
+          testCase('tc:v1:cache-a', []),
+          testCase('tc:v1:cache-b', []),
+          testCase('tc:v1:cache-c', []),
+          testCase('tc:v1:cache-skip', ['skip']),
+        ],
+        evidence: [bundleA, bundleB, bundleC],
+      }];
+      const cacheHitTestCaseIds = new Set<TestCaseId>(['tc:v1:cache-b' as TestCaseId]);
+
+      const billableResult = estimateDryRun(JEV_ESTIMATE_SNAPSHOT, files, RUBRIC_V2, cacheHitTestCaseIds);
+      const fullResult = estimateDryRun(JEV_ESTIMATE_SNAPSHOT, files); // no cache: every evaluable is billable
+
+      // Independently compute what only the two NOT-hit test cases (a, c) should contribute,
+      // using the real functions directly rather than trusting estimateDryRun's own math — a
+      // mutation that sums the wrong subset must disagree with this.
+      const expectedBillableTokens = [
+        { id: 'tc:v1:cache-a', bundle: bundleA },
+        { id: 'tc:v1:cache-c', bundle: bundleC },
+      ].reduce((totals, { id, bundle }) => {
+        const request = buildJevRequest({ testCase: testCase(id, []), bundle, rubric: RUBRIC_V2 });
+        const bytes = utf8ByteLength(canonicalizeJevRequest(request));
+        const { min, max } = estimateTokensFromBytes(bytes, JEV_ESTIMATE_SNAPSHOT.bytesPerToken);
+        return { min: totals.min + min, max: totals.max + max };
+      }, { min: 0, max: 0 });
+      const expectedUsdMin = Math.round(((expectedBillableTokens.min * JEV_ESTIMATE_SNAPSHOT.usdPerMillionInputTokens) / 1_000_000) * 1_000_000_000) / 1_000_000_000;
+      const expectedUsdMax = Math.round((((expectedBillableTokens.max * 2) * JEV_ESTIMATE_SNAPSHOT.usdPerMillionInputTokens) / 1_000_000) * 1_000_000_000) / 1_000_000_000;
+
+      expect(billableResult.evaluable).toBe(3);
+      expect(billableResult.cacheHits).toBe(1);
+      expect(billableResult.initialCalls).toBe(2);
+      expect(billableResult.followUpCalls).toEqual({ min: 0, max: 2 });
+      expect(billableResult.estimatedInputTokens).toEqual(expectedBillableTokens);
+      expect(billableResult.estimatedFollowUpInputTokens).toEqual({ min: 0, max: expectedBillableTokens.max });
+      expect(billableResult.estimatedUsd).toEqual({ min: expectedUsdMin, max: expectedUsdMax });
+
+      // Byte/ceiling diagnostics stay scoped to every evaluable test case, cache or no cache — the
+      // task names only initialCalls/tokens/cost as billable-only.
+      expect(billableResult.discovered).toBe(fullResult.discovered);
+      expect(billableResult.skipped).toEqual(fullResult.skipped);
+      expect(billableResult.evidenceBytes).toBe(fullResult.evidenceBytes);
+      expect(billableResult.requestBytes).toBe(fullResult.requestBytes);
+      expect(billableResult.rubricBytesPerRequest).toBe(fullResult.rubricBytesPerRequest);
+      expect(billableResult.bundlesOverCeiling).toBe(fullResult.bundlesOverCeiling);
+    },
+  );
+
+  it('matches cache hits across multiple files by test case id, never by array position', () => {
+    const bundleA = contentLengthBundle('tc:v1:file-a', 20);
+    const bundleB = contentLengthBundle('tc:v1:file-b', 80);
+    const files: readonly DryRunFileInput[] = [
+      { testCases: [testCase('tc:v1:file-a', [])], evidence: [bundleA] },
+      { testCases: [testCase('tc:v1:file-b', [])], evidence: [bundleB] },
+    ];
+    const cacheHitTestCaseIds = new Set<TestCaseId>(['tc:v1:file-b' as TestCaseId]);
+
+    const result = estimateDryRun(JEV_ESTIMATE_SNAPSHOT, files, RUBRIC_V2, cacheHitTestCaseIds);
+
+    expect(result.evaluable).toBe(2);
+    expect(result.cacheHits).toBe(1);
+    expect(result.initialCalls).toBe(1);
+  });
+
+  it('a cache-hit id with no matching evaluable test case is simply ignored — never a negative count, never a throw', () => {
+    const files: readonly DryRunFileInput[] = [{
+      testCases: [testCase('tc:v1:abc', [])],
+      evidence: [smallBundle('tc:v1:abc')],
+    }];
+    const cacheHitTestCaseIds = new Set<TestCaseId>(['tc:v1:does-not-exist' as TestCaseId]);
+
+    const result = estimateDryRun(JEV_ESTIMATE_SNAPSHOT, files, RUBRIC_V2, cacheHitTestCaseIds);
+
+    expect(result.cacheHits).toBe(0);
+    expect(result.initialCalls).toBe(1);
+  });
+
+  it('places cacheHits immediately after initialCalls in key order when present (stable machine-readable shape for --dry-run --json)', () => {
+    const files: readonly DryRunFileInput[] = [{
+      testCases: [testCase('tc:v1:abc', [])],
+      evidence: [smallBundle('tc:v1:abc')],
+    }];
+
+    const result = estimateDryRun(JEV_ESTIMATE_SNAPSHOT, files, RUBRIC_V2, new Set());
+
+    const keys = Object.keys(result);
+    expect(keys.indexOf('cacheHits')).toBe(keys.indexOf('initialCalls') + 1);
+  });
+});

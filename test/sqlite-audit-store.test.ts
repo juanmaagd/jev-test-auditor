@@ -1,11 +1,13 @@
 import { DatabaseSync } from 'node:sqlite';
-import { chmod, mkdir, mkdtemp, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createSqliteAuditStore,
   isSqliteExperimentalWarning,
+  openSqliteAuditStoreForLookup,
   resolveAuditStorePaths,
   withSqliteExperimentalWarningSuppressed,
   type AuditStorePaths,
@@ -1231,5 +1233,134 @@ describe('createSqliteAuditStore loadRunState rootDirCanonical', () => {
     const state = await store.loadRunState(runId);
 
     expect(state?.rootDirCanonical).toBe(false);
+  });
+});
+
+// --- openSqliteAuditStoreForLookup (Phase 5, task P5-5: read-only cache consultation for
+// `audit --dry-run`, which must never create, migrate, or write to the audit store) ---------
+
+describe('openSqliteAuditStoreForLookup', () => {
+  it('returns undefined and creates no file of any kind when no database file exists at the given path', async () => {
+    const databaseFile = await tempDatabaseFile();
+
+    const lookup = await openSqliteAuditStoreForLookup({ databaseFile });
+
+    expect(lookup).toBeUndefined();
+    await expect(stat(databaseFile)).rejects.toThrow();
+    await expect(stat(`${databaseFile}-wal`)).rejects.toThrow();
+    await expect(stat(`${databaseFile}-shm`)).rejects.toThrow();
+  });
+
+  it(
+    'reads a real completed judgment through the exact same lookup rule as the live store, '
+    + 'without creating a -wal/-shm sidecar and without changing the main file\'s bytes',
+    async () => {
+      const databaseFile = await tempDatabaseFile();
+      const store = await createSqliteAuditStore({ databaseFile });
+      const runId = await store.beginRun('/repo');
+      const testCaseId = 'tc:v1:readonly-hit' as TestCaseId;
+      await store.recordWorkItem(runId, {
+        state: 'completed',
+        identity: { testCaseId, repositoryRelativePath: 'a.test.ts', name: 'adds numbers' },
+        cacheKey: 'ck-readonly-hit',
+        evaluation: sampleEvaluation(),
+        classification: sampleClassification(testCaseId),
+      });
+      await store.close(); // WAL checkpoints and its sidecars disappear on a clean close (P5-3 evidence).
+
+      const beforeBytes = await readFile(databaseFile);
+      const beforeHash = createHash('sha256').update(beforeBytes).digest('hex');
+
+      const lookup = await openSqliteAuditStoreForLookup({ databaseFile });
+      expect(lookup).toBeDefined();
+      const hit = await lookup?.lookup('ck-readonly-hit');
+      const miss = await lookup?.lookup('ck-does-not-exist');
+      await lookup?.close();
+
+      expect(hit).toEqual({ classification: sampleClassification(testCaseId) });
+      expect(miss).toBeUndefined();
+
+      const afterBytes = await readFile(databaseFile);
+      const afterHash = createHash('sha256').update(afterBytes).digest('hex');
+      expect(afterHash).toBe(beforeHash);
+      expect(afterBytes.byteLength).toBe(beforeBytes.byteLength);
+      await expect(stat(`${databaseFile}-wal`)).rejects.toThrow();
+      await expect(stat(`${databaseFile}-shm`)).rejects.toThrow();
+    },
+  );
+
+  it('a row still sitting only in an uncheckpointed WAL sidecar (the store never closed cleanly) is invisible to the read-only reader — documented limitation, not a bug: a subsequent real --evaluate opens the store normally and sees it', async () => {
+    const databaseFile = await tempDatabaseFile();
+    const store = await createSqliteAuditStore({ databaseFile });
+    const runId = await store.beginRun('/repo');
+    const testCaseId = 'tc:v1:uncheckpointed' as TestCaseId;
+    await store.recordWorkItem(runId, {
+      state: 'completed',
+      identity: { testCaseId, repositoryRelativePath: 'a.test.ts', name: 'adds numbers' },
+      cacheKey: 'ck-uncheckpointed',
+      evaluation: sampleEvaluation(),
+      classification: sampleClassification(testCaseId),
+    });
+    // Deliberately never closed — simulates a store still open elsewhere / not yet checkpointed.
+
+    try {
+      const lookup = await openSqliteAuditStoreForLookup({ databaseFile });
+      const hit = await lookup?.lookup('ck-uncheckpointed');
+      await lookup?.close();
+
+      expect(hit).toBeUndefined();
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('surfaces AuditStoreSchemaVersionError for a store newer than this build supports — the same error a subsequent --evaluate would also refuse with', async () => {
+    const databaseFile = await tempDatabaseFile();
+    await mkdir(dirname(databaseFile), { recursive: true });
+    const db = new DatabaseSync(databaseFile);
+    db.exec('CREATE TABLE schema_meta (id INTEGER PRIMARY KEY CHECK (id = 1), schema_version INTEGER NOT NULL) STRICT;');
+    db.exec('INSERT INTO schema_meta (id, schema_version) VALUES (1, 999)');
+    db.close();
+
+    await expect(openSqliteAuditStoreForLookup({ databaseFile })).rejects.toThrow(AuditStoreSchemaVersionError);
+  });
+
+  it('degrades to undefined (not consulted) for a hand-built v1 database — a subsequent --evaluate would migrate it forward and then dispatch every evaluable test case, which "not consulted" already matches', async () => {
+    const databaseFile = await tempDatabaseFile();
+    await mkdir(dirname(databaseFile), { recursive: true });
+    const db = new DatabaseSync(databaseFile);
+    db.exec('CREATE TABLE schema_meta (id INTEGER PRIMARY KEY CHECK (id = 1), schema_version INTEGER NOT NULL) STRICT;');
+    db.exec('INSERT INTO schema_meta (id, schema_version) VALUES (1, 1)');
+    db.close();
+
+    await expect(openSqliteAuditStoreForLookup({ databaseFile })).resolves.toBeUndefined();
+  });
+
+  it('degrades to undefined (not consulted) for a genuinely empty (zero-byte) file — a subsequent --evaluate would migrate it from scratch and dispatch everything', async () => {
+    const databaseFile = await tempDatabaseFile();
+    await mkdir(dirname(databaseFile), { recursive: true });
+    await writeFile(databaseFile, Buffer.alloc(0));
+
+    await expect(openSqliteAuditStoreForLookup({ databaseFile })).resolves.toBeUndefined();
+  });
+
+  it('surfaces AuditStoreCorruptError for a foreign database with tables but no schema_meta table — the same error a subsequent --evaluate would also refuse with', async () => {
+    const databaseFile = await tempDatabaseFile();
+    await mkdir(dirname(databaseFile), { recursive: true });
+    const foreignDb = new DatabaseSync(databaseFile);
+    foreignDb.exec('CREATE TABLE some_other_apps_table (id INTEGER PRIMARY KEY, payload TEXT)');
+    foreignDb.close();
+
+    await expect(openSqliteAuditStoreForLookup({ databaseFile })).rejects.toThrow(AuditStoreCorruptError);
+  });
+
+  it('surfaces AuditStoreCorruptError, not a raw native error, for a file that is not a SQLite database at all', async () => {
+    const databaseFile = await tempDatabaseFile();
+    await mkdir(dirname(databaseFile), { recursive: true });
+    await writeFile(databaseFile, 'not a sqlite database, just plain bytes');
+
+    const error: unknown = await openSqliteAuditStoreForLookup({ databaseFile }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(AuditStoreCorruptError);
+    expect((error as Error).message).not.toContain('ERR_SQLITE_ERROR');
   });
 });

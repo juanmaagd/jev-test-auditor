@@ -711,6 +711,19 @@ export interface AuditResult {
   readonly evaluation?: AuditEvaluationResult;
   /** `undefined` unless `RunAuditOptions.resume` was used (Phase 5, task P5-4) — see {@link AuditResumeSummary}'s own doc. */
   readonly resume?: AuditResumeSummary;
+  /**
+   * Every discovered file's full, raw, un-normalized source text, keyed by
+   * `repositoryRelativePath` (Phase 5, task P5-5) — `undefined` unless
+   * `RunAuditOptions.retainSourceText` was explicitly `true`. This is the
+   * one ingredient a cache-aware `audit --dry-run` preview needs
+   * (`AuditCacheKeyPort.computeKey`'s `fullTestSource` argument) that
+   * `AuditFileResult` itself deliberately never carries — see `runAudit`'s
+   * own comment on why full source stays out of the ordinary result shape
+   * by default (memory, and never leaking into a JSON report). Never
+   * populated for an ordinary audit or `--evaluate` run unless that option
+   * is explicitly passed; existing callers see no change.
+   */
+  readonly sourceTextByPath?: ReadonlyMap<string, string>;
 }
 
 export type AuditConfigurationOverrides = ConfigurationOverrides;

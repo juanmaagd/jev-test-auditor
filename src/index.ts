@@ -277,7 +277,7 @@ export {
   type OverallClassificationStatus,
 } from './domain/classification.js';
 
-export { runAudit, type RunAuditOptions } from './application/audit.js';
+export { computeDryRunCacheHits, runAudit, type RunAuditOptions } from './application/audit.js';
 export {
   AuditResumeLegacyRootDirError,
   AuditResumeRootDirMismatchError,
@@ -327,9 +327,11 @@ export {
 export {
   createSqliteAuditStore,
   isSqliteExperimentalWarning,
+  openSqliteAuditStoreForLookup,
   resolveAuditStorePaths,
   withSqliteExperimentalWarningSuppressed,
   type AuditStorePathEnvironment,
   type AuditStorePaths,
+  type AuditStoreReadOnlyLookup,
   type CreateSqliteAuditStoreOptions,
 } from './adapters/sqlite-audit-store.js';

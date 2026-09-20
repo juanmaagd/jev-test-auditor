@@ -2,7 +2,7 @@
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { getResolvedConfiguration } from '../application/configure.js';
-import { runAudit } from '../application/audit.js';
+import { computeDryRunCacheHits, runAudit } from '../application/audit.js';
 import { discoverTestFiles } from '../adapters/repository-discovery.js';
 import { readSourceFile } from '../adapters/source-reader.js';
 import { extractTestCases } from '../adapters/test-extraction.js';
@@ -10,7 +10,12 @@ import { createAuditCacheKeyPort } from '../adapters/cache-key.js';
 import { createAuditEvidencePort } from '../adapters/evidence-audit-port.js';
 import { createJevEvaluationPort } from '../adapters/jev-evaluation-port.js';
 import { createJevHttpGateway } from '../adapters/jev-http-gateway.js';
-import { createSqliteAuditStore, resolveAuditStorePaths } from '../adapters/sqlite-audit-store.js';
+import {
+  createSqliteAuditStore,
+  openSqliteAuditStoreForLookup,
+  resolveAuditStorePaths,
+  type AuditStoreReadOnlyLookup,
+} from '../adapters/sqlite-audit-store.js';
 import { readApiKeyFromPrompt } from '../adapters/auth-prompt.js';
 import {
   deleteStoredCredentials,
@@ -29,7 +34,7 @@ import {
 import { canonicalizeEvidenceBundle, type EvidenceBundle } from '../domain/evidence.js';
 import { estimateDryRun, JEV_ESTIMATE_SNAPSHOT, type DryRunEstimate } from '../domain/estimate.js';
 import { JevConfigurationError } from '../domain/jev-gateway.js';
-import { JEV_MODEL_ID } from '../domain/rubric.js';
+import { JEV_MODEL_ID, RUBRIC_V2 } from '../domain/rubric.js';
 import {
   AuditResumeLegacyRootDirError,
   AuditResumeRootDirMismatchError,
@@ -119,14 +124,23 @@ Options:
                       --dry-run or --evaluate.
   --dry-run          Print a no-network, no-write aggregate cost/call preview instead of the normal
                       summary: exact discovered/evaluable/skipped-by-reason counts, exact initial
-                      Jev calls (one per evaluable test case), exact evidence bytes and exact real
-                      request bytes (the actual state plus every rubric question, measured by
-                      building each real request locally, never a guessed overhead), and clearly
-                      labeled approximate input-token and USD ranges converted from those request
-                      bytes via a versioned local pricing snapshot. The rubric's own questions
-                      dominate a request's bytes (about 93% for the shipped rubric) — see
-                      "Rubric bytes per request" in the output. Makes no network or provider calls,
-                      requires no API key, and writes nothing to disk. Cannot be combined with
+                      Jev calls (one per evaluable test case not already served from the local
+                      content-addressed cache), exact evidence bytes and exact real request bytes
+                      (the actual state plus every rubric question, measured by building each real
+                      request locally, never a guessed overhead), and clearly labeled approximate
+                      input-token and USD ranges converted from those request bytes via a
+                      versioned local pricing snapshot. The rubric's own questions dominate a
+                      request's bytes (about 93% for the shipped rubric) — see "Rubric bytes per
+                      request" in the output. If an audit store already exists at the default (or
+                      configured) location, it is opened strictly read-only and consulted for
+                      cache hits, reported separately (cacheHits) and excluded from the billable
+                      count and token/cost estimates; with no store yet, every evaluable test case
+                      is reported billable and no cache-related field appears at all — this is how
+                      "no cache was consulted" is disclosed, since the report is otherwise
+                      unchanged from before this behavior existed. Makes no network or provider
+                      calls, requires no API key, and writes nothing to disk — not even to the
+                      audit store when one is consulted, which is never created, migrated, or
+                      written to by --dry-run. Cannot be combined with
                       --inspect-payloads or --evaluate.
   --evaluate         Opt-in only: sends every evaluable test case's local evidence bundle to
                       TypeSafe's Jev model for real judgment (costs money; nothing is sent without
@@ -247,6 +261,13 @@ function inspectPayloadLines(result: AuditResult): readonly string[] {
  * `networkCalls`/`filesWritten` are always `0`: this report is built from
  * the same no-network, no-write audit pipeline as the normal summary (see
  * `runCli`), so they are exact disclosures, not placeholders.
+ *
+ * `cacheHits` (Phase 5, task P5-5) is spread in immediately after
+ * `initialCalls`, matching `DryRunEstimate.cacheHits`'s own doc, and only
+ * when `estimate.cacheHits` is present at all — omitted entirely (never a
+ * literal `0`) when no audit store was consulted, so a cold dry run's JSON
+ * bytes stay byte-for-byte identical to this report's shape before this
+ * task, which existing golden tests assert exactly.
  */
 function dryRunJsonLine(rootDir: string, estimate: DryRunEstimate): string {
   return JSON.stringify({
@@ -260,6 +281,7 @@ function dryRunJsonLine(rootDir: string, estimate: DryRunEstimate): string {
     evaluable: estimate.evaluable,
     skipped: estimate.skipped,
     initialCalls: estimate.initialCalls,
+    ...(estimate.cacheHits === undefined ? {} : { cacheHits: estimate.cacheHits }),
     followUpCalls: estimate.followUpCalls,
     evidenceBytes: estimate.evidenceBytes,
     requestBytes: estimate.requestBytes,
@@ -274,7 +296,15 @@ function dryRunJsonLine(rootDir: string, estimate: DryRunEstimate): string {
   });
 }
 
-/** Concise human-readable `--dry-run` text report, one `writeLine` call (embedded newlines), mirroring `dryRunJsonLine`'s data. */
+/**
+ * Concise human-readable `--dry-run` text report, one `writeLine` call
+ * (embedded newlines), mirroring `dryRunJsonLine`'s data. Every existing
+ * line's wording stays byte-for-byte unchanged (a cold dry run's full text
+ * report is therefore identical to this report's output before Phase 5,
+ * task P5-5); a "Cache hits" line is appended right after "Initial Jev
+ * calls" only when `estimate.cacheHits` is present — purely additive, never
+ * printed for a cold dry run with no store to consult.
+ */
 function dryRunTextReport(rootDir: string, estimate: DryRunEstimate): string {
   const { skipped } = estimate;
   return [
@@ -286,6 +316,7 @@ function dryRunTextReport(rootDir: string, estimate: DryRunEstimate): string {
     `Evaluable: ${estimate.evaluable}`,
     `Skipped: ${skipped.total} (skip: ${skipped.byReason.skip}, todo: ${skipped.byReason.todo}, evidence-unavailable: ${skipped.byReason['evidence-unavailable']})`,
     `Initial Jev calls (one per evaluable test case, exact): ${estimate.initialCalls}`,
+    ...(estimate.cacheHits === undefined ? [] : [`Cache hits (served from the local audit store, zero cost, exact): ${estimate.cacheHits}`]),
     `Follow-up calls (possible range, exact bound): ${estimate.followUpCalls.min} - ${estimate.followUpCalls.max}`,
     `Evidence bytes (canonical, evaluable bundles only, exact): ${estimate.evidenceBytes}`,
     `Request bytes (canonical, real state + rubric questions, evaluable requests only, exact): ${estimate.requestBytes}`,
@@ -685,6 +716,30 @@ export async function runCli(
   // — and never fails on its own (no I/O, no state; see `createAuditCacheKeyPort`'s own doc).
   const cacheKeyPort: AuditCacheKeyPort | undefined = storePort === undefined ? undefined : createAuditCacheKeyPort();
 
+  // Phase 5, task P5-5: `--dry-run` may READ an existing audit store to report cache hits, but
+  // must never create, migrate, or write to one — `openSqliteAuditStoreForLookup` itself is the
+  // one place that guarantee lives (see its own doc). Gated exactly like `--evaluate`'s own store
+  // above (never for the `dependencies.audit` test seam, which supplies its own `AuditResult` with
+  // no `sourceTextByPath` of its own to consult), and only for `--dry-run` itself — an ordinary
+  // `--evaluate` run never opens a second, read-only connection alongside its own writable one. A
+  // schema-incompatible or corrupt store surfaces the identical named, visible failure `--evaluate`
+  // already reports (readable message, exit 1, no stack trace) — see that function's own doc for
+  // why: a subsequent real `--evaluate` against the same file would refuse too.
+  let dryRunLookup: AuditStoreReadOnlyLookup | undefined;
+  if (parsed.dryRun && dependencies.audit === undefined) {
+    try {
+      dryRunLookup = await openSqliteAuditStoreForLookup({
+        databaseFile: configuration.store.databasePath ?? resolveAuditStorePaths().databaseFile,
+      });
+    } catch (error) {
+      if (error instanceof AuditStoreSchemaVersionError || error instanceof AuditStoreCorruptError) {
+        io.writeLine(`Unable to open the audit store: ${error.message}`);
+        return 1;
+      }
+      throw error;
+    }
+  }
+
   try {
     let result: AuditResult;
     try {
@@ -692,7 +747,11 @@ export async function runCli(
         ? await runAudit(
           configuration,
           createProductionPorts(evaluationPort, storePort, cacheKeyPort),
-          { fresh: parsed.fresh, ...(parsed.resume === undefined ? {} : { resume: parsed.resume }) },
+          {
+            fresh: parsed.fresh,
+            ...(parsed.resume === undefined ? {} : { resume: parsed.resume }),
+            ...(dryRunLookup === undefined ? {} : { retainSourceText: true }),
+          },
         )
         : await dependencies.audit(configuration);
     } catch (error) {
@@ -722,7 +781,20 @@ export async function runCli(
     }
 
     if (parsed.dryRun) {
-      const estimate = estimateDryRun(JEV_ESTIMATE_SNAPSHOT, result.files);
+      // Phase 5, task P5-5: when an existing store was actually opened above, compute each
+      // evaluable test case's real cache key and look it up — the exact same two calls a real
+      // dispatch would make (`AuditCacheKeyPort.computeKey` then `AuditStorePort.lookup`) — so
+      // this dry run's billable count agrees with what a subsequent real `--evaluate` run over the
+      // same fixture and store actually dispatches, by construction. With no store to consult
+      // (the common case: none exists yet), `cacheHitTestCaseIds` stays `undefined` and
+      // `estimateDryRun` is called exactly as it always was — see that function's own doc for why
+      // this keeps a cold dry run's output byte-for-byte identical to before this task.
+      const cacheHitTestCaseIds = dryRunLookup === undefined
+        ? undefined
+        : await computeDryRunCacheHits(result.files, result.sourceTextByPath ?? new Map(), createAuditCacheKeyPort(), dryRunLookup.lookup);
+      const estimate = cacheHitTestCaseIds === undefined
+        ? estimateDryRun(JEV_ESTIMATE_SNAPSHOT, result.files)
+        : estimateDryRun(JEV_ESTIMATE_SNAPSHOT, result.files, RUBRIC_V2, cacheHitTestCaseIds);
       io.writeLine(parsed.json ? dryRunJsonLine(result.rootDir, estimate) : dryRunTextReport(result.rootDir, estimate));
       return 0;
     }
@@ -739,6 +811,7 @@ export async function runCli(
     return 0;
   } finally {
     if (storePort !== undefined) await storePort.close();
+    if (dryRunLookup !== undefined) await dryRunLookup.close();
   }
 }
 

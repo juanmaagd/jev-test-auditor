@@ -1,5 +1,7 @@
 import { access, chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -1910,6 +1912,204 @@ describe('resume wiring (Phase 5, task P5-4)', () => {
 
     expect(exitCode).toBe(1);
     expect(output.lines[0]).toContain('--resume requires a run id');
+  });
+});
+
+/**
+ * Cache-aware `audit --dry-run` (Phase 5, task P5-5): consults an EXISTING audit store read-only
+ * to report cache hits and a reduced billable count, but must never create, migrate, or write to
+ * one. No `createStorePort`/dry-run test seam exists for this path on purpose (a dry run has no
+ * writable store to hand one) — every test here uses the real default per-user store path (no
+ * `--rootDir`-style override reaches `store.databasePath`, matching this phase's own documented
+ * gap), which `useIsolatedConfigHome()` sandboxes per test; two separate `runCli` invocations in
+ * one test therefore share the same on-disk file exactly like two real terminal commands would.
+ */
+describe('cache-aware --dry-run (Phase 5, task P5-5)', () => {
+  useIsolatedConfigHome();
+
+  const twoTestFixtureFiles = {
+    'a.test.ts': "import { expect, test } from 'vitest';\n"
+      + "test('adds', () => { expect(1 + 1).toBe(2); });\n"
+      + "test('subtracts', () => { expect(2 - 1).toBe(1); });\n",
+  };
+
+  function deterministicEvaluationPort(onCall?: (name: string) => void): AuditEvaluationPort {
+    return {
+      async evaluate(request) {
+        onCall?.(request.testCase.name);
+        const tokens = request.testCase.name.length * 100;
+        return {
+          evaluation: {
+            requestedModel: 'jev-1.13.0',
+            respondedModel: 'jev-1.13.0',
+            modelMatchesPin: true,
+            answers: {},
+            usage: { inputTokens: tokens, outputTokens: 1 },
+            attempts: 1,
+          },
+          classification: {
+            testCaseId: request.testCase.id,
+            repositoryRelativePath: request.testCase.repositoryRelativePath,
+            name: request.testCase.name,
+            status: 'healthy',
+            dimensions: [],
+            findings: [],
+            policyVersion: 2,
+            rubricVersion: 2,
+            model: { requested: 'jev-1.13.0', responded: 'jev-1.13.0', matchesPin: true },
+            usage: { inputTokens: tokens, outputTokens: 1 },
+          },
+        };
+      },
+    };
+  }
+
+  it(
+    // A `process.emitWarning` spy is deliberately NOT used here to "prove" no ExperimentalWarning
+    // fires: this file's own top-level `import { DatabaseSync } from 'node:sqlite'` (used by the
+    // schema-999 test below) already loads `node:sqlite` — and Node emits that exact warning once
+    // per process — before any test in this file runs at all, and `withSqliteExperimentalWarningSuppressed`
+    // swaps `process.emitWarning` out during its own import besides. A spy installed inside a test
+    // body would therefore stay green even if `openSqliteAuditStoreForLookup` loaded `node:sqlite`
+    // unconditionally (verified: temporarily forcing that load left this exact assertion passing).
+    // What actually proves the guarantee is structural, not observed here: `openSqliteAuditStoreForLookup`
+    // `stat`s the file and returns before ever calling `loadSqliteModule()` when it is missing (see
+    // its own doc, `src/adapters/sqlite-audit-store.ts`), mutation-tested at the adapter level
+    // (`test/sqlite-audit-store.test.ts`: removing that early return turns a missing-file open into
+    // a raw native failure). The one meaningful ExperimentalWarning proof needs a fresh child
+    // process, immune to Node's once-per-process dedup — see `test/bin-smoke.test.ts`'s existing
+    // P5-1 proof of the suppression mechanism itself, which this task's read-only path reuses
+    // unchanged whenever it does load the module (a store that actually exists).
+    'a cold dry run (no store file exists yet at the default path) reports every evaluable test case as billable '
+    + 'and creates no file or directory of any kind',
+    async () => {
+      const root = await fixture(twoTestFixtureFiles);
+      const storePaths = resolveAuditStorePaths();
+      const output = captureOutput();
+
+      const exitCode = await runCli(['audit', '--rootDir', root, '--dry-run', '--json'], output.io);
+
+      expect(exitCode).toBe(0);
+      const parsed = JSON.parse(output.lines[0]!) as Record<string, unknown>;
+      expect(parsed['discovered']).toBe(2);
+      expect(parsed['evaluable']).toBe(2);
+      expect(parsed['initialCalls']).toBe(2);
+      // Not consulted (no store exists yet): cacheHits is omitted entirely, never present as 0.
+      expect('cacheHits' in parsed).toBe(false);
+      await expect(access(storePaths.databaseFile)).rejects.toThrow();
+      await expect(access(storePaths.configDir)).rejects.toThrow();
+    },
+  );
+
+  it(
+    'a warm dry run reports exactly the test cases already cached from a prior --evaluate as hits and the rest as billable, '
+    + 'and leaves the store byte-identical (same size, same hash) with no new sidecar file',
+    async () => {
+      const root = await fixture(twoTestFixtureFiles);
+      const storePaths = resolveAuditStorePaths();
+
+      // Warm-up: --evaluate over a.test.ts alone caches both of its test cases for real, under
+      // their real content-addressed keys (the file's content will never change again below).
+      const evaluateCalls: string[] = [];
+      const warmUpExit = await runCli(['audit', '--rootDir', root, '--evaluate'], captureOutput().io, {
+        createEvaluationPort: () => deterministicEvaluationPort((name) => evaluateCalls.push(name)),
+      });
+      expect(warmUpExit).toBe(0);
+      expect(evaluateCalls).toEqual(['adds', 'subtracts']);
+
+      // A second file, added to the SAME root AFTER the warm-up run, so its one test case was
+      // never evaluated and can never be a hit — evaluable(3) != cacheHits(2) != billable(1), all
+      // distinct, so a swap between "hit" and "billable" (or a silent fallback to "evaluable")
+      // cannot pass unnoticed.
+      await writeFile(join(root, 'b.test.ts'), "import { expect, test } from 'vitest';\ntest('multiplies', () => { expect(2 * 2).toBe(4); });\n");
+
+      const beforeBytes = await readFile(storePaths.databaseFile);
+      const beforeHash = createHash('sha256').update(beforeBytes).digest('hex');
+      const sidecarsBefore = [`${storePaths.databaseFile}-wal`, `${storePaths.databaseFile}-shm`].filter((path) => existsSync(path));
+
+      const output = captureOutput();
+      const exitCode = await runCli(['audit', '--rootDir', root, '--dry-run', '--json'], output.io);
+
+      expect(exitCode).toBe(0);
+      const parsed = JSON.parse(output.lines[0]!) as Record<string, unknown>;
+      expect(parsed['discovered']).toBe(3);
+      expect(parsed['evaluable']).toBe(3);
+      expect(parsed['cacheHits']).toBe(2);
+      expect(parsed['initialCalls']).toBe(1);
+      // Stable key order (required verification): `cacheHits` sits immediately after
+      // `initialCalls` — `dryRunJsonLine` builds its own object literal separately from
+      // `DryRunEstimate`'s own field order, so this is the one place a reordering there is caught.
+      const keys = Object.keys(parsed);
+      expect(keys.indexOf('cacheHits')).toBe(keys.indexOf('initialCalls') + 1);
+
+      const afterBytes = await readFile(storePaths.databaseFile);
+      const afterHash = createHash('sha256').update(afterBytes).digest('hex');
+      expect(afterHash).toBe(beforeHash);
+      expect(afterBytes.byteLength).toBe(beforeBytes.byteLength);
+      const sidecarsAfter = [`${storePaths.databaseFile}-wal`, `${storePaths.databaseFile}-shm`].filter((path) => existsSync(path));
+      expect(sidecarsAfter).toEqual(sidecarsBefore);
+    },
+  );
+
+  it(
+    'THE central acceptance test: the billable count a warm dry run reports equals the number of requests a subsequent '
+    + 'real --evaluate run actually issues over the same fixture and the same store — proved by counting real dispatches, '
+    + 'never by comparing two numbers the estimator derived itself',
+    async () => {
+      const root = await fixture(twoTestFixtureFiles);
+
+      const warmUpExit = await runCli(['audit', '--rootDir', root, '--evaluate'], captureOutput().io, {
+        createEvaluationPort: () => deterministicEvaluationPort(),
+      });
+      expect(warmUpExit).toBe(0);
+
+      await writeFile(join(root, 'b.test.ts'), "import { expect, test } from 'vitest';\ntest('multiplies', () => { expect(2 * 2).toBe(4); });\n");
+
+      const dryRunOutput = captureOutput();
+      const dryRunExit = await runCli(['audit', '--rootDir', root, '--dry-run', '--json'], dryRunOutput.io);
+      expect(dryRunExit).toBe(0);
+      const dryRunParsed = JSON.parse(dryRunOutput.lines[0]!) as { readonly initialCalls: number };
+
+      const realDispatches: string[] = [];
+      const realEvaluateExit = await runCli(['audit', '--rootDir', root, '--evaluate', '--json'], captureOutput().io, {
+        createEvaluationPort: () => deterministicEvaluationPort((name) => realDispatches.push(name)),
+      });
+      expect(realEvaluateExit).toBe(0);
+
+      expect(realDispatches).toEqual(['multiplies']);
+      expect(dryRunParsed.initialCalls).toBe(realDispatches.length);
+    },
+  );
+
+  it('surfaces the same named, visible error (exit 1, no stack trace) a subsequent --evaluate would also refuse with, for a store newer than this build supports', async () => {
+    const root = await fixture(twoTestFixtureFiles);
+    const storePaths = resolveAuditStorePaths();
+    await mkdir(storePaths.configDir, { recursive: true, mode: 0o700 });
+    const db = new DatabaseSync(storePaths.databaseFile);
+    db.exec('CREATE TABLE schema_meta (id INTEGER PRIMARY KEY CHECK (id = 1), schema_version INTEGER NOT NULL) STRICT;');
+    db.exec('INSERT INTO schema_meta (id, schema_version) VALUES (1, 999)');
+    db.close();
+    const output = captureOutput();
+
+    const exitCode = await runCli(['audit', '--rootDir', root, '--dry-run'], output.io);
+
+    expect(exitCode).toBe(1);
+    // Exactly one line printed (the readable message) — no separate stack-trace line, matching
+    // the exact same convention `--evaluate`'s own store-construction-failure test asserts.
+    expect(output.lines).toHaveLength(1);
+    expect(output.lines[0]).toContain('999');
+  });
+
+  it('an audit with neither --evaluate nor --dry-run still creates no database file or config directory, exactly as before this task (P5-1\'s own guarantee, unaffected by P5-5)', async () => {
+    const root = await fixture(twoTestFixtureFiles);
+    const storePaths = resolveAuditStorePaths();
+    const output = captureOutput();
+
+    const exitCode = await runCli(['audit', '--rootDir', root], output.io);
+
+    expect(exitCode).toBe(0);
+    await expect(access(storePaths.databaseFile)).rejects.toThrow();
+    await expect(access(storePaths.configDir)).rejects.toThrow();
   });
 });
 
