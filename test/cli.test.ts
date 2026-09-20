@@ -1,11 +1,15 @@
 import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { runAudit } from '../src/application/audit.js';
 import { runCli, type CliIo } from '../src/cli/index.js';
-import type { AuditFileResult, AuditResult } from '../src/domain/audit.js';
+import { createJevEvaluationPort } from '../src/adapters/jev-evaluation-port.js';
+import type { AuditEvaluationPort, AuditFileResult, AuditPorts, AuditResult } from '../src/domain/audit.js';
 import { buildEvidenceBundle, DEFAULT_EVIDENCE_BUDGET, type EvidenceBundle } from '../src/domain/evidence.js';
 import { canonicalizeEvidenceBundle } from '../src/index.js';
+import type { JevAnswer, JevEvaluation, JevGatewayPort } from '../src/domain/jev-gateway.js';
+import type { JevRequest } from '../src/domain/jev-request.js';
 import type { TestCase, TestCaseId, TestModifierKind } from '../src/domain/test-understanding.js';
 
 const temporaryRoots: string[] = [];
@@ -392,7 +396,7 @@ describe('--dry-run --json', () => {
       expect(exitCode).toBe(0);
       expect(output.lines).toHaveLength(1);
       expect(output.lines[0]).toBe(
-        '{"dryRun":true,"reportingOnly":true,"rootDir":"/workspace","model":"jev-1.13","snapshotVersion":1,'
+        '{"dryRun":true,"reportingOnly":true,"rootDir":"/workspace","model":"jev-1.13.0","snapshotVersion":1,'
         + '"asOf":"2026-09-19","discovered":4,"evaluable":1,'
         + '"skipped":{"total":3,"byReason":{"skip":1,"todo":1,"evidence-unavailable":1}},'
         + '"initialCalls":1,"followUpCalls":{"min":0,"max":1},"evidenceBytes":477,'
@@ -545,5 +549,594 @@ describe('--dry-run: no network, no writes, no API key required', () => {
         if (value === undefined) delete process.env[name]; else process.env[name] = value;
       }
     }
+  });
+});
+
+describe('--evaluate', () => {
+  it('documents --evaluate and --evaluate --json in --help', async () => {
+    const output = captureOutput();
+
+    const exitCode = await runCli(['--help'], output.io);
+
+    expect(exitCode).toBe(0);
+    expect(output.lines[0]).toContain('--evaluate');
+    expect(output.lines[0]).toContain('TYPESAFE_API_KEY');
+  });
+
+  it('rejects --dry-run combined with --evaluate as a usage error and never runs the audit seam', async () => {
+    const output = captureOutput();
+
+    const exitCode = await runCli(['audit', '--dry-run', '--evaluate'], output.io, {
+      audit: async () => { throw new Error('must not run'); },
+    });
+
+    expect(exitCode).toBe(1);
+    expect(output.lines[0]).toContain('--dry-run');
+    expect(output.lines[0]).toContain('--evaluate');
+  });
+
+  it('rejects --evaluate combined with --inspect-payloads as a usage error and never runs the audit seam', async () => {
+    const output = captureOutput();
+
+    const exitCode = await runCli(['audit', '--evaluate', '--inspect-payloads'], output.io, {
+      audit: async () => { throw new Error('must not run'); },
+    });
+
+    expect(exitCode).toBe(1);
+    expect(output.lines[0]).toContain('--evaluate');
+    expect(output.lines[0]).toContain('--inspect-payloads');
+  });
+
+  it('rejects --json without --dry-run or --evaluate as a usage error', async () => {
+    const output = captureOutput();
+
+    const exitCode = await runCli(['audit', '--json'], output.io, {
+      audit: async () => { throw new Error('must not run'); },
+    });
+
+    expect(exitCode).toBe(1);
+    expect(output.lines[0]).toContain('--dry-run');
+    expect(output.lines[0]).toContain('--evaluate');
+  });
+
+  describe('key safety (real gateway construction path, no dependencies.audit override)', () => {
+    let savedKey: string | undefined;
+    let originalFetch: typeof fetch;
+    const fetchSpy = vi.fn(() => { throw new Error('network access is not allowed'); });
+
+    beforeEach(() => {
+      savedKey = process.env['TYPESAFE_API_KEY'];
+      delete process.env['TYPESAFE_API_KEY'];
+      originalFetch = globalThis.fetch;
+      globalThis.fetch = fetchSpy as unknown as typeof fetch;
+    });
+
+    afterEach(() => {
+      if (savedKey === undefined) delete process.env['TYPESAFE_API_KEY']; else process.env['TYPESAFE_API_KEY'] = savedKey;
+      globalThis.fetch = originalFetch;
+      fetchSpy.mockClear();
+    });
+
+    it('exits 1 with a clear usage message and makes no network call when --evaluate is requested and TYPESAFE_API_KEY is unset', async () => {
+      const output = captureOutput();
+
+      const exitCode = await runCli(['audit', '--evaluate'], output.io);
+
+      expect(exitCode).toBe(1);
+      expect(output.lines[0]).toContain('--evaluate');
+      expect(output.lines[0]).toContain('TYPESAFE_API_KEY');
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it('exits 1 with the same message for --evaluate --json without a key, and makes no network call', async () => {
+      const output = captureOutput();
+
+      const exitCode = await runCli(['audit', '--evaluate', '--json'], output.io);
+
+      expect(exitCode).toBe(1);
+      expect(output.lines[0]).toContain('TYPESAFE_API_KEY');
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it('never constructs or touches the network for a plain audit (no --evaluate) even though a key is missing', async () => {
+      const root = await fixture({
+        'math.test.ts': "import { expect, test } from 'vitest';\ntest('adds', () => { expect(1 + 1).toBe(2); });\n",
+      });
+      const output = captureOutput();
+
+      const exitCode = await runCli(['audit', '--rootDir', root], output.io);
+
+      expect(exitCode).toBe(0);
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(JSON.parse(output.lines[0] ?? '')).toMatchObject({ reportingOnly: true });
+    });
+
+    it('mutation probe: never constructs the evaluation port when --evaluate is not passed, even if construction would throw', async () => {
+      const output = captureOutput();
+      const canned: AuditResult = {
+        rootDir: '.',
+        files: [],
+        excluded: [],
+        diagnostics: [],
+        totals: { files: 0, excluded: 0, testCases: 0, dynamicMetadata: 0, diagnostics: 0, ...zeroEvidenceTotals },
+        reportingOnly: true,
+      };
+
+      const exitCode = await runCli(['audit'], output.io, {
+        audit: async () => canned,
+        createEvaluationPort: () => { throw new Error('must not construct the evaluation port without --evaluate'); },
+      });
+
+      expect(exitCode).toBe(0);
+    });
+  });
+
+  describe('golden --evaluate --json line (real runAudit + real jev-evaluation-port adapter + a stub JevGatewayPort with fixed answers)', () => {
+    const fixedTestCaseId = 'tc:v1:abc' as TestCaseId;
+
+    /**
+     * Every `.applicable` noul answer is `0.1` — below CLASSIFICATION_POLICY_V1's
+     * `applicabilityMin` of `0.5` — so every one of RUBRIC_V1's 7 dimensions is
+     * judged `not-applicable` and its `.quality` score is never read (the score
+     * answers below are structurally valid but their value never matters).
+     * Walking `classifyEvaluation`'s branches by hand for this fixed input:
+     * every dimension takes the `applicabilityProbability < policy.applicabilityMin`
+     * branch of `judgeDimension` (`status: 'not-applicable'`, `applicable: false`,
+     * `level`/`score`/`confidence`/`reason` all `undefined` and so dropped by
+     * `JSON.stringify`); `classifyOverall` then sees zero `applicableDimensions`,
+     * which is the `applicableDimensions.length === 0` branch, giving the
+     * overall `status: 'needs-review'`; `isFindingWorthy` never matches a
+     * `not-applicable` judgment, so `findings: []`.
+     */
+    function fixedAnswersGateway(): JevGatewayPort {
+      return {
+        async evaluate(request: JevRequest): Promise<JevEvaluation> {
+          const answers: Record<string, JevAnswer> = {};
+          for (const questionId of Object.keys(request.questions)) {
+            answers[questionId] = questionId.endsWith('.applicable')
+              ? { type: 'noul', probability: 0.1, raw: { type: 'noul', noul: 0.1 } }
+              : {
+                type: 'score',
+                score: 0,
+                legend: { '0': 'Misleading', '1': 'Weak', '2': 'Acceptable', '3': 'Strong' },
+                probabilities: { '0': 0.25, '1': 0.25, '2': 0.25, '3': 0.25 },
+                confidence: 0.9,
+                raw: {
+                  type: 'score',
+                  score: 0,
+                  legend: { '0': 'Misleading', '1': 'Weak', '2': 'Acceptable', '3': 'Strong' },
+                  probabilities: { '0': 0.25, '1': 0.25, '2': 0.25, '3': 0.25 },
+                  confidence: 0.9,
+                },
+              };
+          }
+          return {
+            requestedModel: request.model,
+            respondedModel: request.model,
+            modelMatchesPin: true,
+            answers,
+            usage: { inputTokens: 100, outputTokens: 0 },
+            attempts: 1,
+          };
+        },
+      };
+    }
+
+    function onlyBundle(): EvidenceBundle {
+      return buildEvidenceBundle({
+        testCaseId: fixedTestCaseId,
+        budget: DEFAULT_EVIDENCE_BUDGET,
+        fragments: [],
+        denied: [],
+        unresolved: [],
+        omitted: [],
+      });
+    }
+
+    function realPorts(evaluation: AuditEvaluationPort): AuditPorts {
+      return {
+        discovery: {
+          discover: async () => ({
+            files: [{ repositoryRelativePath: 'abc.test.ts', framework: 'vitest', frameworkEvidence: [] }],
+            excluded: [],
+            diagnostics: [],
+          }),
+        },
+        sourceReader: { read: async () => 'source' },
+        extractor: {
+          extract: () => ({
+            testCases: [{
+              id: fixedTestCaseId,
+              repositoryRelativePath: 'abc.test.ts',
+              kind: 'test',
+              framework: 'vitest',
+              name: 'abc',
+              structuralAncestry: [{ kind: 'test', name: 'abc', ordinal: 0 }],
+              source: "test('abc', () => {});",
+              span: { start: { line: 1, column: 1 }, end: { line: 1, column: 2 } },
+              modifiers: [],
+              hooks: [],
+              imports: [],
+              mocks: [],
+              assertions: [],
+              parameterization: { mode: 'none', cases: [] },
+              diagnostics: [],
+            }],
+            dynamicMetadata: [],
+            diagnostics: [],
+          }),
+        },
+        evidence: { build: async (request) => ({ bundles: request.testCases.map(() => onlyBundle()), diagnostics: [] }) },
+        evaluation,
+      };
+    }
+
+    it(
+      'prints exactly one literal golden JSON line for a one-test-case fixture, built through the real runAudit '
+      + 'pipeline and the real jev-evaluation-port adapter against a stub JevGatewayPort with fixed answers',
+      async () => {
+        const output = captureOutput();
+        const evaluation = createJevEvaluationPort(fixedAnswersGateway());
+
+        const exitCode = await runCli(['audit', '--rootDir', '/workspace', '--evaluate', '--json'], output.io, {
+          audit: async (request) => runAudit(request, realPorts(evaluation)),
+        });
+
+        expect(exitCode).toBe(0);
+        expect(output.lines).toHaveLength(1);
+        expect(output.lines[0]).toBe(
+          '{"evaluate":true,"reportingOnly":true,"rootDir":"/workspace","modelRequested":"jev-1.13.0",'
+          + '"totals":{"evaluated":1,"failed":0,"skipped":{"total":0,"byReason":{"skip":0,"todo":0,"evidence-unavailable":0}},'
+          + '"usage":{"inputTokens":100,"outputTokens":0},"statusCounts":{"healthy":0,"weak":0,"misleading":0,"needs-review":1},'
+          + '"respondedModel":"jev-1.13.0","modelMismatches":0},'
+          + '"classifications":[{"testCaseId":"tc:v1:abc","repositoryRelativePath":"abc.test.ts","name":"abc","status":"needs-review",'
+          + '"dimensions":[{"dimensionId":"assertion-strength","dimensionLabel":"Assertion strength","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
+          + '{"dimensionId":"behavioral-focus","dimensionLabel":"Behavioral focus","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
+          + '{"dimensionId":"determinism-isolation","dimensionLabel":"Determinism and isolation","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
+          + '{"dimensionId":"diagnostic-quality","dimensionLabel":"Diagnostic quality","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
+          + '{"dimensionId":"falsifiability","dimensionLabel":"Falsifiability","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
+          + '{"dimensionId":"refactor-resistance","dimensionLabel":"Refactor resistance","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
+          + '{"dimensionId":"test-double-quality","dimensionLabel":"Test-double quality","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"}],'
+          + '"findings":[],"policyVersion":1,"rubricVersion":1,'
+          + '"model":{"requested":"jev-1.13.0","responded":"jev-1.13.0","matchesPin":true},'
+          + '"usage":{"inputTokens":100,"outputTokens":0},'
+          + '"evidence":{"fragments":0,"truncatedFragments":0,"denied":0,"unresolved":0,"omitted":0}}],'
+          + '"diagnostics":[]}',
+        );
+      },
+    );
+
+    /**
+     * The trivial golden above pins the LEAST informative path: every
+     * applicability answer is 0.1, so all seven dimensions are
+     * `not-applicable`, the overall status is `needs-review`, and `findings`
+     * is empty. That golden stays green even if level resolution, finding
+     * generation, per-dimension judgment serialization, usage accumulation,
+     * or status counting broke. This second golden exercises a realistic
+     * mixed run: two test cases, real applicability/quality answers above
+     * threshold, one dimension driven to `misleading` alongside another
+     * driven to `strong` in the SAME test case (proving non-compensation end
+     * to end — a strong dimension cannot cancel a misleading one), and a
+     * second test case where every applicable dimension is
+     * `acceptable`/`strong` (`healthy`). Different evidence bundles per test
+     * case exercise the per-test `evidence` provenance lookup, and
+     * `usage`/`respondedModel` prove run-level accumulation.
+     *
+     * Hand-derivation (`CLASSIFICATION_POLICY_V1`: `applicabilityMin` 0.5,
+     * `confidenceMin` 0.6, `levelCutPoints` [1, 2, 3]):
+     *
+     * "misleading case" — only `falsifiability` and `behavioral-focus` are
+     * applicable (noul 0.9 each, confidence 0.9, above both thresholds); the
+     * other five dimensions get noul 0.1 (`not-applicable`).
+     *   - `falsifiability` score 0 → `levelForScore`: `0 < levelCutPoints[0]
+     *     (1)` → `misleading`.
+     *   - `behavioral-focus` score 3 → not `< 1`, not `< 2`, not `< 3` →
+     *     `strong`.
+     *   - `classifyOverall`: judged dimensions are [`behavioral-focus`
+     *     strong, `falsifiability` misleading]; `criticalLevel` is
+     *     `misleading`, and one judged dimension is at that level, so the
+     *     overall status is `misleading` BEFORE anything else is inspected —
+     *     `behavioral-focus`'s `strong` never gets a chance to compensate.
+     *   - `isFindingWorthy`: only the judged `misleading` `falsifiability`
+     *     dimension qualifies; `strong` and `not-applicable` dimensions
+     *     never do. `findings` has exactly one entry.
+     *   - Evidence bundle: 1 fragment, nothing else → `evidence: {fragments:
+     *     1, truncatedFragments: 0, denied: 0, unresolved: 0, omitted: 0}`.
+     *   - Usage fixed at `{inputTokens: 150, outputTokens: 2}`.
+     *
+     * "healthy case" — only `assertion-strength` (noul 0.8, score 2,
+     * confidence 0.8) and `diagnostic-quality` (noul 0.95, score 3,
+     * confidence 0.95) are applicable; the other five get noul 0.1.
+     *   - `assertion-strength` score 2 → not `< 1`, not `< 2` → `acceptable`.
+     *   - `diagnostic-quality` score 3 → `strong` (same as above).
+     *   - `classifyOverall`: judged dimensions are [`assertion-strength`
+     *     acceptable, `diagnostic-quality` strong] — no `misleading`, no
+     *     `weak`, at least one applicable dimension, none `needs-review`,
+     *     `modelMatchesPin` true → `healthy`.
+     *   - `isFindingWorthy`: neither judged dimension is `misleading`/`weak`,
+     *     so `findings: []`.
+     *   - Evidence bundle: 2 fragments (1 truncated), 1 denied, 1 unresolved,
+     *     1 omitted → `evidence: {fragments: 2, truncatedFragments: 1,
+     *     denied: 1, unresolved: 1, omitted: 1}`.
+     *   - Usage fixed at `{inputTokens: 90, outputTokens: 1}`.
+     *
+     * Run-level totals: `evaluated: 2`, `failed: 0`, `usage: {inputTokens:
+     * 150 + 90 = 240, outputTokens: 2 + 1 = 3}`, `statusCounts: {healthy: 1,
+     * misleading: 1, weak: 0, needs-review: 0}`, `respondedModel` taken from
+     * the first entry in submission order ("misleading case", index 0) —
+     * `jev-1.13.0`, matching the pin, so `modelMismatches: 0`. Every one of
+     * these values was independently confirmed by actually running this
+     * exact scenario through the real pipeline in a throwaway scratch test
+     * before being pinned below (scratch file discarded afterward), so this
+     * literal is not hand-typed guesswork.
+     */
+    it(
+      'prints a second literal golden JSON line for a realistic mixed evaluation: one test case driven to misleading by a '
+      + 'not-canceled strong dimension (non-compensation) with a finding, one test case healthy, non-zero usage, and a responded model',
+      async () => {
+        const misleadingCaseId = 'tc:v1:misleading-case' as TestCaseId;
+        const healthyCaseId = 'tc:v1:healthy-case' as TestCaseId;
+        const mixedZeroSpan = { start: { line: 1, column: 1 }, end: { line: 1, column: 2 } };
+
+        function noul(probability: number): JevAnswer {
+          return { type: 'noul', probability, raw: { type: 'noul', noul: probability } };
+        }
+        function scoreAnswer(value: number, confidence: number): JevAnswer {
+          const legend = { '0': 'Misleading', '1': 'Weak', '2': 'Acceptable', '3': 'Strong' };
+          const probabilities = { '0': 0.1, '1': 0.1, '2': 0.3, '3': 0.5 };
+          return { type: 'score', score: value, legend, probabilities, confidence, raw: { type: 'score', score: value, legend, probabilities, confidence } };
+        }
+        const NOT_APPLICABLE = noul(0.1);
+        const IRRELEVANT_SCORE = scoreAnswer(0, 0.9);
+
+        function mixedAnswersGateway(): JevGatewayPort {
+          return {
+            async evaluate(request: JevRequest): Promise<JevEvaluation> {
+              const isMisleadingCase = request.state.testCaseId === misleadingCaseId;
+              const answers: Record<string, JevAnswer> = {};
+              for (const questionId of Object.keys(request.questions)) {
+                const [dimensionId, questionKind] = questionId.split('.');
+                if (isMisleadingCase) {
+                  if (dimensionId === 'falsifiability') {
+                    answers[questionId] = questionKind === 'applicable' ? noul(0.9) : scoreAnswer(0, 0.9);
+                  } else if (dimensionId === 'behavioral-focus') {
+                    answers[questionId] = questionKind === 'applicable' ? noul(0.9) : scoreAnswer(3, 0.9);
+                  } else {
+                    answers[questionId] = questionKind === 'applicable' ? NOT_APPLICABLE : IRRELEVANT_SCORE;
+                  }
+                } else if (dimensionId === 'assertion-strength') {
+                  answers[questionId] = questionKind === 'applicable' ? noul(0.8) : scoreAnswer(2, 0.8);
+                } else if (dimensionId === 'diagnostic-quality') {
+                  answers[questionId] = questionKind === 'applicable' ? noul(0.95) : scoreAnswer(3, 0.95);
+                } else {
+                  answers[questionId] = questionKind === 'applicable' ? NOT_APPLICABLE : IRRELEVANT_SCORE;
+                }
+              }
+              const usage = isMisleadingCase ? { inputTokens: 150, outputTokens: 2 } : { inputTokens: 90, outputTokens: 1 };
+              return { requestedModel: request.model, respondedModel: request.model, modelMatchesPin: true, answers, usage, attempts: 1 };
+            },
+          };
+        }
+
+        function mixedTestCase(id: TestCaseId, name: string): TestCase {
+          return {
+            id,
+            repositoryRelativePath: 'mixed.test.ts',
+            kind: 'test',
+            framework: 'vitest',
+            name,
+            structuralAncestry: [{ kind: 'test', name, ordinal: 0 }],
+            source: `test('${name}', () => {});`,
+            span: mixedZeroSpan,
+            modifiers: [],
+            hooks: [],
+            imports: [],
+            mocks: [],
+            assertions: [],
+            parameterization: { mode: 'none', cases: [] },
+            diagnostics: [],
+          };
+        }
+
+        function mixedEvidenceBundleFor(testCaseId: TestCaseId): EvidenceBundle {
+          if (testCaseId === misleadingCaseId) {
+            return buildEvidenceBundle({
+              testCaseId,
+              budget: DEFAULT_EVIDENCE_BUDGET,
+              fragments: [{
+                kind: 'test',
+                repositoryRelativePath: 'mixed.test.ts',
+                span: mixedZeroSpan,
+                content: 'body',
+                contentHash: 'a'.repeat(64),
+                selectionReason: 'test-body',
+                truncation: { truncated: false, originalBytes: 4, includedBytes: 4 },
+              }],
+              denied: [],
+              unresolved: [],
+              omitted: [],
+            });
+          }
+          return buildEvidenceBundle({
+            testCaseId,
+            budget: DEFAULT_EVIDENCE_BUDGET,
+            fragments: [
+              {
+                kind: 'test',
+                repositoryRelativePath: 'mixed.test.ts',
+                span: mixedZeroSpan,
+                content: 'body2',
+                contentHash: 'b'.repeat(64),
+                selectionReason: 'test-body',
+                truncation: { truncated: false, originalBytes: 5, includedBytes: 5 },
+              },
+              {
+                kind: 'helper',
+                repositoryRelativePath: 'helper.ts',
+                span: mixedZeroSpan,
+                content: 'helper',
+                contentHash: 'c'.repeat(64),
+                selectionReason: 'imported-binding-referenced',
+                truncation: { truncated: true, originalBytes: 100, includedBytes: 6 },
+              },
+            ],
+            denied: [{ repositoryRelativePath: 'secret.env', rule: 'deny-list:.env*' }],
+            unresolved: [{ specifier: 'left-pad', reason: 'bare-specifier' }],
+            omitted: [{ repositoryRelativePath: 'big.ts', reason: 'bundle-budget-exhausted' }],
+          });
+        }
+
+        function mixedPorts(evaluation: AuditEvaluationPort): AuditPorts {
+          return {
+            discovery: {
+              discover: async () => ({
+                files: [{ repositoryRelativePath: 'mixed.test.ts', framework: 'vitest', frameworkEvidence: [] }],
+                excluded: [],
+                diagnostics: [],
+              }),
+            },
+            sourceReader: { read: async () => 'source' },
+            extractor: {
+              extract: () => ({
+                testCases: [mixedTestCase(misleadingCaseId, 'misleading case'), mixedTestCase(healthyCaseId, 'healthy case')],
+                dynamicMetadata: [],
+                diagnostics: [],
+              }),
+            },
+            evidence: { build: async (request) => ({ bundles: request.testCases.map((tc) => mixedEvidenceBundleFor(tc.id)), diagnostics: [] }) },
+            evaluation,
+          };
+        }
+
+        const output = captureOutput();
+        const evaluation = createJevEvaluationPort(mixedAnswersGateway());
+
+        const exitCode = await runCli(['audit', '--rootDir', '/workspace', '--evaluate', '--json'], output.io, {
+          audit: async (request) => runAudit(request, mixedPorts(evaluation)),
+        });
+
+        expect(exitCode).toBe(0);
+        expect(output.lines).toHaveLength(1);
+        expect(output.lines[0]).toBe(
+          '{"evaluate":true,"reportingOnly":true,"rootDir":"/workspace","modelRequested":"jev-1.13.0",'
+          + '"totals":{"evaluated":2,"failed":0,"skipped":{"total":0,"byReason":{"skip":0,"todo":0,"evidence-unavailable":0}},'
+          + '"usage":{"inputTokens":240,"outputTokens":3},"statusCounts":{"healthy":1,"weak":0,"misleading":1,"needs-review":0},'
+          + '"respondedModel":"jev-1.13.0","modelMismatches":0},'
+          + '"classifications":[{"testCaseId":"tc:v1:misleading-case","repositoryRelativePath":"mixed.test.ts","name":"misleading case","status":"misleading",'
+          + '"dimensions":[{"dimensionId":"assertion-strength","dimensionLabel":"Assertion strength","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
+          + '{"dimensionId":"behavioral-focus","dimensionLabel":"Behavioral focus","applicable":true,"applicabilityProbability":0.9,"level":"strong","score":3,"confidence":0.9,"status":"judged"},'
+          + '{"dimensionId":"determinism-isolation","dimensionLabel":"Determinism and isolation","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
+          + '{"dimensionId":"diagnostic-quality","dimensionLabel":"Diagnostic quality","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
+          + '{"dimensionId":"falsifiability","dimensionLabel":"Falsifiability","applicable":true,"applicabilityProbability":0.9,"level":"misleading","score":0,"confidence":0.9,"status":"judged"},'
+          + '{"dimensionId":"refactor-resistance","dimensionLabel":"Refactor resistance","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
+          + '{"dimensionId":"test-double-quality","dimensionLabel":"Test-double quality","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"}],'
+          + '"findings":[{"testCaseId":"tc:v1:misleading-case","repositoryRelativePath":"mixed.test.ts","name":"misleading case","dimensionId":"falsifiability","dimensionLabel":"Falsifiability","level":"misleading","score":0,"confidence":0.9,"applicabilityProbability":0.9,"status":"judged"}],'
+          + '"policyVersion":1,"rubricVersion":1,'
+          + '"model":{"requested":"jev-1.13.0","responded":"jev-1.13.0","matchesPin":true},'
+          + '"usage":{"inputTokens":150,"outputTokens":2},'
+          + '"evidence":{"fragments":1,"truncatedFragments":0,"denied":0,"unresolved":0,"omitted":0}},'
+          + '{"testCaseId":"tc:v1:healthy-case","repositoryRelativePath":"mixed.test.ts","name":"healthy case","status":"healthy",'
+          + '"dimensions":[{"dimensionId":"assertion-strength","dimensionLabel":"Assertion strength","applicable":true,"applicabilityProbability":0.8,"level":"acceptable","score":2,"confidence":0.8,"status":"judged"},'
+          + '{"dimensionId":"behavioral-focus","dimensionLabel":"Behavioral focus","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
+          + '{"dimensionId":"determinism-isolation","dimensionLabel":"Determinism and isolation","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
+          + '{"dimensionId":"diagnostic-quality","dimensionLabel":"Diagnostic quality","applicable":true,"applicabilityProbability":0.95,"level":"strong","score":3,"confidence":0.95,"status":"judged"},'
+          + '{"dimensionId":"falsifiability","dimensionLabel":"Falsifiability","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
+          + '{"dimensionId":"refactor-resistance","dimensionLabel":"Refactor resistance","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
+          + '{"dimensionId":"test-double-quality","dimensionLabel":"Test-double quality","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"}],'
+          + '"findings":[],"policyVersion":1,"rubricVersion":1,'
+          + '"model":{"requested":"jev-1.13.0","responded":"jev-1.13.0","matchesPin":true},'
+          + '"usage":{"inputTokens":90,"outputTokens":1},'
+          + '"evidence":{"fragments":2,"truncatedFragments":1,"denied":1,"unresolved":1,"omitted":1}}],'
+          + '"diagnostics":[]}',
+        );
+      },
+    );
+
+    it('never leaks the API key into an evaluation-failed diagnostic when the real gateway redacts a server-echoed key (mutation probe: leaking the key)', async () => {
+      const fakeKey = 'sk-typesafe-should-never-appear-in-any-report';
+      const echoingFetch = vi.fn(async () => new Response(
+        JSON.stringify({ error: { field: 'model', message: `rejected for Authorization: Bearer ${fakeKey}` } }),
+        { status: 422, headers: { 'Content-Type': 'application/json' } },
+      ));
+      const { createJevHttpGateway } = await import('../src/adapters/jev-http-gateway.js');
+      const gateway = createJevHttpGateway({ apiKey: fakeKey, fetch: echoingFetch as unknown as typeof fetch });
+      const evaluation = createJevEvaluationPort(gateway);
+      const output = captureOutput();
+
+      const exitCode = await runCli(['audit', '--evaluate', '--json'], output.io, {
+        audit: async (request) => runAudit(request, realPorts(evaluation)),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(output.lines[0]).not.toContain(fakeKey);
+      const parsed = JSON.parse(output.lines[0] ?? '') as { totals: { failed: number }; diagnostics: readonly { message: string }[] };
+      expect(parsed.totals.failed).toBe(1);
+      expect(parsed.diagnostics.some((diagnostic) => diagnostic.message.includes('request'))).toBe(true);
+      expect(parsed.diagnostics.every((diagnostic) => !diagnostic.message.includes(fakeKey))).toBe(true);
+    });
+  });
+
+  describe('--evaluate (human-readable text)', () => {
+    it('prints a terminal summary with status counts, skipped/failed, usage tokens, model, and a visible diagnostics block (never hiding a failure behind a bare count)', async () => {
+      const output = captureOutput();
+      const audit: AuditResult = {
+        rootDir: '/workspace',
+        files: [],
+        excluded: [],
+        diagnostics: [{
+          code: 'evaluation-failed',
+          message: 'Unable to evaluate test case tc:v1:x ("does x"): rate-limit: Jev rate limit exceeded (429) after 4 attempt(s).',
+          severity: 'error',
+          repositoryRelativePath: 'x.test.ts',
+        }],
+        totals: { files: 1, excluded: 0, testCases: 1, dynamicMetadata: 0, diagnostics: 1, ...zeroEvidenceTotals },
+        reportingOnly: true,
+        evaluation: {
+          classifications: [],
+          totals: {
+            evaluated: 0,
+            failed: 1,
+            skipped: { total: 0, byReason: { skip: 0, todo: 0, 'evidence-unavailable': 0 } },
+            usage: { inputTokens: 0, outputTokens: 0 },
+            statusCounts: { healthy: 0, weak: 0, misleading: 0, 'needs-review': 0 },
+            respondedModel: undefined,
+            modelMismatches: 0,
+          },
+        },
+      };
+
+      const exitCode = await runCli(['audit', '--evaluate'], output.io, { audit: async () => audit });
+
+      expect(exitCode).toBe(0);
+      expect(output.lines).toHaveLength(1);
+      const report = output.lines[0] ?? '';
+      expect(report).toContain('jev-1.13.0');
+      expect(report).toContain('(none — no evaluation succeeded)');
+      expect(report).toContain('Evaluated: 0');
+      expect(report).toContain('Failed: 1');
+      expect(report).toContain('Diagnostics:');
+      expect(report).toContain('evaluation-failed');
+      expect(report).toContain('tc:v1:x');
+    });
+
+    it('reports "Diagnostics: none" and zeroed totals when nothing failed and nothing was evaluated', async () => {
+      const output = captureOutput();
+      const audit: AuditResult = {
+        rootDir: '.',
+        files: [],
+        excluded: [],
+        diagnostics: [],
+        totals: { files: 0, excluded: 0, testCases: 0, dynamicMetadata: 0, diagnostics: 0, ...zeroEvidenceTotals },
+        reportingOnly: true,
+      };
+
+      const exitCode = await runCli(['audit', '--evaluate'], output.io, { audit: async () => audit });
+
+      expect(exitCode).toBe(0);
+      const report = output.lines[0] ?? '';
+      expect(report).toContain('Diagnostics: none');
+      expect(report).toContain('Evaluated: 0');
+      expect(report).toContain('Failed: 0');
+    });
   });
 });

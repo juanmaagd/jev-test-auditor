@@ -1,4 +1,8 @@
 import type {
+  ClassificationResult,
+  OverallClassificationStatus,
+} from './classification.js';
+import type {
   ConfigurationOverrides,
   ResolvedConfiguration,
 } from './config.js';
@@ -8,6 +12,7 @@ import type {
   DiscoveryResult,
   ExcludedTestFile,
 } from './discovery.js';
+import type { DryRunSkippedTotals } from './estimate.js';
 import type {
   TestExtractionRequest,
   TestExtractionResult,
@@ -75,11 +80,47 @@ export interface AuditEvidencePort {
   build(request: AuditEvidenceBuildRequest): Promise<AuditEvidenceBuildResult>;
 }
 
+/** One evaluable test case and its evidence, ready to be judged (Phase 4, task P4-4). */
+export interface AuditEvaluationRequest {
+  readonly testCase: TestCase;
+  readonly bundle: EvidenceBundle;
+}
+
+/**
+ * The Jev evaluation port (Phase 4, task P4-4): builds the request, calls
+ * the gateway, and classifies the result for exactly one evaluable test
+ * case. Production is `src/adapters/jev-evaluation-port.ts`, composing
+ * `buildJevRequest`, a `JevGatewayPort`, and `classifyEvaluation` over the
+ * shipped `RUBRIC_V1`/`CLASSIFICATION_POLICY_V1`.
+ *
+ * **This port is the entire opt-in gate.** `runAudit` (see {@link AuditPorts.evaluation})
+ * evaluates every evaluable test case if and only if this port is present on
+ * `AuditPorts`; when it is `undefined`, evaluation is skipped entirely —
+ * `runAudit` never constructs a gateway, reads an API key, or reaches the
+ * network on its own. The CLI composition root is responsible for
+ * constructing this port lazily, only when `--evaluate` was actually
+ * requested (`createJevHttpGateway` validates the API key eagerly, so
+ * constructing it unconditionally would turn every offline run into a
+ * configuration error).
+ *
+ * A rejected promise from `evaluate` is a single test case's failure, never
+ * the whole run's: `runAudit` isolates it into one `evaluation-failed`
+ * diagnostic naming the test case id and the error's typed kind (never the
+ * API key or the request body) and simply records no classification for
+ * that test case — uncertainty is not quality, so a failure is never
+ * represented as a fabricated verdict.
+ */
+export interface AuditEvaluationPort {
+  evaluate(request: AuditEvaluationRequest): Promise<ClassificationResult>;
+}
+
 export interface AuditPorts {
   readonly discovery: AuditDiscoveryPort;
   readonly sourceReader: AuditSourceReaderPort;
   readonly extractor: AuditExtractorPort;
   readonly evidence: AuditEvidencePort;
+  /** Opt-in (Phase 4, task P4-4): see {@link AuditEvaluationPort}'s own doc for the full opt-in contract. */
+  readonly evaluation?: AuditEvaluationPort;
 }
 
 export type AuditRequest = ResolvedConfiguration;
@@ -117,6 +158,44 @@ export interface AuditTotals {
   readonly evidenceUnresolved: number;
 }
 
+/**
+ * Evaluation totals (Phase 4, task P4-4). `evaluated`, `failed`, and
+ * `skipped` always sum to the total number of test cases `classifyTestCase`
+ * (see `src/domain/estimate.ts`) considered across the whole run: `skipped`
+ * is never evaluated at all (a static `skip`/`todo` modifier or no built
+ * evidence bundle); `failed` was attempted but its gateway call or
+ * classification threw; `evaluated` succeeded and has a
+ * {@link ClassificationResult} in `classifications`. `modelMismatches`
+ * counts evaluated test cases whose `model.matchesPin` is `false` — the
+ * verified provider contract requires this to be reported, never hidden
+ * (Phase 4 Scope), and a single "first success" `respondedModel` alone
+ * would silently hide a mismatch on a later call.
+ */
+export interface AuditEvaluationTotals {
+  readonly evaluated: number;
+  readonly failed: number;
+  readonly skipped: DryRunSkippedTotals;
+  readonly usage: { readonly inputTokens: number; readonly outputTokens: number };
+  readonly statusCounts: Readonly<Record<OverallClassificationStatus, number>>;
+  /** The `model.responded` of the first successful evaluation, in submission order; `undefined` when none succeeded. Not a claim that every evaluation responded with the same model — see `modelMismatches`. */
+  readonly respondedModel: string | undefined;
+  readonly modelMismatches: number;
+}
+
+/**
+ * The full evaluation outcome for one audit run (Phase 4, task P4-4).
+ * `classifications` holds one entry per successfully evaluated test case,
+ * in the same deterministic file-then-test-case order as `AuditResult.files`
+ * regardless of which gateway call actually completed first (see
+ * `runBoundedPool` in `src/application/audit.ts`) — never sorted or
+ * reordered afterward, and never containing an entry for a failed or
+ * skipped test case.
+ */
+export interface AuditEvaluationResult {
+  readonly classifications: readonly ClassificationResult[];
+  readonly totals: AuditEvaluationTotals;
+}
+
 export interface AuditResult {
   readonly rootDir: string;
   readonly files: readonly AuditFileResult[];
@@ -124,6 +203,8 @@ export interface AuditResult {
   readonly diagnostics: readonly AuditDiagnostic[];
   readonly totals: AuditTotals;
   readonly reportingOnly: true;
+  /** `undefined` unless `--evaluate` was requested (i.e. `AuditPorts.evaluation` was present) — see {@link AuditEvaluationPort}'s doc for the full opt-in contract. */
+  readonly evaluation?: AuditEvaluationResult;
 }
 
 export type AuditConfigurationOverrides = ConfigurationOverrides;

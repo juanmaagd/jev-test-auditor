@@ -46,6 +46,12 @@ function installedBinStatus(binPath: string, args: readonly string[], cwd: strin
   return spawnSync(invocation.command, [...invocation.args], { cwd, encoding: 'utf8' }).status;
 }
 
+function installedBinRun(binPath: string, args: readonly string[], cwd: string): { readonly status: number | null; readonly stdout: string } {
+  const invocation = installedBinInvocation(binPath, args);
+  const result = spawnSync(invocation.command, [...invocation.args], { cwd, encoding: 'utf8' });
+  return { status: result.status, stdout: result.stdout };
+}
+
 function npmCommand(): string {
   return process.platform === 'win32' ? 'npm.cmd' : 'npm';
 }
@@ -264,9 +270,35 @@ describe('packed installed package', () => {
       expect(dryRunSummary.estimatedUsd.min).toBeGreaterThan(0);
       expect(dryRunSummary.estimatedUsd.min).toBeLessThanOrEqual(dryRunSummary.estimatedUsd.max);
 
-      // Flag-combination usage errors: --json without --dry-run, and --dry-run with --inspect-payloads.
+      // Flag-combination usage errors: --json without --dry-run/--evaluate, --dry-run with --inspect-payloads,
+      // --dry-run with --evaluate, and --evaluate with --inspect-payloads.
       expect(installedBinStatus(binPath, ['audit', '--json'], fixtureRoot)).toBe(1);
       expect(installedBinStatus(binPath, ['audit', '--dry-run', '--inspect-payloads'], fixtureRoot)).toBe(1);
+      expect(installedBinStatus(binPath, ['audit', '--dry-run', '--evaluate'], fixtureRoot)).toBe(1);
+      expect(installedBinStatus(binPath, ['audit', '--evaluate', '--inspect-payloads'], fixtureRoot)).toBe(1);
+      await expect(access(join(fixtureRoot, 'executed.marker'))).rejects.toThrow();
+
+      // Offline default and --evaluate's key requirement, run through the installed binary itself
+      // (Phase 4, task P4-4). TYPESAFE_API_KEY is deleted from THIS process before spawning so the
+      // child, which inherits process.env by default, never sees a real key — a missed delete here
+      // would risk a real billed network call from this suite.
+      const savedKey = process.env['TYPESAFE_API_KEY'];
+      delete process.env['TYPESAFE_API_KEY'];
+      try {
+        const plainAudit = execInstalledBin(binPath, ['audit'], fixtureRoot);
+        expect(JSON.parse(plainAudit.trim().split(/\r?\n/u)[0] ?? '')).toMatchObject({ reportingOnly: true });
+
+        const evaluateWithoutKey = installedBinRun(binPath, ['audit', '--evaluate'], fixtureRoot);
+        expect(evaluateWithoutKey.status).toBe(1);
+        expect(evaluateWithoutKey.stdout).toContain('--evaluate');
+        expect(evaluateWithoutKey.stdout).toContain('TYPESAFE_API_KEY');
+
+        const evaluateJsonWithoutKey = installedBinRun(binPath, ['audit', '--evaluate', '--json'], fixtureRoot);
+        expect(evaluateJsonWithoutKey.status).toBe(1);
+        expect(evaluateJsonWithoutKey.stdout).toContain('TYPESAFE_API_KEY');
+      } finally {
+        if (savedKey === undefined) delete process.env['TYPESAFE_API_KEY']; else process.env['TYPESAFE_API_KEY'] = savedKey;
+      }
       await expect(access(join(fixtureRoot, 'executed.marker'))).rejects.toThrow();
     } finally {
       await rm(temporaryRoot, { recursive: true, force: true });

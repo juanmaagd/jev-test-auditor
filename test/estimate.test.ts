@@ -3,10 +3,12 @@ import {
   classifyTestCase,
   estimateDryRun,
   JEV_ESTIMATE_SNAPSHOT,
+  JEV_VERIFIED_RATE_LIMITS,
   validateJevEstimateSnapshot,
   type DryRunFileInput,
   type JevEstimateSnapshot,
 } from '../src/domain/estimate.js';
+import { JEV_MODEL_ID } from '../src/domain/rubric.js';
 import {
   buildEvidenceBundle,
   canonicalizeEvidenceBundle,
@@ -65,10 +67,10 @@ function smallBundle(testCaseId: string): EvidenceBundle {
 }
 
 describe('JEV_ESTIMATE_SNAPSHOT', () => {
-  it('carries the verified Jev 1.13 pricing/overhead facts', () => {
+  it('carries the verified Jev 1.13.0 pricing/overhead facts', () => {
     expect(JEV_ESTIMATE_SNAPSHOT).toEqual({
       version: 1,
-      model: 'jev-1.13',
+      model: 'jev-1.13.0',
       asOf: '2026-09-19',
       usdPerMillionInputTokens: 0.042,
       outputTokensBilled: false,
@@ -79,8 +81,21 @@ describe('JEV_ESTIMATE_SNAPSHOT', () => {
     });
   });
 
+  it('pins model to the exact JEV_MODEL_ID constant (identity, not a re-typed literal) so the estimator can never silently drift from the rubric pin', () => {
+    expect(JEV_ESTIMATE_SNAPSHOT.model).toBe(JEV_MODEL_ID);
+  });
+
   it('validates without throwing', () => {
     expect(() => validateJevEstimateSnapshot(JEV_ESTIMATE_SNAPSHOT)).not.toThrow();
+  });
+});
+
+describe('JEV_VERIFIED_RATE_LIMITS', () => {
+  it('carries the verified TypeSafe/Jev provider rate limits (2026-09-20, docs.typesafe.ai/models)', () => {
+    expect(JEV_VERIFIED_RATE_LIMITS).toEqual({
+      tokensPerSecond: 250_000,
+      requestsPerMinute: 1_200,
+    });
   });
 });
 
@@ -199,7 +214,7 @@ describe('estimateDryRun', () => {
 
     expect(result).toEqual({
       snapshotVersion: 1,
-      model: 'jev-1.13',
+      model: 'jev-1.13.0',
       asOf: '2026-09-19',
       discovered: 0,
       evaluable: 0,
@@ -250,7 +265,7 @@ describe('estimateDryRun', () => {
 
       expect(result).toEqual({
         snapshotVersion: 1,
-        model: 'jev-1.13',
+        model: 'jev-1.13.0',
         asOf: '2026-09-19',
         discovered: 4,
         evaluable: 1,

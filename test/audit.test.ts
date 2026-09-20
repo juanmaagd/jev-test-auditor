@@ -1,15 +1,19 @@
 import { describe, expect, it } from 'vitest';
 import { runAudit } from '../src/index.js';
 import type {
+  AuditEvaluationPort,
+  AuditEvaluationRequest,
   AuditEvidenceBuildRequest,
   AuditEvidenceBuildResult,
   AuditPorts,
   AuditRequest,
 } from '../src/domain/audit.js';
+import type { ClassificationResult, OverallClassificationStatus } from '../src/domain/classification.js';
 import type { DiscoveredTestFile, DiscoveryResult } from '../src/domain/discovery.js';
 import type { TestExtractionResult } from '../src/domain/extraction.js';
 import { buildEvidenceBundle, DEFAULT_EVIDENCE_BUDGET, type EvidenceBundle } from '../src/domain/evidence.js';
-import type { TestCase, TestCaseId } from '../src/domain/test-understanding.js';
+import { JevRateLimitError } from '../src/domain/jev-gateway.js';
+import type { TestCase, TestCaseId, TestModifierKind } from '../src/domain/test-understanding.js';
 
 const configuration: AuditRequest = {
   rootDir: '/repo',
@@ -68,6 +72,30 @@ function twoTestCases(name: string): readonly TestCase[] {
     { ...base, id: `tc:v1:${name}-1` as TestCaseId, name: `${name}-1` },
     { ...base, id: `tc:v1:${name}-2` as TestCaseId, name: `${name}-2` },
   ];
+}
+
+/** Duplicates one extracted test case into `count` independent ones (distinct id/name), for evaluation-wiring tests that need several evaluable test cases in one file. */
+function manyTestCases(name: string, count: number): readonly TestCase[] {
+  const base = extraction(name).testCases[0];
+  if (base === undefined) throw new Error('expected a base test case');
+  return Array.from({ length: count }, (_unused, index) => ({
+    ...base,
+    id: `tc:v1:${name}-${index + 1}` as TestCaseId,
+    name: `${name}-${index + 1}`,
+  }));
+}
+
+function testCaseWithModifiers(id: string, modifierKinds: readonly TestModifierKind[], repositoryRelativePath = 'a.test.ts'): TestCase {
+  const base = extraction('modified').testCases[0];
+  if (base === undefined) throw new Error('expected a base test case');
+  const span = base.span;
+  return {
+    ...base,
+    id: id as TestCaseId,
+    name: id,
+    repositoryRelativePath,
+    modifiers: modifierKinds.map((kind) => ({ kind, span })),
+  };
 }
 
 /** Default evidence build: one empty bundle per test case, in order, no diagnostics. Overridable per test. */
@@ -328,5 +356,224 @@ describe('audit application', () => {
       repositoryRelativePath: 'multi.test.ts',
     }));
     expect(result.totals.evidenceBundles).toBe(1);
+  });
+});
+
+// --- Evaluation wiring (Phase 4, task P4-4) --------------------------------
+
+function classificationFor(
+  testCaseId: TestCaseId,
+  overrides: Partial<{
+    status: OverallClassificationStatus;
+    inputTokens: number;
+    outputTokens: number;
+    responded: string;
+    matchesPin: boolean;
+  }> = {},
+): ClassificationResult {
+  return {
+    testCaseId,
+    repositoryRelativePath: 'a.test.ts',
+    name: String(testCaseId),
+    status: overrides.status ?? 'healthy',
+    dimensions: [],
+    findings: [],
+    policyVersion: 1,
+    rubricVersion: 1,
+    model: {
+      requested: 'jev-1.13.0',
+      responded: overrides.responded ?? 'jev-1.13.0',
+      matchesPin: overrides.matchesPin ?? true,
+    },
+    usage: { inputTokens: overrides.inputTokens ?? 10, outputTokens: overrides.outputTokens ?? 0 },
+  };
+}
+
+/** A stub `AuditEvaluationPort` whose `evaluate` behavior is fully controlled per test case id. */
+function stubEvaluationPort(
+  handler: (request: AuditEvaluationRequest) => Promise<ClassificationResult>,
+): AuditEvaluationPort {
+  return { evaluate: handler };
+}
+
+describe('evaluation wiring (--evaluate)', () => {
+  it('produces no evaluation result at all when ports.evaluation is not provided (the entire opt-in gate)', async () => {
+    const discovery: DiscoveryResult = { files: [discovered('a.test.ts')], excluded: [], diagnostics: [] };
+
+    const result = await runAudit(configuration, portsFor(
+      discovery,
+      async () => 'source',
+      () => extraction('a'),
+    ));
+
+    expect(result.evaluation).toBeUndefined();
+  });
+
+  it('evaluates only evaluable test cases, matching classifyTestCase\'s skip/todo/evidence-unavailable definition exactly (shared, not duplicated)', async () => {
+    const evaluableCase = testCaseWithModifiers('tc:v1:eval-1', [], 'mixed.test.ts');
+    const skipCase = testCaseWithModifiers('tc:v1:skip-1', ['skip'], 'mixed.test.ts');
+    const todoCase = testCaseWithModifiers('tc:v1:todo-1', ['todo'], 'mixed.test.ts');
+    const missingBundleCase = testCaseWithModifiers('tc:v1:missing-1', [], 'mixed.test.ts');
+    const discovery: DiscoveryResult = { files: [discovered('mixed.test.ts')], excluded: [], diagnostics: [] };
+    const evaluated: TestCaseId[] = [];
+    const evaluation = stubEvaluationPort(async (request) => {
+      evaluated.push(request.testCase.id);
+      return classificationFor(request.testCase.id);
+    });
+
+    const result = await runAudit(configuration, {
+      discovery: { discover: async () => discovery },
+      sourceReader: { read: async () => 'source' },
+      extractor: {
+        extract: () => ({
+          testCases: [evaluableCase, skipCase, todoCase, missingBundleCase],
+          dynamicMetadata: [],
+          diagnostics: [],
+        }),
+      },
+      evidence: {
+        build: async (request) => ({
+          bundles: request.testCases
+            .filter((testCase) => testCase.id !== missingBundleCase.id)
+            .map((testCase) => emptyBundle(testCase.id)),
+          diagnostics: [],
+        }),
+      },
+      evaluation,
+    });
+
+    expect(evaluated).toEqual([evaluableCase.id]);
+    expect(result.evaluation?.classifications.map((entry) => entry.testCaseId)).toEqual([evaluableCase.id]);
+    expect(result.evaluation?.totals).toMatchObject({
+      evaluated: 1,
+      failed: 0,
+      skipped: { total: 3, byReason: { skip: 1, todo: 1, 'evidence-unavailable': 1 } },
+    });
+  });
+
+  it('isolates one failed evaluation to an evaluation-failed diagnostic naming the test case id and the typed error kind, produces no classification for it, and never counts it as healthy', async () => {
+    const okCase = testCaseWithModifiers('tc:v1:iso-ok', [], 'iso.test.ts');
+    const failingCase = testCaseWithModifiers('tc:v1:iso-fail', [], 'iso.test.ts');
+    const discovery: DiscoveryResult = { files: [discovered('iso.test.ts')], excluded: [], diagnostics: [] };
+    const evaluation = stubEvaluationPort(async (request) => {
+      if (request.testCase.id === failingCase.id) throw new JevRateLimitError(4);
+      return classificationFor(request.testCase.id, { status: 'healthy' });
+    });
+
+    const result = await runAudit(configuration, {
+      discovery: { discover: async () => discovery },
+      sourceReader: { read: async () => 'source' },
+      extractor: { extract: () => ({ testCases: [okCase, failingCase], dynamicMetadata: [], diagnostics: [] }) },
+      evidence: {
+        build: async (request) => ({
+          bundles: request.testCases.map((testCase) => emptyBundle(testCase.id)),
+          diagnostics: [],
+        }),
+      },
+      evaluation,
+    });
+
+    expect(result.evaluation?.classifications.map((entry) => entry.testCaseId)).toEqual([okCase.id]);
+    expect(result.evaluation?.totals).toMatchObject({ evaluated: 1, failed: 1 });
+    expect(result.evaluation?.totals.statusCounts).toEqual({ healthy: 1, weak: 0, misleading: 0, 'needs-review': 0 });
+    const diagnostic = result.diagnostics.find((entry) => entry.code === 'evaluation-failed');
+    expect(diagnostic).toBeDefined();
+    expect(diagnostic?.message).toContain(failingCase.id);
+    expect(diagnostic?.message).toContain(failingCase.name);
+    expect(diagnostic?.message).toContain('rate-limit');
+    expect(diagnostic?.repositoryRelativePath).toBe('iso.test.ts');
+    // Parity with `evidence-selection-failed`: the same diagnostic also lands in the owning file's own diagnostics.
+    const file = result.files.find((entry) => entry.discovered.repositoryRelativePath === 'iso.test.ts');
+    expect(file?.diagnostics).toContainEqual(expect.objectContaining({ code: 'evaluation-failed' }));
+  });
+
+  it('never fabricates a verdict on failure: a failing test case contributes zero entries to classifications and zero to statusCounts', async () => {
+    const failingCase = testCaseWithModifiers('tc:v1:only-fail', [], 'fail.test.ts');
+    const discovery: DiscoveryResult = { files: [discovered('fail.test.ts')], excluded: [], diagnostics: [] };
+    const evaluation = stubEvaluationPort(async () => { throw new Error('boom'); });
+
+    const result = await runAudit(configuration, {
+      discovery: { discover: async () => discovery },
+      sourceReader: { read: async () => 'source' },
+      extractor: { extract: () => ({ testCases: [failingCase], dynamicMetadata: [], diagnostics: [] }) },
+      evidence: { build: async (request) => ({ bundles: request.testCases.map((testCase) => emptyBundle(testCase.id)), diagnostics: [] }) },
+      evaluation,
+    });
+
+    expect(result.evaluation?.classifications).toEqual([]);
+    expect(result.evaluation?.totals.statusCounts).toEqual({ healthy: 0, weak: 0, misleading: 0, 'needs-review': 0 });
+    expect(result.evaluation?.totals.failed).toBe(1);
+  });
+
+  it('reports total usage input/output tokens, status counts, and a model mismatch count without letting an early success hide a later mismatch', async () => {
+    const cases = manyTestCases('usage', 3);
+    const discovery: DiscoveryResult = { files: [discovered('usage.test.ts')], excluded: [], diagnostics: [] };
+    const responses = new Map<TestCaseId, ClassificationResult>([
+      [cases[0]!.id, classificationFor(cases[0]!.id, { status: 'healthy', inputTokens: 100, outputTokens: 1, matchesPin: true, responded: 'jev-1.13.0' })],
+      [cases[1]!.id, classificationFor(cases[1]!.id, { status: 'weak', inputTokens: 200, outputTokens: 2, matchesPin: false, responded: 'jev-1.14.0' })],
+      [cases[2]!.id, classificationFor(cases[2]!.id, { status: 'misleading', inputTokens: 300, outputTokens: 3, matchesPin: true, responded: 'jev-1.13.0' })],
+    ]);
+    const evaluation = stubEvaluationPort(async (request) => {
+      const response = responses.get(request.testCase.id);
+      if (response === undefined) throw new Error('unexpected test case');
+      return response;
+    });
+
+    const result = await runAudit(configuration, {
+      discovery: { discover: async () => discovery },
+      sourceReader: { read: async () => 'source' },
+      extractor: { extract: () => ({ testCases: [...cases], dynamicMetadata: [], diagnostics: [] }) },
+      evidence: { build: async (request) => ({ bundles: request.testCases.map((testCase) => emptyBundle(testCase.id)), diagnostics: [] }) },
+      evaluation,
+    });
+
+    expect(result.evaluation?.totals).toEqual({
+      evaluated: 3,
+      failed: 0,
+      skipped: { total: 0, byReason: { skip: 0, todo: 0, 'evidence-unavailable': 0 } },
+      usage: { inputTokens: 600, outputTokens: 6 },
+      statusCounts: { healthy: 1, weak: 1, misleading: 1, 'needs-review': 0 },
+      respondedModel: 'jev-1.13.0',
+      modelMismatches: 1,
+    });
+  });
+
+  it('runs evaluation through a fixed-size concurrency pool (from configuration.concurrency), keeping results in deterministic submission order and never exceeding the configured bound even when later items resolve first', async () => {
+    const cases = manyTestCases('pool', 4);
+    const discovery: DiscoveryResult = { files: [discovered('pool.test.ts')], excluded: [], diagnostics: [] };
+    const active = { count: 0, max: 0 };
+    // Deliberately staggered so the FIRST-submitted item finishes LAST and the
+    // second-submitted item finishes first: a correct pool must still return
+    // results in submission order; an unbounded implementation would start
+    // all four `evaluate` calls immediately (four workers were spun up in
+    // the very own author's original mutation of dropping the pool bound),
+    // which `active.max` below would catch even before any timer fires.
+    const delaysMs: Record<string, number> = {
+      [cases[0]!.id]: 30,
+      [cases[1]!.id]: 5,
+      [cases[2]!.id]: 20,
+      [cases[3]!.id]: 10,
+    };
+    const evaluation = stubEvaluationPort(async (request) => {
+      active.count += 1;
+      active.max = Math.max(active.max, active.count);
+      try {
+        await new Promise((resolve) => { setTimeout(resolve, delaysMs[request.testCase.id] ?? 0); });
+        return classificationFor(request.testCase.id);
+      } finally {
+        active.count -= 1;
+      }
+    });
+
+    const result = await runAudit({ ...configuration, concurrency: 2 }, {
+      discovery: { discover: async () => discovery },
+      sourceReader: { read: async () => 'source' },
+      extractor: { extract: () => ({ testCases: [...cases], dynamicMetadata: [], diagnostics: [] }) },
+      evidence: { build: async (request) => ({ bundles: request.testCases.map((testCase) => emptyBundle(testCase.id)), diagnostics: [] }) },
+      evaluation,
+    });
+
+    expect(result.evaluation?.classifications.map((entry) => entry.testCaseId)).toEqual(cases.map((testCase) => testCase.id));
+    expect(active.max).toBeLessThanOrEqual(2);
   });
 });

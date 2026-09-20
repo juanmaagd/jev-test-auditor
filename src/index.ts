@@ -102,6 +102,7 @@ export {
   estimateDryRun,
   estimateTokensFromBytes,
   JEV_ESTIMATE_SNAPSHOT,
+  JEV_VERIFIED_RATE_LIMITS,
   validateJevEstimateSnapshot,
   type DryRunClassification,
   type DryRunEstimate,
@@ -179,6 +180,7 @@ export {
   type JevRetryConfig,
   type JevSleep,
 } from './adapters/jev-http-gateway.js';
+export { createJevEvaluationPort } from './adapters/jev-evaluation-port.js';
 
 export {
   CLASSIFICATION_LEVELS,
@@ -201,6 +203,10 @@ export { runAudit } from './application/audit.js';
 export {
   type AuditDiagnostic,
   type AuditDiscoveryPort,
+  type AuditEvaluationPort,
+  type AuditEvaluationRequest,
+  type AuditEvaluationResult,
+  type AuditEvaluationTotals,
   type AuditEvidenceBuildRequest,
   type AuditEvidenceBuildResult,
   type AuditEvidencePort,

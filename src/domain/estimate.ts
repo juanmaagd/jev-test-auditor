@@ -1,4 +1,5 @@
 import { canonicalizeEvidenceBundle, utf8ByteLength, type EvidenceBundle } from './evidence.js';
+import { JEV_MODEL_ID } from './rubric.js';
 import type { TestCase, TestCaseId } from './test-understanding.js';
 
 /**
@@ -41,16 +42,21 @@ export interface JevEstimateSnapshot {
 }
 
 /**
- * Fixed facts as of {@link JevEstimateSnapshot.asOf}: Jev `1.13` (TypeSafe),
- * USD 0.042 per 1,000,000 input tokens, output tokens unbilled, one request
- * per evaluable test case (one state, all rubric questions batched), and a
- * 64k-token provider request ceiling. See `requestOverheadTokens`'s own doc
- * for how its provisional range was derived; every other numeric fact here
- * is a verified pricing/provider fact, not a guess.
+ * Fixed facts as of {@link JevEstimateSnapshot.asOf}: Jev {@link JEV_MODEL_ID}
+ * (TypeSafe), USD 0.042 per 1,000,000 input tokens, output tokens unbilled,
+ * one request per evaluable test case (one state, all rubric questions
+ * batched), and a 64k-token provider request ceiling. `model` reuses
+ * {@link JEV_MODEL_ID} directly (never a re-typed literal) so the estimator
+ * can never silently drift from the exact pinned model the rubric and every
+ * real request use (Phase 4, task P4-4 alignment fix — the estimator
+ * previously carried the non-existent alias `jev-1.13`). See
+ * `requestOverheadTokens`'s own doc for how its provisional range was
+ * derived; every other numeric fact here is a verified pricing/provider
+ * fact, not a guess.
  */
 export const JEV_ESTIMATE_SNAPSHOT: JevEstimateSnapshot = {
   version: 1,
-  model: 'jev-1.13',
+  model: JEV_MODEL_ID,
   asOf: '2026-09-19',
   usdPerMillionInputTokens: 0.042,
   outputTokensBilled: false,
@@ -58,6 +64,21 @@ export const JEV_ESTIMATE_SNAPSHOT: JevEstimateSnapshot = {
   requestOverheadTokens: { min: 620, max: 2440 },
   maxFollowUpsPerTest: 1,
   requestTokenCeiling: 64_000,
+};
+
+/**
+ * Verified TypeSafe/Jev provider rate limits (2026-09-20, docs.typesafe.ai/models):
+ * 250,000 input tokens per second and 1,200 requests per minute. Recorded
+ * here, next to {@link JEV_ESTIMATE_SNAPSHOT}, as documented facts only —
+ * Phase 4 does no adaptive throttling against them (Phase 5's "resilience"
+ * concern per `odd/tasks/phase-4-jev-evaluation.md`'s Decisions: "Concurrency
+ * in this phase is a fixed bounded pool from existing `concurrency`
+ * configuration, with no adaptive throttling"); nothing in this phase reads
+ * or enforces these values at runtime.
+ */
+export const JEV_VERIFIED_RATE_LIMITS: { readonly tokensPerSecond: number; readonly requestsPerMinute: number } = {
+  tokensPerSecond: 250_000,
+  requestsPerMinute: 1_200,
 };
 
 function isPositiveFinite(value: number): boolean {
