@@ -25,6 +25,8 @@ const SRC_ROOT = join(process.cwd(), 'src');
 const AUDIT_ENTRY = join(SRC_ROOT, 'cli', 'index.ts');
 const BENCHMARK_ENTRY = join(SRC_ROOT, 'cli', 'benchmark.ts');
 const ORACLE_RUNNER = join(SRC_ROOT, 'adapters', 'oracle-runner.ts');
+const AUDIT_SQLITE_STORE = join(SRC_ROOT, 'adapters', 'sqlite-audit-store.ts');
+const CACHE_KEY = join(SRC_ROOT, 'adapters', 'cache-key.ts');
 
 function moduleSpecifier(expression: ts.Expression | undefined): string | undefined {
   return expression && (ts.isStringLiteral(expression) || ts.isNoSubstitutionTemplateLiteral(expression))
@@ -88,5 +90,29 @@ describe('benchmark execution is unreachable from audit', () => {
   it('DOES reach the oracle runner from the dedicated benchmark entry point (positive control — the check above is not vacuous)', async () => {
     const closure = await transitiveClosure(BENCHMARK_ENTRY);
     expect([...closure]).toContain(ORACLE_RUNNER);
+  });
+});
+
+/**
+ * Task P7-3's own structural proof of two hard constraints at once: the
+ * benchmark command's `--store` sampling can neither reach the user's real
+ * audit store (`sqlite-audit-store.ts`) nor its content-addressed cache
+ * (`cache-key.ts`) — see `src/adapters/benchmark-sample-port.ts`'s own doc.
+ * `src/cli/index.ts` (`audit`) DOES reach both (positive control — proven by
+ * the audit store's own extensive test suite already exercising them), so
+ * this negative assertion on `src/cli/benchmark.ts`'s closure cannot pass
+ * merely because either module is unreachable from anywhere.
+ */
+describe('benchmark --store cannot reach the audit store or its cache', () => {
+  it('DOES reach sqlite-audit-store.ts and cache-key.ts from the audit command\'s own entry point (positive control)', async () => {
+    const closure = await transitiveClosure(AUDIT_ENTRY);
+    expect([...closure]).toContain(AUDIT_SQLITE_STORE);
+    expect([...closure]).toContain(CACHE_KEY);
+  });
+
+  it('never reaches sqlite-audit-store.ts or cache-key.ts from the benchmark command\'s own entry point', async () => {
+    const closure = await transitiveClosure(BENCHMARK_ENTRY);
+    expect([...closure]).not.toContain(AUDIT_SQLITE_STORE);
+    expect([...closure]).not.toContain(CACHE_KEY);
   });
 });

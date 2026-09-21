@@ -19,6 +19,7 @@ import {
   type AuditStoreReadOnlyLookup,
 } from '../adapters/sqlite-audit-store.js';
 import { readApiKeyFromPrompt } from '../adapters/auth-prompt.js';
+import { NO_KEY_USAGE_MESSAGE, resolveEvaluationApiKey } from './api-key.js';
 import {
   deleteStoredCredentials,
   readStoredCredentials,
@@ -826,33 +827,9 @@ function parseAuditOptions(args: readonly string[]): ParsedAuditOptions | { read
   };
 }
 
-const NO_KEY_USAGE_MESSAGE = 'No TypeSafe API key is configured. Provide one with `jev-test-auditor auth login`, or set the TYPESAFE_API_KEY environment variable.';
-
-/**
- * Resolves the API key `--evaluate` should use: `TYPESAFE_API_KEY` first
- * (checked without ever touching the stored file, so CI's env-only setup
- * never pays for or risks a stored-file read), else the locally stored
- * file. A storage-side problem (insecure permissions, corrupt file) is
- * itself reported as the usage error rather than silently treated as "no
- * key" — a stray unusable stored file is a real, actionable problem, not
- * nothing.
- */
-async function resolveEvaluationApiKey(): Promise<{ readonly apiKey: string } | { readonly errorMessage: string }> {
-  const environmentApiKey = process.env['TYPESAFE_API_KEY']?.trim() ?? '';
-  if (environmentApiKey.length > 0) return { apiKey: environmentApiKey };
-
-  const paths = resolveAuthStoragePaths();
-  try {
-    const stored = await readStoredCredentials(paths);
-    const resolution = resolveApiKey({ environmentApiKey: undefined, stored });
-    return resolution === undefined ? { errorMessage: NO_KEY_USAGE_MESSAGE } : { apiKey: resolution.apiKey };
-  } catch (error) {
-    if (error instanceof AuthInsecurePermissionsError || error instanceof AuthCorruptCredentialsError) {
-      return { errorMessage: error.message };
-    }
-    throw error;
-  }
-}
+// `NO_KEY_USAGE_MESSAGE`/`resolveEvaluationApiKey` moved to `./api-key.js` (Phase 7, task P7-3):
+// shared verbatim with `src/cli/benchmark.ts`'s own `--store` sampling — see that module's own doc
+// for why it lives outside this file specifically.
 
 async function runAuthLogin(io: CliIo, dependencies: CliDependencies): Promise<number> {
   io.writeLine('Enter your TypeSafe API key. Input is hidden on an interactive terminal; otherwise one line is read from stdin.');
