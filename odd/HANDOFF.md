@@ -13,7 +13,7 @@ Seven of nine delivery phases are done. `docs/implementation-plan.md` is the aut
 | 8 Benchmark-review skill | Not started |
 | 9 Calibration and first release | Not started |
 
-**The first thing to decide.** `main` is at `dd0b454`. Phase 7 is eight commits ahead on `feat/metrics-independent-samples`, and `main` is an ancestor, so `git merge --ff-only 0b08167` from `main` integrates it with no merge commit. The chain also left six intermediate branches (`feat/phase-7-*`, `feat/corpus-expected-outcome`, `feat/metrics-*`); they are history, not work in progress. Nothing has ever been pushed and no pull request exists — there is no upstream configured.
+**Start from `main`.** Phase 7 was fast-forwarded into `main` on 2026-09-21, so `main` is at `3e97c53` and contains everything described here. The chain left several intermediate branches (`feat/phase-7-*`, `feat/corpus-expected-outcome`, `feat/metrics-*`); they are history, not work in progress, and you can ignore them. Nothing has ever been pushed and no pull request exists — there is no upstream configured, so pushing is a decision the user has not yet made.
 
 The working tree carries one unstaged change to `.gitignore` that belongs to the user, not to any task. Leave it alone. The untracked `.atl/` directory is also the user's.
 
