@@ -22,6 +22,7 @@ import type {
   DynamicMetadata,
   TestCase,
   TestCaseId,
+  TestFramework,
 } from './test-understanding.js';
 import type { EvidenceBudget, EvidenceBundle } from './evidence.js';
 import type { JevEvaluation } from './jev-gateway.js';
@@ -41,6 +42,22 @@ export interface AuditSourceReaderPort {
 
 export interface AuditExtractorPort {
   extract(request: TestExtractionRequest): TestExtractionResult;
+}
+
+/**
+ * `odd/tasks/jest-ambient-globals.md`: a fallback framework hint, consulted
+ * only for a file whose discovery-level attribution is `'unknown'` — e.g.
+ * ambient-global Jest specs (`describe`/`it`/`expect` with no
+ * `@jest/globals` import, NestJS's standard setup) whose file imports
+ * `frameworkForModule` (`src/adapters/test-extraction.ts`) can never
+ * attribute anything from. `resolve` reads the project's OWN configuration
+ * (the nearest `package.json`'s `jest` key, its `"test"` script, or a
+ * `jest.config.*` file's presence — see
+ * `src/adapters/jest-project-config.ts`) rather than the file's contents,
+ * so it takes only the repository-relative path, not source text.
+ */
+export interface AuditJestFrameworkHintPort {
+  resolve(repositoryRelativePath: string): Promise<Exclude<TestFramework, 'unknown'> | undefined>;
 }
 
 export interface AuditEvidenceBuildRequest {
@@ -660,6 +677,8 @@ export interface AuditPorts {
   readonly cacheKey?: AuditCacheKeyPort;
   /** Opt-in (Phase 6, task P6-3): see {@link AuditProgressPort}'s own doc for the full opt-in contract — deliberately independent of `store`. */
   readonly progress?: AuditProgressPort;
+  /** Opt-in (`odd/tasks/jest-ambient-globals.md`): see {@link AuditJestFrameworkHintPort}'s own doc for the full opt-in contract. Absent in a caller with no reason to read project config (most test doubles); `runAudit` behaves exactly as before when this is `undefined`. */
+  readonly jestFrameworkHint?: AuditJestFrameworkHintPort;
 }
 
 export type AuditRequest = ResolvedConfiguration;

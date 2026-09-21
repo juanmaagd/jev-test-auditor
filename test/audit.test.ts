@@ -291,6 +291,95 @@ describe('audit application', () => {
     expect(result.diagnostics).toContainEqual({ ...unsupportedFrameworkDiagnostic, repositoryRelativePath: 'bun.test.ts' });
   });
 
+  describe('jest project-config fallback (odd/tasks/jest-ambient-globals.md)', () => {
+    function portsWithJestHint(
+      discovery: DiscoveryResult,
+      resolveHint: (repositoryRelativePath: string) => Promise<'jest' | undefined>,
+    ): AuditPorts {
+      return {
+        discovery: { discover: async () => discovery },
+        sourceReader: { read: async () => 'source' },
+        extractor: {
+          extract: ({ repositoryRelativePath, frameworkHint }) => ({
+            testCases: [{
+              ...extraction(repositoryRelativePath).testCases[0]!,
+              framework: frameworkHint ?? 'unknown',
+            }],
+            dynamicMetadata: [],
+            diagnostics: [],
+          }),
+        },
+        evidence: { build: defaultEvidenceBuild },
+        jestFrameworkHint: { resolve: resolveHint },
+      };
+    }
+
+    it('corrects discovered.framework and the extracted framework from an unknown file via the project-config hint', async () => {
+      const discovery: DiscoveryResult = {
+        files: [{ repositoryRelativePath: 'ambient.test.ts', framework: 'unknown', frameworkEvidence: [] }],
+        excluded: [],
+        diagnostics: [],
+      };
+
+      const result = await runAudit(configuration, portsWithJestHint(discovery, async () => 'jest'));
+
+      const file = result.files.find((entry) => entry.discovered.repositoryRelativePath === 'ambient.test.ts');
+      expect(file?.discovered.framework).toBe('jest');
+      expect(file?.testCases[0]?.framework).toBe('jest');
+    });
+
+    it('never consults the hint port when discovery already attributed a framework from imports', async () => {
+      let calls = 0;
+      const discovery: DiscoveryResult = { files: [discovered('vitest-import.test.ts')], excluded: [], diagnostics: [] };
+
+      const result = await runAudit(configuration, portsWithJestHint(discovery, async () => { calls += 1; return 'jest'; }));
+
+      expect(calls).toBe(0);
+      const file = result.files.find((entry) => entry.discovered.repositoryRelativePath === 'vitest-import.test.ts');
+      expect(file?.discovered.framework).toBe('vitest');
+    });
+
+    it('leaves discovered.framework as unknown when the hint port itself finds nothing (e.g. a genuine Vitest project)', async () => {
+      const discovery: DiscoveryResult = {
+        files: [{ repositoryRelativePath: 'ambient.test.ts', framework: 'unknown', frameworkEvidence: [] }],
+        excluded: [],
+        diagnostics: [],
+      };
+
+      const result = await runAudit(configuration, portsWithJestHint(discovery, async () => undefined));
+
+      const file = result.files.find((entry) => entry.discovered.repositoryRelativePath === 'ambient.test.ts');
+      expect(file?.discovered.framework).toBe('unknown');
+      expect(file?.testCases[0]?.framework).toBe('unknown');
+    });
+
+    it('behaves exactly as before when no jestFrameworkHint port is provided at all', async () => {
+      const discovery: DiscoveryResult = {
+        files: [{ repositoryRelativePath: 'ambient.test.ts', framework: 'unknown', frameworkEvidence: [] }],
+        excluded: [],
+        diagnostics: [],
+      };
+      const ports: AuditPorts = {
+        discovery: { discover: async () => discovery },
+        sourceReader: { read: async () => 'source' },
+        extractor: {
+          extract: ({ repositoryRelativePath, frameworkHint }) => ({
+            testCases: [{ ...extraction(repositoryRelativePath).testCases[0]!, framework: frameworkHint ?? 'unknown' }],
+            dynamicMetadata: [],
+            diagnostics: [],
+          }),
+        },
+        evidence: { build: defaultEvidenceBuild },
+      };
+
+      const result = await runAudit(configuration, ports);
+
+      const file = result.files.find((entry) => entry.discovered.repositoryRelativePath === 'ambient.test.ts');
+      expect(file?.discovered.framework).toBe('unknown');
+      expect(file?.testCases[0]?.framework).toBe('unknown');
+    });
+  });
+
   it('isolates an evidence-build failure to its own file: emits one evidence-failed diagnostic with the file path, empties that file\'s evidence, and leaves its test cases and every other file untouched', async () => {
     const discovery: DiscoveryResult = {
       files: [discovered('broken-evidence.test.ts'), discovered('ok.test.ts')],

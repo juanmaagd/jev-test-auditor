@@ -6,6 +6,7 @@ import { computeDryRunCacheHits, runAudit } from '../application/audit.js';
 import { discoverTestFiles } from '../adapters/repository-discovery.js';
 import { readSourceFile } from '../adapters/source-reader.js';
 import { extractTestCases } from '../adapters/test-extraction.js';
+import { createJestFrameworkHintReader } from '../adapters/jest-project-config.js';
 import { createAuditCacheKeyPort } from '../adapters/cache-key.js';
 import { createAuditEvidencePort } from '../adapters/evidence-audit-port.js';
 import { createJevEvaluationPort } from '../adapters/jev-evaluation-port.js';
@@ -267,6 +268,7 @@ Options:
  * it is given.
  */
 function createProductionPorts(
+  rootDir: string,
   evaluationPort?: AuditEvaluationPort,
   storePort?: AuditStorePort,
   cacheKeyPort?: AuditCacheKeyPort,
@@ -277,6 +279,11 @@ function createProductionPorts(
     sourceReader: { read: readSourceFile },
     extractor: { extract: extractTestCases },
     evidence: createAuditEvidencePort(),
+    // `odd/tasks/jest-ambient-globals.md`: fresh per invocation, exactly like
+    // `createAuditEvidencePort()` above — its per-directory cache must live
+    // for exactly one audit run, for the same reason (see this function's
+    // own doc).
+    jestFrameworkHint: { resolve: createJestFrameworkHintReader(rootDir) },
     ...(evaluationPort === undefined ? {} : { evaluation: evaluationPort }),
     ...(storePort === undefined ? {} : { store: storePort }),
     ...(cacheKeyPort === undefined ? {} : { cacheKey: cacheKeyPort }),
@@ -1119,7 +1126,7 @@ export async function runCli(
       result = dependencies.audit === undefined
         ? await runAudit(
           configuration,
-          createProductionPorts(evaluationPort, storePort, cacheKeyPort, progressPort),
+          createProductionPorts(configuration.rootDir, evaluationPort, storePort, cacheKeyPort, progressPort),
           {
             fresh: parsed.fresh,
             ...(parsed.resume === undefined ? {} : { resume: parsed.resume }),

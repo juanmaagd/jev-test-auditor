@@ -777,13 +777,42 @@ export async function runAudit(
     }
 
     try {
+      // `odd/tasks/jest-ambient-globals.md`: `discovered.framework` already
+      // reflects every import-based signal discovery itself has (see
+      // `src/adapters/repository-discovery.ts`); `jestFrameworkHint` is
+      // consulted ONLY when that came back `'unknown'` — import-based
+      // attribution always wins, this is a fallback of last resort, exactly
+      // like `extractTestCases`'s own `bindings.frameworks[0] ??
+      // request.frameworkHint ?? 'unknown'` precedence (unchanged) already
+      // treats whatever hint it receives.
+      const configFrameworkHint = discovered.framework === 'unknown'
+        ? await ports.jestFrameworkHint?.resolve(discovered.repositoryRelativePath)
+        : undefined;
+      const frameworkHint = discovered.framework !== 'unknown' ? discovered.framework : (configFrameworkHint ?? 'unknown');
       const extraction = ports.extractor.extract({
         repositoryRelativePath: discovered.repositoryRelativePath,
         sourceText,
-        frameworkHint: discovered.framework,
+        frameworkHint,
       });
       const fileDiagnostics: Diagnostic[] = [...extraction.diagnostics];
       diagnostics.push(...extraction.diagnostics.map((diagnostic) => withPath(diagnostic, discovered.repositoryRelativePath)));
+      // The config hint, once it changes what `extractTestCases` actually
+      // attributed (carried on every one of this file's own test cases —
+      // they all share one `context.framework`, see `test-extraction.ts`),
+      // is also reflected back onto the `discovered` record this run
+      // reports: `AuditFileResult.discovered.framework` otherwise stays
+      // discovery's own stale `'unknown'` verbatim, and that field is what
+      // both the CLI's discovered-files line and the JSON/HTML report print
+      // (`src/cli/index.ts`, `src/domain/report.ts`) — not the per-test-case
+      // value. `frameworkEvidence` is deliberately left untouched: it has no
+      // `'config'` source (`FrameworkEvidenceSource` is `'import' |
+      // 'package'`, a `src/domain/discovery.ts` type this task's scope does
+      // not touch), so a config-attributed file reports `framework: 'jest'`
+      // with an empty `frameworkEvidence` — see README/technical-design.
+      const resolvedFramework = extraction.testCases[0]?.framework ?? discovered.framework;
+      const effectiveDiscovered = resolvedFramework === discovered.framework
+        ? discovered
+        : { ...discovered, framework: resolvedFramework };
 
       let evidence: readonly EvidenceBundle[] = [];
       if (extraction.testCases.length > 0) {
@@ -812,7 +841,7 @@ export async function runAudit(
       }
 
       results.push({
-        discovered,
+        discovered: effectiveDiscovered,
         testCases: extraction.testCases,
         dynamicMetadata: extraction.dynamicMetadata,
         diagnostics: fileDiagnostics,
