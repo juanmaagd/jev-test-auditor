@@ -4,14 +4,13 @@ Written 2026-09-21 for whoever picks this up next, in a fresh session. Read this
 
 ## Where things stand
 
-Seven of nine delivery phases are done. `docs/implementation-plan.md` is the authoritative plan and `README.md`'s delivery table mirrors it.
+Seven of nine delivery phases are complete on `main`, and Phase 8 is complete on branch `feat/phase-8-benchmark-review-skill`. `docs/implementation-plan.md` is the authoritative plan and `README.md`'s delivery table mirrors it.
 
 | Phase | State |
 | --- | --- |
-| 1 Foundation, 2 Test understanding, 3 Evidence, 4 Jev MVP, 5 Persistence, 6 Reporting | Complete, merged into `main` |
-| 7 Deterministic benchmarks | Complete, **not merged** |
-| 8 Benchmark-review skill | Not started |
-| 9 Calibration and first release | Not started |
+| 1 Foundation, 2 Test understanding, 3 Evidence, 4 Jev MVP, 5 Persistence, 6 Reporting, 7 Deterministic benchmarks | Complete, merged into `main` |
+| 8 Benchmark-review skill | Complete on `feat/phase-8-benchmark-review-skill` |
+| 9 Calibration and first release | Next |
 
 **Start from `main`.** Phase 7 was fast-forwarded into `main` on 2026-09-21, so `main` is at `3e97c53` and contains everything described here. The chain left several intermediate branches (`feat/phase-7-*`, `feat/corpus-expected-outcome`, `feat/metrics-*`); they are history, not work in progress, and you can ignore them. Nothing has ever been pushed and no pull request exists — there is no upstream configured, so pushing is a decision the user has not yet made.
 
