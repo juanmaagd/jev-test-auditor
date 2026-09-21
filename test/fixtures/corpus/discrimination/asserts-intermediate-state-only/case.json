@@ -1,0 +1,11 @@
+{
+  "id": "asserts-intermediate-state-only",
+  "operators": ["assert-incidental-interaction"],
+  "operatorRole": "descriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "The test asserts only on an intermediate counter increment without asserting on the final returned job status.",
+  "productionEffect": "Mutating `processBatch` to mark the job failed leaves this test passing; it is expected to keep passing under that production mutation.",
+  "expectedOutcome": "expected-to-keep-passing",
+  "testFile": "test.ts",
+  "productionFiles": ["batch-runner.ts"]
+}

@@ -1,0 +1,11 @@
+{
+  "id": "asserts-observable-thrown-error",
+  "operators": ["assert-incidental-interaction"],
+  "operatorRole": "prescriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "Replacing an assertion on the thrown domain error with an incidental logger spy leaves broken validation undetected.",
+  "productionEffect": "Mutating validation to allow negative values without throwing is expected to fail this test as written; substituting a logger spy allows the variant to pass.",
+  "expectedOutcome": "expected-to-fail",
+  "testFile": "test.ts",
+  "productionFiles": ["validator.ts"]
+}

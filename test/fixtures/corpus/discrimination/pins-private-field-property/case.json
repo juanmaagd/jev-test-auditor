@@ -1,0 +1,11 @@
+{
+  "id": "pins-private-field-property",
+  "operators": ["pin-implementation-detail"],
+  "operatorRole": "descriptive",
+  "oracleKind": "semantics-preserving-refactor",
+  "testEffect": "The test inspects an internal field `_cache` on the cart service instead of asserting through the public API.",
+  "productionEffect": "Refactoring the internal cache to use an unexported map while preserving all public behavior is expected to break this test; it fails under that semantics-preserving refactor.",
+  "expectedOutcome": "expected-to-fail",
+  "testFile": "test.ts",
+  "productionFiles": ["service.ts"]
+}

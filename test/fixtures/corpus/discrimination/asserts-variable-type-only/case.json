@@ -1,0 +1,11 @@
+{
+  "id": "asserts-variable-type-only",
+  "operators": ["remove-assertion"],
+  "operatorRole": "descriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "The test checks only that `checkout` returns a defined value without asserting on the amount or result, behaving as if the assertion were removed.",
+  "productionEffect": "Mutating `checkout` to return `NaN` leaves the type check passing; this test is expected to keep passing under that production mutation.",
+  "expectedOutcome": "expected-to-keep-passing",
+  "testFile": "test.ts",
+  "productionFiles": ["cart.ts"]
+}

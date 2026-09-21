@@ -1,0 +1,11 @@
+{
+  "id": "asserts-observable-discount-result",
+  "operators": ["assert-incidental-interaction"],
+  "operatorRole": "prescriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "Replacing an observable discount assertion with an incidental helper call assertion leaves regressions undetected.",
+  "productionEffect": "Mutating discount calculation is expected to fail this test as written; substituting an incidental interaction check allows the variant to pass.",
+  "expectedOutcome": "expected-to-fail",
+  "testFile": "test.ts",
+  "productionFiles": ["discount.ts"]
+}

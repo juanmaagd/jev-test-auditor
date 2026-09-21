@@ -1,0 +1,11 @@
+{
+  "id": "empty-cart-subtotal-zero",
+  "operators": ["remove-assertion"],
+  "operatorRole": "prescriptive",
+  "oracleKind": "assertion-mutation",
+  "testEffect": "Removing `expect(subtotal([])).toBe(0)` turns the test into a no-assertion pass that cannot fail under any empty-cart handling defect.",
+  "productionEffect": "Mutating `subtotal` to return `NaN` on empty carts is expected to fail this test as written; removing the assertion lets the execution pass silently.",
+  "expectedOutcome": "expected-to-fail",
+  "testFile": "test.ts",
+  "productionFiles": ["cart.ts"]
+}

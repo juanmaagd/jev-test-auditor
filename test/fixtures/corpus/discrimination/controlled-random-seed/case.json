@@ -1,0 +1,11 @@
+{
+  "id": "controlled-random-seed",
+  "operators": ["add-shared-state"],
+  "operatorRole": "prescriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "Replacing the injected seeded random generator with a mock constant bypasses deterministic random generation testing.",
+  "productionEffect": "Mutating `pickItem` to invert the index boundary is expected to fail this test as written; substituting the mock constant allows the variant to pass.",
+  "expectedOutcome": "expected-to-fail",
+  "testFile": "test.ts",
+  "productionFiles": ["sampler.ts"]
+}

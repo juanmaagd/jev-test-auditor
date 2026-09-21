@@ -1,0 +1,11 @@
+{
+  "id": "precise-matcher-diff-discount",
+  "operators": ["obscure-failure-cause"],
+  "operatorRole": "prescriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "Collapsing a diagnostic exact comparison into an obscure boolean check destroys failure diagnostic quality.",
+  "productionEffect": "Mutating discount computation is expected to fail this test as written; collapsing to a loose boolean check allows the variant to pass.",
+  "expectedOutcome": "expected-to-fail",
+  "testFile": "test.ts",
+  "productionFiles": ["discount.ts"]
+}

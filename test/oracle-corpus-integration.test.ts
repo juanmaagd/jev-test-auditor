@@ -14,6 +14,13 @@ const REAL_CASE_IDS = [
   'discount-throws-range-error', 'exposes-checkout-helper', 'mocks-discount-logic', 'records-history-shared-state',
   'spies-on-math-round', 'subtotal-exact-value', 'works-boolean-check',
   'asserts-helper-call-count', 'generic-boolean-summary', 'session-expiry-controlled-clock',
+  'discount-exact-rounded-value', 'empty-cart-subtotal-zero', 'asserts-variable-type-only',
+  'cart-real-tax-calculation', 'shipping-tiered-rates', 'mocks-entire-subtotal', 'shared-counter-leak',
+  'real-clock-timeout-race', 'controlled-random-seed', 'pins-private-field-property',
+  'pins-internal-transform-pipeline', 'public-api-refactor-safe-subtotal', 'public-api-refactor-safe-checkout',
+  'asserts-internal-call-order', 'asserts-intermediate-state-only', 'asserts-observable-discount-result',
+  'asserts-observable-thrown-error', 'vague-name-test-fallback', 'bundled-multi-assertion-boolean',
+  'precise-matcher-diff-discount', 'precise-matcher-diff-subtotal',
 ] as const;
 
 async function sha256OfDirectory(root: string): Promise<string> {

@@ -27,9 +27,7 @@ Suite: 1,163 tests across 51 files, all passing. `npm run typecheck`, `npm run l
 
 ## The next work, in the order it makes sense
 
-**1. Grow the benchmark corpus.** This is the only thing standing between the project and real calibration, and it is additive: it changes numbers, not code.
-
-Today the corpus has fourteen cases (`test/fixtures/corpus/discrimination/*/`) covering all seven rubric dimensions. `behavioral-focus` (`asserts-helper-call-count`), `diagnostic-quality` (`generic-boolean-summary`), and `introduce-uncontrolled-time` (`session-expiry-controlled-clock`, a prescriptive control giving `determinism-isolation` both classes) are all proven by execution. Target roughly five to ten proven cases per dimension, which is thirty-five to seventy cases, **with both classes per dimension** — cases the dimension should flag and cases it should not. Without the negative class you can measure recall but not precision, and a model that flags everything scores perfect recall.
+**1. Grow the benchmark corpus.** The benchmark corpus has been scaled to 35 cases (`test/fixtures/corpus/discrimination/*/`) covering all seven rubric dimensions with exactly 5 proven cases per dimension, satisfying `MIN_SAMPLE_FOR_RATE = 5`. Both classes (descriptive flaws and prescriptive controls) are represented in every dimension, allowing precision, recall, and false-positive rates to be computed automatically. Target for Phase 9 calibration remains 35 to 70 cases.
 
 Money is not the constraint. Measured: one corpus case costs roughly USD 0.00025–0.0008, so five hundred cases at twenty repetitions is under USD 8. Authoring effort and statistical validity are the constraints.
 

@@ -1,0 +1,11 @@
+{
+  "id": "pins-internal-transform-pipeline",
+  "operators": ["pin-implementation-detail"],
+  "operatorRole": "descriptive",
+  "oracleKind": "semantics-preserving-refactor",
+  "testEffect": "The test spies on an internal normalization method that is not part of the public contract.",
+  "productionEffect": "Inlining the normalization without changing observable output is expected to fail this test; it fails under that semantics-preserving refactor.",
+  "expectedOutcome": "expected-to-fail",
+  "testFile": "test.ts",
+  "productionFiles": ["pipeline.ts"]
+}

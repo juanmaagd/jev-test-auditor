@@ -219,6 +219,99 @@ export const PRODUCTION_TRANSFORMS: Readonly<Record<string, TextTransform>> = {
     anchor: 'return now - session.createdAt >= timeoutMs;',
     replacement: 'return now - session.createdAt >= timeoutMs * 10;',
   },
+  'discount-truncates-cents': {
+    id: 'discount-truncates-cents',
+    anchor: 'return Math.round(amount * (100 - percent)) / 100;',
+    replacement: 'return Math.floor(amount * (100 - percent)) / 100;',
+  },
+  'subtotal-empty-returns-nan': {
+    id: 'subtotal-empty-returns-nan',
+    anchor: 'export function subtotal(items: readonly Item[]): number {',
+    replacement: 'export function subtotal(items: readonly Item[]): number { if (items.length === 0) return NaN;',
+  },
+  'tax-calculation-doubled': {
+    id: 'tax-calculation-doubled',
+    anchor: 'return Math.round(subtotal * rate * 100) / 100;',
+    replacement: 'return Math.round(subtotal * rate * 200) / 100;',
+  },
+  'shipping-tier-inverted': {
+    id: 'shipping-tier-inverted',
+    anchor: 'if (weightKg <= 5) return 5;',
+    replacement: 'if (weightKg > 5) return 5;',
+  },
+  'counter-increments-first-call-only': {
+    id: 'counter-increments-first-call-only',
+    anchor: 'let count = 0;\nexport function increment(): void { count += 1; }',
+    replacement:
+      'let count = 0;\n'
+      + 'let __calls = 0;\n'
+      + 'export function increment(): void { __calls += 1; if (__calls === 1) count += 1; }',
+  },
+  'window-max-age-multiplied': {
+    id: 'window-max-age-multiplied',
+    anchor: 'return Date.now() - timestamp <= maxAgeMs;',
+    replacement: 'return Date.now() - timestamp <= maxAgeMs * 10;',
+  },
+  'pick-item-inverts-index': {
+    id: 'pick-item-inverts-index',
+    anchor: 'return items[index]!;\n}',
+    replacement: 'return items[items.length - 1 - index]!;\n}',
+  },
+  'cart-service-uses-internal-map': {
+    id: 'cart-service-uses-internal-map',
+    anchor: '  _cache: Record<string, number> = {};\n  getPrice(sku: string): number {\n    if (this._cache[sku] === undefined) this._cache[sku] = 10;\n    return this._cache[sku]!;\n  }',
+    replacement: '  private _store: Record<string, number> = {};\n  getPrice(sku: string): number {\n    if (this._store[sku] === undefined) this._store[sku] = 10;\n    return this._store[sku]!;\n  }',
+  },
+  'pipeline-inlines-normalize': {
+    id: 'pipeline-inlines-normalize',
+    anchor: 'process(sku: string): string { return `processed:${this.normalize(sku)}`; }',
+    replacement: 'process(sku: string): string { return `processed:${sku.trim().toLowerCase()}`; }',
+  },
+  'calculate-total-additive': {
+    id: 'calculate-total-additive',
+    anchor: 'return unitPrice * quantity;',
+    replacement: 'return unitPrice + quantity;',
+  },
+  'checkout-flow-returns-rejected': {
+    id: 'checkout-flow-returns-rejected',
+    anchor: "return { status: 'confirmed' };",
+    replacement: "return { status: 'rejected' };",
+  },
+  'batch-runner-fails-job': {
+    id: 'batch-runner-fails-job',
+    anchor: "return { status: 'completed', processed: items.length };",
+    replacement: "return { status: 'failed', processed: items.length };",
+  },
+  'discount-calculation-inverted': {
+    id: 'discount-calculation-inverted',
+    anchor: 'return price * (1 - rate);',
+    replacement: 'return price * (1 + rate);',
+  },
+  'validator-removes-throw': {
+    id: 'validator-removes-throw',
+    anchor: "if (qty <= 0) throw new RangeError('quantity must be positive');",
+    replacement: 'if (qty <= 0) { /* throw removed */ }',
+  },
+  'score-calculation-corrupted': {
+    id: 'score-calculation-corrupted',
+    anchor: 'score: points * 2',
+    replacement: 'score: points * 5',
+  },
+  'report-total-halved': {
+    id: 'report-total-halved',
+    anchor: 'total: amount * 1.1',
+    replacement: 'total: amount * 0.5',
+  },
+  'tiered-discount-altered': {
+    id: 'tiered-discount-altered',
+    anchor: 'return price * 0.8;',
+    replacement: 'return price * 0.85;',
+  },
+  'total-fee-subtracted': {
+    id: 'total-fee-subtracted',
+    anchor: 'return subtotal + fee;',
+    replacement: 'return subtotal - fee;',
+  },
 };
 
 /**
@@ -247,6 +340,61 @@ export const TEST_VARIANT_TRANSFORMS: Readonly<Record<string, TextTransform>> = 
     id: 'introduce-real-clock',
     anchor: 'expect(isSessionExpired(session, 500, start + 600)).toBe(true);',
     replacement: 'expect(isSessionExpired(session, 500, Date.now() + 10_000)).toBe(true);',
+  },
+  'weaken-discount-rounded-assertion': {
+    id: 'weaken-discount-rounded-assertion',
+    anchor: 'expect(applyDiscount(100.05, 10)).toBe(90.05);',
+    replacement: 'expect(applyDiscount(100.05, 10)).toBeGreaterThan(0);',
+  },
+  'remove-empty-cart-assertion': {
+    id: 'remove-empty-cart-assertion',
+    anchor: 'expect(subtotal([])).toBe(0);',
+    replacement: 'try { subtotal([]); } catch { /* assertion removed */ }',
+  },
+  'mock-tax-call': {
+    id: 'mock-tax-call',
+    anchor: 'expect(totalWithTax(100, 0.05)).toBe(105);',
+    replacement: 'const mockTotal = 100 + 5;\n    expect(mockTotal).toBe(105);',
+  },
+  'mock-shipping-call': {
+    id: 'mock-shipping-call',
+    anchor: 'expect(calculateShipping(3)).toBe(5);',
+    replacement: 'const mockShipping = 5;\n    expect(mockShipping).toBe(5);',
+  },
+  'substitute-mock-constant': {
+    id: 'substitute-mock-constant',
+    anchor: "expect(pickItem(['first', 'second'], deterministicZero)).toBe('first');",
+    replacement: "const mockConstant = 'second';\n    expect(mockConstant).toBe('second');",
+  },
+  'weaken-total-expectation': {
+    id: 'weaken-total-expectation',
+    anchor: 'expect(calculateTotal(10, 2)).toBe(20);',
+    replacement: 'expect(calculateTotal(10, 2)).toBeGreaterThan(0);',
+  },
+  'stub-checkout-outcome': {
+    id: 'stub-checkout-outcome',
+    anchor: 'expect(checkout(items, 10)).toBe(9);',
+    replacement: 'const stubResult = 9;\n    expect(stubResult).toBe(9);',
+  },
+  'assert-audit-log-instead': {
+    id: 'assert-audit-log-instead',
+    anchor: 'expect(calculateDiscount(100, 0.2)).toBe(80);',
+    replacement: 'calculateDiscount(100, 0.2);\n    expect(100).toBeGreaterThan(0);',
+  },
+  'catch-and-ignore-validation': {
+    id: 'catch-and-ignore-validation',
+    anchor: 'expect(() => validateQuantity(-1)).toThrow(RangeError);',
+    replacement: 'try { validateQuantity(-1); } catch {}\n    expect(true).toBe(true);',
+  },
+  'weaken-tiered-discount-assertion': {
+    id: 'weaken-tiered-discount-assertion',
+    anchor: 'expect(calculateTieredDiscount(200)).toBe(160);',
+    replacement: 'expect(calculateTieredDiscount(200)).toBeGreaterThan(100);',
+  },
+  'weaken-fee-assertion': {
+    id: 'weaken-fee-assertion',
+    anchor: 'expect(computeTotalWithFee(50, 5)).toBe(55);',
+    replacement: 'expect(computeTotalWithFee(50, 5)).toBeGreaterThan(0);',
   },
 };
 
@@ -290,6 +438,27 @@ const CASE_ORACLE_RECIPES: Readonly<Record<string, CaseOracleRecipe>> = {
   'asserts-helper-call-count': { kind: 'single-mutation', targetFile: 'audit-log.ts', transformId: 'record-skips-history-append' },
   'generic-boolean-summary': { kind: 'single-mutation', targetFile: 'cart.ts', transformId: 'corrupt-discount-sign' },
   'session-expiry-controlled-clock': { kind: 'single-mutation', targetFile: 'session.ts', transformId: 'session-timeout-multiplied', variantTransformId: 'introduce-real-clock' },
+  'discount-exact-rounded-value': { kind: 'single-mutation', targetFile: 'cart.ts', transformId: 'discount-truncates-cents', variantTransformId: 'weaken-discount-rounded-assertion' },
+  'empty-cart-subtotal-zero': { kind: 'single-mutation', targetFile: 'cart.ts', transformId: 'subtotal-empty-returns-nan', variantTransformId: 'remove-empty-cart-assertion' },
+  'asserts-variable-type-only': { kind: 'single-mutation', targetFile: 'cart.ts', transformId: 'checkout-returns-nan' },
+  'cart-real-tax-calculation': { kind: 'single-mutation', targetFile: 'tax.ts', transformId: 'tax-calculation-doubled', variantTransformId: 'mock-tax-call' },
+  'shipping-tiered-rates': { kind: 'single-mutation', targetFile: 'shipping.ts', transformId: 'shipping-tier-inverted', variantTransformId: 'mock-shipping-call' },
+  'mocks-entire-subtotal': { kind: 'single-mutation', targetFile: 'cart.ts', transformId: 'subtotal-ignores-qty' },
+  'shared-counter-leak': { kind: 'repeated-execution', targetFile: 'counter.ts', transformId: 'counter-increments-first-call-only', repeatCount: 2 },
+  'real-clock-timeout-race': { kind: 'single-mutation', targetFile: 'window.ts', transformId: 'window-max-age-multiplied' },
+  'controlled-random-seed': { kind: 'single-mutation', targetFile: 'sampler.ts', transformId: 'pick-item-inverts-index', variantTransformId: 'substitute-mock-constant' },
+  'pins-private-field-property': { kind: 'single-mutation', targetFile: 'service.ts', transformId: 'cart-service-uses-internal-map' },
+  'pins-internal-transform-pipeline': { kind: 'single-mutation', targetFile: 'pipeline.ts', transformId: 'pipeline-inlines-normalize' },
+  'public-api-refactor-safe-subtotal': { kind: 'single-mutation', targetFile: 'pricing.ts', transformId: 'calculate-total-additive', variantTransformId: 'weaken-total-expectation' },
+  'public-api-refactor-safe-checkout': { kind: 'single-mutation', targetFile: 'cart.ts', transformId: 'discount-returns-zero', variantTransformId: 'stub-checkout-outcome' },
+  'asserts-internal-call-order': { kind: 'single-mutation', targetFile: 'checkout-flow.ts', transformId: 'checkout-flow-returns-rejected' },
+  'asserts-intermediate-state-only': { kind: 'single-mutation', targetFile: 'batch-runner.ts', transformId: 'batch-runner-fails-job' },
+  'asserts-observable-discount-result': { kind: 'single-mutation', targetFile: 'discount.ts', transformId: 'discount-calculation-inverted', variantTransformId: 'assert-audit-log-instead' },
+  'asserts-observable-thrown-error': { kind: 'single-mutation', targetFile: 'validator.ts', transformId: 'validator-removes-throw', variantTransformId: 'catch-and-ignore-validation' },
+  'vague-name-test-fallback': { kind: 'single-mutation', targetFile: 'metrics.ts', transformId: 'score-calculation-corrupted' },
+  'bundled-multi-assertion-boolean': { kind: 'single-mutation', targetFile: 'report.ts', transformId: 'report-total-halved' },
+  'precise-matcher-diff-discount': { kind: 'single-mutation', targetFile: 'discount.ts', transformId: 'tiered-discount-altered', variantTransformId: 'weaken-tiered-discount-assertion' },
+  'precise-matcher-diff-subtotal': { kind: 'single-mutation', targetFile: 'pricing.ts', transformId: 'total-fee-subtracted', variantTransformId: 'weaken-fee-assertion' },
 };
 
 /**

@@ -1,0 +1,11 @@
+{
+  "id": "public-api-refactor-safe-checkout",
+  "operators": ["pin-implementation-detail"],
+  "operatorRole": "prescriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "Replacing the outcome check with an assertion on an internal spy couples the test to implementation details.",
+  "productionEffect": "Mutating `applyDiscount` arithmetic is expected to fail this test as written; substituting the internal spy assertion allows the variant to pass.",
+  "expectedOutcome": "expected-to-fail",
+  "testFile": "test.ts",
+  "productionFiles": ["cart.ts"]
+}

@@ -1,0 +1,11 @@
+{
+  "id": "discount-exact-rounded-value",
+  "operators": ["weaken-expectation"],
+  "operatorRole": "prescriptive",
+  "oracleKind": "assertion-mutation",
+  "testEffect": "Weakening `expect(applyDiscount(100.05, 10)).toBe(90.05)` to `expect(applyDiscount(100.05, 10)).toBeGreaterThan(0)` accepts any positive number instead of verifying precise rounding.",
+  "productionEffect": "Corrupting `applyDiscount` to truncate cents using `Math.floor` instead of rounding is expected to fail this test as written; substituting the weaker inequality assertion would allow the regression to pass.",
+  "expectedOutcome": "expected-to-fail",
+  "testFile": "test.ts",
+  "productionFiles": ["cart.ts"]
+}

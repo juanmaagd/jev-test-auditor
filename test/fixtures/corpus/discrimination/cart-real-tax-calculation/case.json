@@ -1,0 +1,11 @@
+{
+  "id": "cart-real-tax-calculation",
+  "operators": ["mock-owned-logic"],
+  "operatorRole": "prescriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "Replacing `calculateTax` with a canned mock returning `5` decouples the test from real tax computation.",
+  "productionEffect": "Mutating `calculateTax`'s rate logic is expected to fail this test as written; substituting a canned mock allows the corrupted logic to pass.",
+  "expectedOutcome": "expected-to-fail",
+  "testFile": "test.ts",
+  "productionFiles": ["tax.ts"]
+}

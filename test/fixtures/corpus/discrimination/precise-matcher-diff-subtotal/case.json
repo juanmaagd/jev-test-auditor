@@ -1,0 +1,11 @@
+{
+  "id": "precise-matcher-diff-subtotal",
+  "operators": ["obscure-failure-cause"],
+  "operatorRole": "prescriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "Replacing specific numeric expectation with a collapsed boolean check obscures failure diagnostic details.",
+  "productionEffect": "Mutating price calculation is expected to fail this test as written; collapsing to a boolean summary allows the variant to pass.",
+  "expectedOutcome": "expected-to-fail",
+  "testFile": "test.ts",
+  "productionFiles": ["pricing.ts"]
+}

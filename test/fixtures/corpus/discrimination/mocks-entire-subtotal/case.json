@@ -1,0 +1,11 @@
+{
+  "id": "mocks-entire-subtotal",
+  "operators": ["mock-owned-logic"],
+  "operatorRole": "descriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "The test stubs out the `subtotal` function under test and asserts against the stub's canned return value.",
+  "productionEffect": "Corrupting `subtotal`'s actual implementation leaves this test passing because the mock replaces it completely.",
+  "expectedOutcome": "expected-to-keep-passing",
+  "testFile": "test.ts",
+  "productionFiles": ["cart.ts"]
+}

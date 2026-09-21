@@ -1,0 +1,11 @@
+{
+  "id": "real-clock-timeout-race",
+  "operators": ["introduce-uncontrolled-time"],
+  "operatorRole": "descriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "The test uses real `Date.now()` without an injected clock or fake timers, coupling its pass condition to wall-clock time.",
+  "productionEffect": "Mutating `isWithinWindow` to always accept timestamps within 10_000ms leaves this real-time test passing; it is expected to keep passing under that production mutation.",
+  "expectedOutcome": "expected-to-keep-passing",
+  "testFile": "test.ts",
+  "productionFiles": ["window.ts"]
+}

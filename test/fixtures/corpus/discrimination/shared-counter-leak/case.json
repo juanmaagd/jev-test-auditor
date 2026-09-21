@@ -1,0 +1,11 @@
+{
+  "id": "shared-counter-leak",
+  "operators": ["add-shared-state"],
+  "operatorRole": "descriptive",
+  "oracleKind": "repeated-randomized-execution",
+  "testEffect": "The test mutates a module-level global counter without resetting it, causing subsequent runs in the same process to observe accumulated state.",
+  "productionEffect": "Mutating `increment` to only increment on the first call leaves the second run passing due to leftover state; repeated execution without state reset cannot detect the defect.",
+  "expectedOutcome": "expected-to-keep-passing",
+  "testFile": "test.ts",
+  "productionFiles": ["counter.ts"]
+}

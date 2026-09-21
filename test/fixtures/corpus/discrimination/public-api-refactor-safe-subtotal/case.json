@@ -1,0 +1,11 @@
+{
+  "id": "public-api-refactor-safe-subtotal",
+  "operators": ["pin-implementation-detail"],
+  "operatorRole": "prescriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "Replacing the public calculation check with a spy on internal helper calls makes the test brittle to implementation changes.",
+  "productionEffect": "Mutating `calculateTotal`'s quantity multiplication is expected to fail this test as written; substituting an internal stub allows the regression to pass.",
+  "expectedOutcome": "expected-to-fail",
+  "testFile": "test.ts",
+  "productionFiles": ["pricing.ts"]
+}

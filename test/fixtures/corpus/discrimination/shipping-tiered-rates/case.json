@@ -1,0 +1,11 @@
+{
+  "id": "shipping-tiered-rates",
+  "operators": ["mock-owned-logic"],
+  "operatorRole": "prescriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "Replacing `calculateShipping` with a stub returning fixed `5` bypasses the tiered shipping logic.",
+  "productionEffect": "Inverting the weight tier threshold in `calculateShipping` is expected to fail this test as written; replacing the call with a stub allows the regression to pass.",
+  "expectedOutcome": "expected-to-fail",
+  "testFile": "test.ts",
+  "productionFiles": ["shipping.ts"]
+}

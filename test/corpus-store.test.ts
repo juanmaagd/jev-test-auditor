@@ -104,11 +104,11 @@ describe('loadCorpusFromDirectory', () => {
     await expect(loadCorpusFromDirectory(root)).rejects.toThrow(/case-a/);
   });
 
-  it('parses the real Git-stored discrimination corpus into fourteen distinct, valid cases', async () => {
+  it('parses the real Git-stored discrimination corpus into thirty-five distinct, valid cases', async () => {
     const cases = await loadCorpusFromDirectory('test/fixtures/corpus/discrimination');
 
-    expect(cases).toHaveLength(14);
-    expect(new Set(cases.map((c) => c.id)).size).toBe(14);
+    expect(cases).toHaveLength(35);
+    expect(new Set(cases.map((c) => c.id)).size).toBe(35);
     for (const corpusCase of cases) {
       expect(corpusCase.proofStatus).toBe('unverified');
       expect(corpusCase.baseTest.contents.length).toBeGreaterThan(0);
@@ -145,6 +145,27 @@ describe('loadCorpusFromDirectory', () => {
       'asserts-helper-call-count': 'assert-incidental-interaction',
       'generic-boolean-summary': 'obscure-failure-cause',
       'session-expiry-controlled-clock': 'introduce-uncontrolled-time',
+      'discount-exact-rounded-value': 'weaken-expectation',
+      'empty-cart-subtotal-zero': 'remove-assertion',
+      'asserts-variable-type-only': 'remove-assertion',
+      'cart-real-tax-calculation': 'mock-owned-logic',
+      'shipping-tiered-rates': 'mock-owned-logic',
+      'mocks-entire-subtotal': 'mock-owned-logic',
+      'shared-counter-leak': 'add-shared-state',
+      'real-clock-timeout-race': 'introduce-uncontrolled-time',
+      'controlled-random-seed': 'add-shared-state',
+      'pins-private-field-property': 'pin-implementation-detail',
+      'pins-internal-transform-pipeline': 'pin-implementation-detail',
+      'public-api-refactor-safe-subtotal': 'pin-implementation-detail',
+      'public-api-refactor-safe-checkout': 'pin-implementation-detail',
+      'asserts-internal-call-order': 'assert-incidental-interaction',
+      'asserts-intermediate-state-only': 'assert-incidental-interaction',
+      'asserts-observable-discount-result': 'assert-incidental-interaction',
+      'asserts-observable-thrown-error': 'assert-incidental-interaction',
+      'vague-name-test-fallback': 'obscure-failure-cause',
+      'bundled-multi-assertion-boolean': 'obscure-failure-cause',
+      'precise-matcher-diff-discount': 'obscure-failure-cause',
+      'precise-matcher-diff-subtotal': 'obscure-failure-cause',
     });
     expect(oracleKindById).toEqual({
       'exposes-checkout-helper': 'production-mutation',
@@ -161,6 +182,27 @@ describe('loadCorpusFromDirectory', () => {
       'asserts-helper-call-count': 'production-mutation',
       'generic-boolean-summary': 'production-mutation',
       'session-expiry-controlled-clock': 'assertion-mutation',
+      'discount-exact-rounded-value': 'assertion-mutation',
+      'empty-cart-subtotal-zero': 'assertion-mutation',
+      'asserts-variable-type-only': 'production-mutation',
+      'cart-real-tax-calculation': 'production-mutation',
+      'shipping-tiered-rates': 'production-mutation',
+      'mocks-entire-subtotal': 'production-mutation',
+      'shared-counter-leak': 'repeated-randomized-execution',
+      'real-clock-timeout-race': 'production-mutation',
+      'controlled-random-seed': 'production-mutation',
+      'pins-private-field-property': 'semantics-preserving-refactor',
+      'pins-internal-transform-pipeline': 'semantics-preserving-refactor',
+      'public-api-refactor-safe-subtotal': 'production-mutation',
+      'public-api-refactor-safe-checkout': 'production-mutation',
+      'asserts-internal-call-order': 'production-mutation',
+      'asserts-intermediate-state-only': 'production-mutation',
+      'asserts-observable-discount-result': 'production-mutation',
+      'asserts-observable-thrown-error': 'production-mutation',
+      'vague-name-test-fallback': 'production-mutation',
+      'bundled-multi-assertion-boolean': 'production-mutation',
+      'precise-matcher-diff-discount': 'production-mutation',
+      'precise-matcher-diff-subtotal': 'production-mutation',
     });
   });
 
@@ -193,6 +235,27 @@ describe('loadCorpusFromDirectory', () => {
       'asserts-helper-call-count': 'descriptive',
       'generic-boolean-summary': 'descriptive',
       'session-expiry-controlled-clock': 'prescriptive',
+      'discount-exact-rounded-value': 'prescriptive',
+      'empty-cart-subtotal-zero': 'prescriptive',
+      'asserts-variable-type-only': 'descriptive',
+      'cart-real-tax-calculation': 'prescriptive',
+      'shipping-tiered-rates': 'prescriptive',
+      'mocks-entire-subtotal': 'descriptive',
+      'shared-counter-leak': 'descriptive',
+      'real-clock-timeout-race': 'descriptive',
+      'controlled-random-seed': 'prescriptive',
+      'pins-private-field-property': 'descriptive',
+      'pins-internal-transform-pipeline': 'descriptive',
+      'public-api-refactor-safe-subtotal': 'prescriptive',
+      'public-api-refactor-safe-checkout': 'prescriptive',
+      'asserts-internal-call-order': 'descriptive',
+      'asserts-intermediate-state-only': 'descriptive',
+      'asserts-observable-discount-result': 'prescriptive',
+      'asserts-observable-thrown-error': 'prescriptive',
+      'vague-name-test-fallback': 'descriptive',
+      'bundled-multi-assertion-boolean': 'descriptive',
+      'precise-matcher-diff-discount': 'prescriptive',
+      'precise-matcher-diff-subtotal': 'prescriptive',
     });
     expect(expectedOutcomeById).toEqual({
       'checkout-applies-percent': 'expected-to-fail',
@@ -209,6 +272,27 @@ describe('loadCorpusFromDirectory', () => {
       'asserts-helper-call-count': 'expected-to-keep-passing',
       'generic-boolean-summary': 'expected-to-keep-passing',
       'session-expiry-controlled-clock': 'expected-to-fail',
+      'discount-exact-rounded-value': 'expected-to-fail',
+      'empty-cart-subtotal-zero': 'expected-to-fail',
+      'asserts-variable-type-only': 'expected-to-keep-passing',
+      'cart-real-tax-calculation': 'expected-to-fail',
+      'shipping-tiered-rates': 'expected-to-fail',
+      'mocks-entire-subtotal': 'expected-to-keep-passing',
+      'shared-counter-leak': 'expected-to-keep-passing',
+      'real-clock-timeout-race': 'expected-to-keep-passing',
+      'controlled-random-seed': 'expected-to-fail',
+      'pins-private-field-property': 'expected-to-fail',
+      'pins-internal-transform-pipeline': 'expected-to-fail',
+      'public-api-refactor-safe-subtotal': 'expected-to-fail',
+      'public-api-refactor-safe-checkout': 'expected-to-fail',
+      'asserts-internal-call-order': 'expected-to-keep-passing',
+      'asserts-intermediate-state-only': 'expected-to-keep-passing',
+      'asserts-observable-discount-result': 'expected-to-fail',
+      'asserts-observable-thrown-error': 'expected-to-fail',
+      'vague-name-test-fallback': 'expected-to-keep-passing',
+      'bundled-multi-assertion-boolean': 'expected-to-keep-passing',
+      'precise-matcher-diff-discount': 'expected-to-fail',
+      'precise-matcher-diff-subtotal': 'expected-to-fail',
     });
   });
 });

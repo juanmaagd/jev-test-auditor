@@ -1,0 +1,11 @@
+{
+  "id": "asserts-internal-call-order",
+  "operators": ["assert-incidental-interaction"],
+  "operatorRole": "descriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "The test asserts on the internal call order of validator and notifier without asserting on the returned checkout outcome.",
+  "productionEffect": "Mutating `processCheckout` to return failure while preserving the internal call sequence leaves this test passing; it is expected to keep passing under that production mutation.",
+  "expectedOutcome": "expected-to-keep-passing",
+  "testFile": "test.ts",
+  "productionFiles": ["checkout-flow.ts"]
+}
