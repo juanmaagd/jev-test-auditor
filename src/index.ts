@@ -363,3 +363,36 @@ export {
   type CorpusSourceFile,
 } from './domain/corpus.js';
 export { loadCorpusCase, loadCorpusFromDirectory } from './adapters/corpus-store.js';
+
+export {
+  assertPayloadIsBlind,
+  compareReviewAssessment,
+  createBlindReviewPayload,
+  freezeWorkerAssessment,
+  selectBenchmarkReviewCases,
+  type BenchmarkCaseReviewComparison,
+  type BenchmarkReviewSelectionKind,
+  type BenchmarkReviewSelectionOptions,
+  type BlindReviewRubricCriterion,
+  type BlindReviewWorkerPayload,
+  type BlindWorkerAssessment,
+  type BlindWorkerDimensionAssessment,
+  type FrozenWorkerAssessment,
+  type ReviewDiscrepancyKind,
+} from './domain/benchmark-review.js';
+
+export {
+  completeReviewSession,
+  prepareReviewSession,
+  recordWorkerAssessment,
+  type PrepareReviewSessionOptions,
+  type PreparedReviewSession,
+  type RecordAssessmentOptions,
+  type ReviewSessionSummary,
+} from './application/benchmark-review.js';
+
+export {
+  type BenchmarkReviewCaseRecord,
+  type BenchmarkReviewRunRecord,
+  type RecordReviewCaseInput,
+} from './domain/benchmark-store.js';

@@ -71,6 +71,26 @@ class FakeStore implements BenchmarkStorePort {
     return undefined;
   }
 
+  async beginReview(): Promise<string> {
+    return 'fake-review-id';
+  }
+
+  async recordReviewCase(): Promise<void> {}
+
+  async finishReview(): Promise<void> {}
+
+  async loadReviewsForRun(): Promise<[]> {
+    return [];
+  }
+
+  async loadReview(): Promise<undefined> {
+    return undefined;
+  }
+
+  async loadReviewCases(): Promise<[]> {
+    return [];
+  }
+
   async close(): Promise<void> {}
 }
 

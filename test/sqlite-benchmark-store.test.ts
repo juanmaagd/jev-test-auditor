@@ -13,6 +13,10 @@ import {
   type BenchmarkCaseRecordInput,
   type BenchmarkStorePort,
 } from '../src/domain/benchmark-store.js';
+import type {
+  BenchmarkCaseReviewComparison,
+  FrozenWorkerAssessment,
+} from '../src/domain/benchmark-review.js';
 
 const temporaryRoots: string[] = [];
 
@@ -100,11 +104,46 @@ describe('createSqliteBenchmarkStore migrations', () => {
       expect(tables).toEqual(expect.arrayContaining([
         'benchmark_runs', 'benchmark_cases', 'benchmark_oracle_runs', 'benchmark_samples',
         'benchmark_sample_failures', 'benchmark_schema_meta',
+        'benchmark_review_runs', 'benchmark_review_cases',
       ]));
       const version = (db.prepare('SELECT schema_version FROM benchmark_schema_meta WHERE id = 1').get() as { readonly schema_version: number }).schema_version;
-      expect(version).toBe(1);
+      expect(version).toBe(2);
     } finally {
       db.close();
+    }
+  });
+
+  it('migrates a schema v1 database to v2, preserving existing runs and adding review tables', async () => {
+    const databaseFile = await tempDatabaseFile();
+    await mkdir(dirname(databaseFile), { recursive: true });
+    const db = new DatabaseSync(databaseFile);
+    db.exec(`
+      CREATE TABLE benchmark_schema_meta (id INTEGER PRIMARY KEY, schema_version INTEGER NOT NULL);
+      INSERT INTO benchmark_schema_meta (id, schema_version) VALUES (1, 1);
+      CREATE TABLE benchmark_runs (id TEXT PRIMARY KEY, corpus_dir TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT) STRICT;
+      CREATE TABLE benchmark_cases (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL REFERENCES benchmark_runs(id), case_id TEXT NOT NULL, operator TEXT NOT NULL, operator_role TEXT NOT NULL, oracle_kind TEXT NOT NULL, expected_outcome TEXT NOT NULL, fixture_hash TEXT NOT NULL, proof_status TEXT NOT NULL, proof_reason TEXT, recorded_at TEXT NOT NULL) STRICT;
+      CREATE TABLE benchmark_oracle_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, benchmark_case_id INTEGER NOT NULL REFERENCES benchmark_cases(id), label TEXT NOT NULL, observation_kind TEXT NOT NULL, observation_detail TEXT, content_hash TEXT NOT NULL, mutated_files TEXT NOT NULL) STRICT;
+      CREATE TABLE benchmark_samples (id INTEGER PRIMARY KEY AUTOINCREMENT, benchmark_case_id INTEGER NOT NULL REFERENCES benchmark_cases(id), status TEXT NOT NULL, policy_version INTEGER NOT NULL, rubric_version INTEGER NOT NULL, model_requested TEXT NOT NULL, model_responded TEXT NOT NULL, model_matches_pin INTEGER NOT NULL, classification TEXT NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, latency_ms INTEGER) STRICT;
+      CREATE TABLE benchmark_sample_failures (id INTEGER PRIMARY KEY AUTOINCREMENT, benchmark_case_id INTEGER NOT NULL REFERENCES benchmark_cases(id), kind TEXT NOT NULL, message TEXT NOT NULL) STRICT;
+      INSERT INTO benchmark_runs (id, corpus_dir, started_at) VALUES ('v1-run', 'test/corpus', '2026-09-20T00:00:00.000Z');
+    `);
+    db.close();
+
+    const store = await createSqliteBenchmarkStore({ databaseFile });
+    const run = await store.loadRun('v1-run');
+    expect(run).toEqual([]);
+
+    const verifyDb = new DatabaseSync(databaseFile);
+    try {
+      const version = (verifyDb.prepare('SELECT schema_version FROM benchmark_schema_meta WHERE id = 1').get() as { readonly schema_version: number }).schema_version;
+      expect(version).toBe(2);
+      const tables = verifyDb.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all()
+        .map((row) => (row as { readonly name: string }).name);
+      expect(tables).toContain('benchmark_review_runs');
+      expect(tables).toContain('benchmark_review_cases');
+    } finally {
+      verifyDb.close();
+      await store.close();
     }
   });
 
@@ -132,7 +171,7 @@ describe('createSqliteBenchmarkStore migrations', () => {
     db.close();
 
     await expect(createSqliteBenchmarkStore({ databaseFile })).rejects.toThrow(BenchmarkStoreSchemaVersionError);
-    await expect(createSqliteBenchmarkStore({ databaseFile })).rejects.toMatchObject({ foundVersion: 999, supportedVersion: 1 });
+    await expect(createSqliteBenchmarkStore({ databaseFile })).rejects.toMatchObject({ foundVersion: 999, supportedVersion: 2 });
   });
 
   it('fails with a named, visible error rather than silently adopting a foreign database with user tables but no benchmark_schema_meta table', async () => {
@@ -283,5 +322,73 @@ describe('createSqliteBenchmarkStore case persistence and round trip', () => {
     // Proof the transaction actually rolled back (not merely never committed): the connection is
     // not left inside an open transaction, so the next recordCase call succeeds normally.
     await expect(store.recordCase(runId, sampleInput('good-case-after-rollback'))).resolves.toBeUndefined();
+  });
+});
+
+describe('createSqliteBenchmarkStore review persistence', () => {
+  let store: BenchmarkStorePort;
+  let databaseFile: string;
+
+  afterEach(async () => {
+    await store?.close();
+  });
+
+  it('persists a review run and review cases, and loads them back', async () => {
+    databaseFile = await tempDatabaseFile();
+    store = await createSqliteBenchmarkStore({ databaseFile });
+    const runId = await store.beginRun('test/fixtures/corpus/discrimination');
+    await store.recordCase(runId, sampleInput('case-1'));
+    await store.finishRun(runId);
+
+    const reviewId = await store.beginReview(runId, 'disagreements');
+    const frozenAssessment: FrozenWorkerAssessment = {
+      caseId: 'case-1',
+      inputPayloadHash: 'hash-abc',
+      frozenAt: '2026-09-21T21:00:00.000Z',
+      workerIdentity: { runtime: 'antigravity-subagent', model: 'claude-3-7-sonnet' },
+      assessment: {
+        caseId: 'case-1',
+        assessedDimensions: [
+          {
+            dimensionId: 'falsifiability',
+            level: 'misleading',
+            score: 0,
+            confidence: 0.9,
+            reasoning: 'flawed test',
+            evidenceCitations: ['expect(1).toBe(1)'],
+          },
+        ],
+        overallUncertainty: 0.05,
+      },
+    };
+
+    const comparison: BenchmarkCaseReviewComparison = {
+      caseId: 'case-1',
+      agreement: false,
+      discrepancyKind: 'likely-model-error',
+      explanation: 'Jev failed, reviewer matched ground truth.',
+      jevOutcome: { status: 'healthy', levels: { falsifiability: 'acceptable' } },
+      reviewerOutcome: { levels: { falsifiability: 'misleading' }, uncertainty: 0.05 },
+      oracleGroundTruth: { operatorRole: 'descriptive', expectedOutcome: 'expected-to-fail', proofStatus: { kind: 'proven' } },
+    };
+
+    await store.recordReviewCase(reviewId, { frozenAssessment, comparison });
+    await store.finishReview(reviewId);
+
+    const reviews = await store.loadReviewsForRun(runId);
+    expect(reviews).toHaveLength(1);
+    expect(reviews[0]?.id).toBe(reviewId);
+    expect(reviews[0]?.benchmarkRunId).toBe(runId);
+    expect(reviews[0]?.selectionKind).toBe('disagreements');
+    expect(reviews[0]?.finishedAt).toBeDefined();
+
+    const cases = await store.loadReviewCases(reviewId);
+    expect(cases).toHaveLength(1);
+    expect(cases[0]?.caseId).toBe('case-1');
+    expect(cases[0]?.inputPayloadHash).toBe('hash-abc');
+    expect(cases[0]?.workerRuntime).toBe('antigravity-subagent');
+    expect(cases[0]?.workerModel).toBe('claude-3-7-sonnet');
+    expect(cases[0]?.assessment.caseId).toBe('case-1');
+    expect(cases[0]?.comparison.discrepancyKind).toBe('likely-model-error');
   });
 });

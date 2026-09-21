@@ -23,6 +23,12 @@
  * disagreement, or regression from stored runs
  * (`src/domain/benchmark-comparison.ts`).
  */
+import type {
+  BenchmarkCaseReviewComparison,
+  BenchmarkReviewSelectionKind,
+  BlindWorkerAssessment,
+  FrozenWorkerAssessment,
+} from './benchmark-review.js';
 import type { ClassificationResult } from './classification.js';
 import type {
   CorpusExpectedOutcome,
@@ -120,9 +126,35 @@ export interface BenchmarkCaseRecordInput {
   readonly sampleFailure?: BenchmarkSampleFailureRecord;
 }
 
+export interface BenchmarkReviewRunRecord {
+  readonly id: string;
+  readonly benchmarkRunId: string;
+  readonly selectionKind: BenchmarkReviewSelectionKind;
+  readonly startedAt: string;
+  readonly finishedAt?: string | undefined;
+}
+
+export interface BenchmarkReviewCaseRecord {
+  readonly id: number;
+  readonly reviewRunId: string;
+  readonly caseId: string;
+  readonly inputPayloadHash: string;
+  readonly frozenAt: string;
+  readonly workerRuntime: string;
+  readonly workerModel?: string | undefined;
+  readonly assessment: BlindWorkerAssessment;
+  readonly comparison: BenchmarkCaseReviewComparison;
+  readonly recordedAt: string;
+}
+
+export interface RecordReviewCaseInput {
+  readonly frozenAssessment: FrozenWorkerAssessment;
+  readonly comparison: BenchmarkCaseReviewComparison;
+}
+
 /**
- * The benchmark persistence port (task P7-3), append-only exactly like
- * {@link BenchmarkStorePort}'s audit-store sibling
+ * The benchmark persistence port (task P7-3, extended for review persistence in P8-2),
+ * append-only exactly like {@link BenchmarkStorePort}'s audit-store sibling
  * (`AuditStorePort`, `src/domain/audit.ts`): `beginRun`/`finishRun` bracket
  * one benchmark run, `recordCase` is called once per corpus case, and
  * `loadRun` reads a previously persisted run back for comparison
@@ -141,6 +173,18 @@ export interface BenchmarkStorePort {
   finishRun(runId: string): Promise<void>;
   /** Loads every case outcome recorded for `runId`, in recording order; `undefined` when no run with `runId` exists at all. */
   loadRun(runId: string): Promise<readonly BenchmarkCaseOutcome[] | undefined>;
+  /** Starts a new review run inspecting `benchmarkRunId` with the given case selection strategy. */
+  beginReview(benchmarkRunId: string, selectionKind: BenchmarkReviewSelectionKind): Promise<string>;
+  /** Records one reviewed case's frozen assessment and discrepancy comparison for `reviewRunId`. */
+  recordReviewCase(reviewRunId: string, input: RecordReviewCaseInput): Promise<void>;
+  /** Marks `reviewRunId` finished. */
+  finishReview(reviewRunId: string): Promise<void>;
+  /** Loads all review runs recorded for `benchmarkRunId`, in recording order. */
+  loadReviewsForRun(benchmarkRunId: string): Promise<readonly BenchmarkReviewRunRecord[]>;
+  /** Loads one review run by its id, or undefined if not found. */
+  loadReview(reviewRunId: string): Promise<BenchmarkReviewRunRecord | undefined>;
+  /** Loads all reviewed case records for `reviewRunId`, in recording order. */
+  loadReviewCases(reviewRunId: string): Promise<readonly BenchmarkReviewCaseRecord[]>;
   /** Releases the underlying database handle. Safe to call once. */
   close(): Promise<void>;
 }

@@ -43,9 +43,17 @@ import {
   type BenchmarkCaseRecordInput,
   type BenchmarkFixtureFile,
   type BenchmarkOracleRunRecord,
+  type BenchmarkReviewCaseRecord,
+  type BenchmarkReviewRunRecord,
   type BenchmarkSampleRecord,
   type BenchmarkStorePort,
+  type RecordReviewCaseInput,
 } from '../domain/benchmark-store.js';
+import type {
+  BenchmarkCaseReviewComparison,
+  BenchmarkReviewSelectionKind,
+  BlindWorkerAssessment,
+} from '../domain/benchmark-review.js';
 import type { Observation } from '../domain/oracle.js';
 import type { ClassificationResult } from '../domain/classification.js';
 import {
@@ -59,7 +67,7 @@ import {
 /** Owner-only, mirroring `src/adapters/sqlite-audit-store.ts`'s own `DIRECTORY_MODE`. */
 const DIRECTORY_MODE = 0o700;
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 const MIGRATIONS: readonly SqliteMigration[] = [
   (db) => {
@@ -123,6 +131,34 @@ const MIGRATIONS: readonly SqliteMigration[] = [
         message TEXT NOT NULL
       ) STRICT;
     `);
+  },
+  (db) => {
+    db.exec(`
+      CREATE TABLE benchmark_review_runs (
+        id TEXT PRIMARY KEY,
+        benchmark_run_id TEXT NOT NULL REFERENCES benchmark_runs(id),
+        selection_kind TEXT NOT NULL CHECK (selection_kind IN ('all','disagreements','regressions','stratified')),
+        started_at TEXT NOT NULL,
+        finished_at TEXT
+      ) STRICT;
+    `);
+    db.exec('CREATE INDEX idx_benchmark_review_runs_benchmark_run_id ON benchmark_review_runs (benchmark_run_id);');
+    db.exec(`
+      CREATE TABLE benchmark_review_cases (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        review_run_id TEXT NOT NULL REFERENCES benchmark_review_runs(id),
+        case_id TEXT NOT NULL,
+        input_payload_hash TEXT NOT NULL,
+        frozen_at TEXT NOT NULL,
+        worker_runtime TEXT NOT NULL,
+        worker_model TEXT,
+        assessment TEXT NOT NULL,
+        comparison TEXT NOT NULL,
+        recorded_at TEXT NOT NULL
+      ) STRICT;
+    `);
+    db.exec('CREATE INDEX idx_benchmark_review_cases_review_run_id ON benchmark_review_cases (review_run_id);');
+    db.exec('CREATE INDEX idx_benchmark_review_cases_case_id ON benchmark_review_cases (case_id);');
   },
 ];
 
@@ -379,6 +415,117 @@ export async function createSqliteBenchmarkStore(options: CreateSqliteBenchmarkS
           ...(sampleFailure === undefined ? {} : { sampleFailure }),
         };
       });
+    },
+
+    async beginReview(benchmarkRunId: string, selectionKind: BenchmarkReviewSelectionKind): Promise<string> {
+      const reviewId = randomUUID();
+      db.prepare(`
+        INSERT INTO benchmark_review_runs (id, benchmark_run_id, selection_kind, started_at)
+        VALUES (?, ?, ?, ?)
+      `).run(reviewId, benchmarkRunId, selectionKind, new Date().toISOString());
+      return reviewId;
+    },
+
+    async recordReviewCase(reviewRunId: string, input: RecordReviewCaseInput): Promise<void> {
+      db.prepare(`
+        INSERT INTO benchmark_review_cases
+          (review_run_id, case_id, input_payload_hash, frozen_at, worker_runtime, worker_model, assessment, comparison, recorded_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        reviewRunId,
+        input.frozenAssessment.caseId,
+        input.frozenAssessment.inputPayloadHash,
+        input.frozenAssessment.frozenAt,
+        input.frozenAssessment.workerIdentity?.runtime ?? 'unknown',
+        input.frozenAssessment.workerIdentity?.model ?? null,
+        JSON.stringify(input.frozenAssessment.assessment),
+        JSON.stringify(input.comparison),
+        new Date().toISOString(),
+      );
+    },
+
+    async finishReview(reviewRunId: string): Promise<void> {
+      db.prepare('UPDATE benchmark_review_runs SET finished_at = ? WHERE id = ?').run(
+        new Date().toISOString(),
+        reviewRunId,
+      );
+    },
+
+    async loadReviewsForRun(benchmarkRunId: string): Promise<readonly BenchmarkReviewRunRecord[]> {
+      interface ReviewRunRow {
+        readonly id: string;
+        readonly benchmark_run_id: string;
+        readonly selection_kind: string;
+        readonly started_at: string;
+        readonly finished_at: string | null;
+      }
+      const rows = db.prepare(`
+        SELECT id, benchmark_run_id, selection_kind, started_at, finished_at
+        FROM benchmark_review_runs WHERE benchmark_run_id = ? ORDER BY started_at ASC
+      `).all(benchmarkRunId) as unknown as readonly ReviewRunRow[];
+
+      return rows.map((r): BenchmarkReviewRunRecord => ({
+        id: r.id,
+        benchmarkRunId: r.benchmark_run_id,
+        selectionKind: r.selection_kind as BenchmarkReviewSelectionKind,
+        startedAt: r.started_at,
+        ...(r.finished_at === null ? {} : { finishedAt: r.finished_at }),
+      }));
+    },
+
+    async loadReview(reviewRunId: string): Promise<BenchmarkReviewRunRecord | undefined> {
+      interface ReviewRunRow {
+        readonly id: string;
+        readonly benchmark_run_id: string;
+        readonly selection_kind: string;
+        readonly started_at: string;
+        readonly finished_at: string | null;
+      }
+      const row = db.prepare(`
+        SELECT id, benchmark_run_id, selection_kind, started_at, finished_at
+        FROM benchmark_review_runs WHERE id = ?
+      `).get(reviewRunId) as ReviewRunRow | undefined;
+
+      if (row === undefined) return undefined;
+      return {
+        id: row.id,
+        benchmarkRunId: row.benchmark_run_id,
+        selectionKind: row.selection_kind as BenchmarkReviewSelectionKind,
+        startedAt: row.started_at,
+        ...(row.finished_at === null ? {} : { finishedAt: row.finished_at }),
+      };
+    },
+
+    async loadReviewCases(reviewRunId: string): Promise<readonly BenchmarkReviewCaseRecord[]> {
+      interface ReviewCaseRow {
+        readonly id: number;
+        readonly review_run_id: string;
+        readonly case_id: string;
+        readonly input_payload_hash: string;
+        readonly frozen_at: string;
+        readonly worker_runtime: string;
+        readonly worker_model: string | null;
+        readonly assessment: string;
+        readonly comparison: string;
+        readonly recorded_at: string;
+      }
+      const rows = db.prepare(`
+        SELECT id, review_run_id, case_id, input_payload_hash, frozen_at, worker_runtime, worker_model, assessment, comparison, recorded_at
+        FROM benchmark_review_cases WHERE review_run_id = ? ORDER BY id ASC
+      `).all(reviewRunId) as unknown as readonly ReviewCaseRow[];
+
+      return rows.map((r): BenchmarkReviewCaseRecord => ({
+        id: r.id,
+        reviewRunId: r.review_run_id,
+        caseId: r.case_id,
+        inputPayloadHash: r.input_payload_hash,
+        frozenAt: r.frozen_at,
+        workerRuntime: r.worker_runtime,
+        ...(r.worker_model === null ? {} : { workerModel: r.worker_model }),
+        assessment: JSON.parse(r.assessment) as BlindWorkerAssessment,
+        comparison: JSON.parse(r.comparison) as BenchmarkCaseReviewComparison,
+        recordedAt: r.recorded_at,
+      }));
     },
 
     async close(): Promise<void> {
