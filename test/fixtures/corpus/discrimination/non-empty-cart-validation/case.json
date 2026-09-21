@@ -1,0 +1,11 @@
+{
+  "id": "non-empty-cart-validation",
+  "operators": ["remove-assertion"],
+  "operatorRole": "prescriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "Removing the validation assertion allows checkout of an empty cart to proceed undetected.",
+  "productionEffect": "Mutating `validateCart` to accept empty items without throwing is expected to fail this test as written; removing the assertion allows the variant to pass.",
+  "expectedOutcome": "expected-to-fail",
+  "testFile": "test.ts",
+  "productionFiles": ["cart.ts"]
+}

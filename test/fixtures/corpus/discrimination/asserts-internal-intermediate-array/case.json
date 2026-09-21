@@ -1,0 +1,15 @@
+{
+  "id": "asserts-internal-intermediate-array",
+  "operators": [
+    "assert-incidental-interaction"
+  ],
+  "operatorRole": "descriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "The test asserts on the intermediate buffer array length instead of the output of flush.",
+  "productionEffect": "Corrupting `flush` to return an empty string leaves this test passing; it is expected to keep passing under that production mutation.",
+  "expectedOutcome": "expected-to-keep-passing",
+  "testFile": "test.ts",
+  "productionFiles": [
+    "collector.ts"
+  ]
+}

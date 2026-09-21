@@ -1,0 +1,11 @@
+{
+  "id": "never-calls-tested-function",
+  "operators": ["remove-assertion"],
+  "operatorRole": "descriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "The test creates input fixtures and asserts on unrelated constants without ever calling the function under test.",
+  "productionEffect": "Mutating `computeTax` to return 0 leaves this test passing; it is expected to keep passing under that production mutation.",
+  "expectedOutcome": "expected-to-keep-passing",
+  "testFile": "test.ts",
+  "productionFiles": ["tax.ts"]
+}

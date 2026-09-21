@@ -1,0 +1,11 @@
+{
+  "id": "asserts-mock-instantiation-only",
+  "operators": ["remove-assertion"],
+  "operatorRole": "descriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "The test instantiates the service and asserts only that the service instance is defined, omitting behavior assertions.",
+  "productionEffect": "Mutating `InvoiceService.generate` to throw an error leaves this test passing; it is expected to keep passing under that production mutation.",
+  "expectedOutcome": "expected-to-keep-passing",
+  "testFile": "test.ts",
+  "productionFiles": ["invoice.ts"]
+}

@@ -1,0 +1,15 @@
+{
+  "id": "asserts-observable-payment-status",
+  "operators": [
+    "assert-incidental-interaction"
+  ],
+  "operatorRole": "prescriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "Weakening status check from PAID to typeof string allows payment status regressions to pass.",
+  "productionEffect": "Mutating `processPayment` status to FAILED is expected to fail this test as written; weakening allows the corrupted status to pass.",
+  "expectedOutcome": "expected-to-fail",
+  "testFile": "test.ts",
+  "productionFiles": [
+    "payment.ts"
+  ]
+}

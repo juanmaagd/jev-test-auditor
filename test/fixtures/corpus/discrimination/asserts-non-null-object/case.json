@@ -1,0 +1,11 @@
+{
+  "id": "asserts-non-null-object",
+  "operators": ["weaken-expectation"],
+  "operatorRole": "descriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "The test asserts only that the returned token payload is non-null without verifying any of its claims.",
+  "productionEffect": "Mutating `createSessionToken` to return an empty object leaves this test passing; it is expected to keep passing under that production mutation.",
+  "expectedOutcome": "expected-to-keep-passing",
+  "testFile": "test.ts",
+  "productionFiles": ["token.ts"]
+}

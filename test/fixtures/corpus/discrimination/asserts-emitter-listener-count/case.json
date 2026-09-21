@@ -1,0 +1,15 @@
+{
+  "id": "asserts-emitter-listener-count",
+  "operators": [
+    "assert-incidental-interaction"
+  ],
+  "operatorRole": "descriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "The test asserts on internal listenerCount instead of verifying observable event delivery.",
+  "productionEffect": "Disabling event emissions in `emit` leaves this test passing; it is expected to keep passing under that production mutation.",
+  "expectedOutcome": "expected-to-keep-passing",
+  "testFile": "test.ts",
+  "productionFiles": [
+    "emitter.ts"
+  ]
+}

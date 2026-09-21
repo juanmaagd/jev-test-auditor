@@ -27,7 +27,7 @@ Suite: 1,163 tests across 51 files, all passing. `npm run typecheck`, `npm run l
 
 ## The next work, in the order it makes sense
 
-**1. Grow the benchmark corpus.** The benchmark corpus has been scaled to 35 cases (`test/fixtures/corpus/discrimination/*/`) covering all seven rubric dimensions with exactly 5 proven cases per dimension, satisfying `MIN_SAMPLE_FOR_RATE = 5`. Both classes (descriptive flaws and prescriptive controls) are represented in every dimension, allowing precision, recall, and false-positive rates to be computed automatically. Target for Phase 9 calibration remains 35 to 70 cases.
+**1. Grow the benchmark corpus.** The benchmark corpus has reached the target ceiling of 70 cases (`test/fixtures/corpus/discrimination/*/`) covering all seven rubric dimensions with exactly 10 proven cases per dimension (37 descriptive cases and 33 prescriptive controls). Each dimension has robust representation, comfortably clearing `MIN_SAMPLE_FOR_RATE = 5` and doubling statistical power for Wilson confidence intervals. Precision, recall, false-positive rate, stability, and calibration metrics compute reliably across all seven dimensions. Target for Phase 9 calibration is fully satisfied.
 
 Money is not the constraint. Measured: one corpus case costs roughly USD 0.00025–0.0008, so five hundred cases at twenty repetitions is under USD 8. Authoring effort and statistical validity are the constraints.
 

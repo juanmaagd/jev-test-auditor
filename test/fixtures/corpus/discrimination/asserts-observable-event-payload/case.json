@@ -1,0 +1,15 @@
+{
+  "id": "asserts-observable-event-payload",
+  "operators": [
+    "assert-incidental-interaction"
+  ],
+  "operatorRole": "prescriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "Weakening full payload assertion to a shallow property check allows version regression to pass.",
+  "productionEffect": "Corrupting payload version from 1 to 99 is expected to fail this test as written; weakening allows the corrupted version to pass.",
+  "expectedOutcome": "expected-to-fail",
+  "testFile": "test.ts",
+  "productionFiles": [
+    "event.ts"
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "id": "exact-discount-bounds-check",
+  "operators": ["remove-assertion"],
+  "operatorRole": "prescriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "Removing the boundary error assertion allows invalid negative discounts to be accepted without detection.",
+  "productionEffect": "Mutating `applyStrictDiscount` to allow negative percentages without throwing is expected to fail this test as written; removing the throw assertion allows the variant to pass.",
+  "expectedOutcome": "expected-to-fail",
+  "testFile": "test.ts",
+  "productionFiles": ["discount.ts"]
+}

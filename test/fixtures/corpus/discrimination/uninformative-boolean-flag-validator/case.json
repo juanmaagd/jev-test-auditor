@@ -1,0 +1,15 @@
+{
+  "id": "uninformative-boolean-flag-validator",
+  "operators": [
+    "obscure-failure-cause"
+  ],
+  "operatorRole": "descriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "The test asserts only on typeof boolean, obscuring whether validation succeeded or failed.",
+  "productionEffect": "Inverting the port check in `checkConfig` leaves this test passing; it is expected to keep passing under that production mutation.",
+  "expectedOutcome": "expected-to-keep-passing",
+  "testFile": "test.ts",
+  "productionFiles": [
+    "check.ts"
+  ]
+}

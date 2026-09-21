@@ -1,0 +1,15 @@
+{
+  "id": "mocks-inventory-lookup",
+  "operators": [
+    "mock-owned-logic"
+  ],
+  "operatorRole": "descriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "The test never calls `checkInventory`; it creates and asserts against a mock function returning true.",
+  "productionEffect": "Corrupting `checkInventory` to return false has no effect on this test; it is expected to keep passing under that production mutation.",
+  "expectedOutcome": "expected-to-keep-passing",
+  "testFile": "test.ts",
+  "productionFiles": [
+    "inventory.ts"
+  ]
+}

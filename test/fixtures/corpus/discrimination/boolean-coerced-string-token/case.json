@@ -1,0 +1,11 @@
+{
+  "id": "boolean-coerced-string-token",
+  "operators": ["weaken-expectation"],
+  "operatorRole": "descriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "The test wraps the generated authorization token in a Boolean() coercion, checking only non-empty string truthiness.",
+  "productionEffect": "Mutating `generateAuthToken` to return 'error' leaves this test passing; it is expected to keep passing under that production mutation.",
+  "expectedOutcome": "expected-to-keep-passing",
+  "testFile": "test.ts",
+  "productionFiles": ["auth.ts"]
+}

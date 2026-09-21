@@ -178,7 +178,7 @@ describe('runBenchmarkCli --metrics: real per-dimension report over the real cor
 
     const contents = await readFile(jsonlPath, 'utf8');
     const lines = contents.split('\n').filter((line) => line.length > 0);
-    expect(lines).toHaveLength(35);
+    expect(lines).toHaveLength(70);
     const validDimensionIds = new Set([
       'assertion-strength', 'behavioral-focus', 'determinism-isolation', 'diagnostic-quality',
       'falsifiability', 'refactor-resistance', 'test-double-quality',
@@ -214,7 +214,7 @@ describe('runBenchmarkCli --store: exit code reflects sampling, not proof alone 
       createSamplePort: () => alwaysFailingSamplePort(),
     });
 
-    expect(io.lines).toContain('35/35 case(s) proven.');
+    expect(io.lines).toContain('70/70 case(s) proven.');
     expect(exitCode).toBe(1);
   }, 60_000);
 
@@ -224,7 +224,7 @@ describe('runBenchmarkCli --store: exit code reflects sampling, not proof alone 
       createSamplePort: () => fakeSamplePort('healthy'),
     });
 
-    expect(io.lines).toContain('35/35 case(s) proven.');
+    expect(io.lines).toContain('70/70 case(s) proven.');
     expect(exitCode).toBe(0);
   }, 60_000);
 });

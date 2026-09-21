@@ -1,0 +1,15 @@
+{
+  "id": "precise-matcher-diff-invoice-id",
+  "operators": [
+    "obscure-failure-cause"
+  ],
+  "operatorRole": "prescriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "Replacing exact formatted invoice ID check with a prefix check obscures padding format defects.",
+  "productionEffect": "Removing invoice padding and standard tag is expected to fail this test as written; weakening allows the corrupted format to pass.",
+  "expectedOutcome": "expected-to-fail",
+  "testFile": "test.ts",
+  "productionFiles": [
+    "invoice-id.ts"
+  ]
+}

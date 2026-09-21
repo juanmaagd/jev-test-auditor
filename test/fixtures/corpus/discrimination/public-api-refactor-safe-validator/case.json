@@ -1,0 +1,15 @@
+{
+  "id": "public-api-refactor-safe-validator",
+  "operators": [
+    "pin-implementation-detail"
+  ],
+  "operatorRole": "prescriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "Weakening boolean validation check to typeof boolean allows invalid email acceptance regressions to pass.",
+  "productionEffect": "Mutating `validateEmail` to return true for missing @ is expected to fail this test as written; weakening the assertion allows the corrupted logic to pass.",
+  "expectedOutcome": "expected-to-fail",
+  "testFile": "test.ts",
+  "productionFiles": [
+    "validate.ts"
+  ]
+}

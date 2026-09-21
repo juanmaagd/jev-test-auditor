@@ -1,0 +1,15 @@
+{
+  "id": "real-currency-conversion",
+  "operators": [
+    "mock-owned-logic"
+  ],
+  "operatorRole": "prescriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "Replacing `totalInEur` with a hardcoded constant mock decouples the test from the conversion logic under test.",
+  "productionEffect": "Mutating `totalInEur` to return 0 is expected to fail this test as written; substituting a mock allows the corrupted logic to pass.",
+  "expectedOutcome": "expected-to-fail",
+  "testFile": "test.ts",
+  "productionFiles": [
+    "currency.ts"
+  ]
+}

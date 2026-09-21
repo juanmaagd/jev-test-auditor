@@ -1,0 +1,15 @@
+{
+  "id": "unseeded-random-float-threshold",
+  "operators": [
+    "add-shared-state"
+  ],
+  "operatorRole": "descriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "The test asserts on unseeded Math.random output with a generic type assertion.",
+  "productionEffect": "Corrupting the probability threshold of `coinFlip` leaves this test passing; it is expected to keep passing under that production mutation.",
+  "expectedOutcome": "expected-to-keep-passing",
+  "testFile": "test.ts",
+  "productionFiles": [
+    "random.ts"
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "id": "controlled-seeded-uuid-generator",
+  "operators": [
+    "add-shared-state"
+  ],
+  "operatorRole": "prescriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "Replacing exact deterministic ID assertion with a substring check allows multiplier regressions to pass.",
+  "productionEffect": "Corrupting the multiplier in `generateId` is expected to fail this test as written; weakening to a prefix check allows the corrupted logic to pass.",
+  "expectedOutcome": "expected-to-fail",
+  "testFile": "test.ts",
+  "productionFiles": [
+    "uuid.ts"
+  ]
+}

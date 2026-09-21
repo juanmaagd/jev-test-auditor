@@ -1,0 +1,15 @@
+{
+  "id": "shared-singleton-registry-leak",
+  "operators": [
+    "add-shared-state"
+  ],
+  "operatorRole": "descriptive",
+  "oracleKind": "repeated-randomized-execution",
+  "testEffect": "The test writes to a shared module-level registry array without resetting it between executions.",
+  "productionEffect": "A mutation causing `registerService` to only append on the first call keeps this test passing on repeated executions; it is expected to keep passing under that repeated execution.",
+  "expectedOutcome": "expected-to-keep-passing",
+  "testFile": "test.ts",
+  "productionFiles": [
+    "registry.ts"
+  ]
+}

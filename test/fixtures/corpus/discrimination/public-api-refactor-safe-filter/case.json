@@ -1,0 +1,15 @@
+{
+  "id": "public-api-refactor-safe-filter",
+  "operators": [
+    "pin-implementation-detail"
+  ],
+  "operatorRole": "prescriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "Weakening the exact list matcher to a length check allows corrupted filtering logic to escape detection.",
+  "productionEffect": "Mutating `filterActiveUsers` to return all users is expected to fail this test as written; weakening the assertion allows the corrupted logic to pass.",
+  "expectedOutcome": "expected-to-fail",
+  "testFile": "test.ts",
+  "productionFiles": [
+    "filter.ts"
+  ]
+}

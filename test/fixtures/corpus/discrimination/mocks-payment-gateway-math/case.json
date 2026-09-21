@@ -1,0 +1,15 @@
+{
+  "id": "mocks-payment-gateway-math",
+  "operators": [
+    "mock-owned-logic"
+  ],
+  "operatorRole": "descriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "The test never invokes the real `calculateProcessingFee` calculation; it uses a mock function returning 3.2.",
+  "productionEffect": "Corrupting `calculateProcessingFee` to return 0 leaves this test passing; it is expected to keep passing under that production mutation.",
+  "expectedOutcome": "expected-to-keep-passing",
+  "testFile": "test.ts",
+  "productionFiles": [
+    "fee.ts"
+  ]
+}

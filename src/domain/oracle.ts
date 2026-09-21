@@ -312,6 +312,181 @@ export const PRODUCTION_TRANSFORMS: Readonly<Record<string, TextTransform>> = {
     anchor: 'return subtotal + fee;',
     replacement: 'return subtotal - fee;',
   },
+  'tax-returns-zero': {
+    id: 'tax-returns-zero',
+    anchor: 'return subtotal * rate;',
+    replacement: 'return 0;',
+  },
+  'format-error-returns-empty': {
+    id: 'format-error-returns-empty',
+    anchor: 'return `ERR:${code}`;',
+    replacement: "return '';",
+  },
+  'invoice-generate-throws': {
+    id: 'invoice-generate-throws',
+    anchor: 'return `INV-${id}`;',
+    replacement: "throw new Error('generation failed');",
+  },
+  'remove-strict-discount-guard': {
+    id: 'remove-strict-discount-guard',
+    anchor: "if (pct < 0) throw new RangeError('negative percentage');",
+    replacement: 'if (pct < 0) { /* guard removed */ }',
+  },
+  'remove-cart-empty-guard': {
+    id: 'remove-cart-empty-guard',
+    anchor: "if (items.length === 0) throw new Error('cart empty');",
+    replacement: 'if (items.length === 0) { /* guard removed */ }',
+  },
+  'rebate-returns-zero': {
+    id: 'rebate-returns-zero',
+    anchor: 'return amount * 0.15;',
+    replacement: 'return 0;',
+  },
+  'session-token-returns-empty': {
+    id: 'session-token-returns-empty',
+    anchor: "return { user, role: 'admin' };",
+    replacement: 'return {};',
+  },
+  'auth-token-returns-error': {
+    id: 'auth-token-returns-error',
+    anchor: 'return `AUTH_${id}_OK`;',
+    replacement: "return 'error';",
+  },
+  'tiered-tax-rate-corrupted': {
+    id: 'tiered-tax-rate-corrupted',
+    anchor: 'if (amount > 100) return amount * 0.2;',
+    replacement: 'if (amount > 100) return amount * 0.25;',
+  },
+  'membership-tier-corrupted': {
+    id: 'membership-tier-corrupted',
+    anchor: 'if (points >= 1000) return 3;',
+    replacement: 'if (points >= 1000) return 2;',
+  },
+  'inventory-always-false': {
+    id: 'inventory-always-false',
+    anchor: 'return quantity > 0 && quantity <= 100;',
+    replacement: 'return false;',
+  },
+  'fee-returns-zero': {
+    id: 'fee-returns-zero',
+    anchor: 'return Math.round((amount * 0.029 + 0.3) * 100) / 100;',
+    replacement: 'return 0;',
+  },
+  'permission-always-false': {
+    id: 'permission-always-false',
+    anchor: "if (role === 'admin') return true;",
+    replacement: "if (role === 'admin') return false;",
+  },
+  'currency-rate-zero': {
+    id: 'currency-rate-zero',
+    anchor: 'return convertUsdToEur(amountUsd, 0.92);',
+    replacement: 'return 0;',
+  },
+  'volume-discount-corrupted': {
+    id: 'volume-discount-corrupted',
+    anchor: 'const discount = quantity >= 10 ? 0.2 : 0;',
+    replacement: 'const discount = 0;',
+  },
+  'sorter-inlines-sort': {
+    id: 'sorter-inlines-sort',
+    anchor: 'return this.quickSort([...nums]);',
+    replacement: 'return [...nums].sort((a, b) => a - b);',
+  },
+  'slugger-replaces-pattern': {
+    id: 'slugger-replaces-pattern',
+    anchor: 'readonly separatorPattern = /[\\s_-]+/g;',
+    replacement: 'readonly separatorPattern = /\\s+/g;',
+  },
+  'filter-returns-all': {
+    id: 'filter-returns-all',
+    anchor: 'return users.filter((u) => u.active).map((u) => u.id);',
+    replacement: 'return users.map((u) => u.id);',
+  },
+  'formatter-omits-currency': {
+    id: 'formatter-omits-currency',
+    anchor: 'return `${currency} ${amount.toFixed(2)}`;',
+    replacement: 'return amount.toFixed(2);',
+  },
+  'validate-always-true': {
+    id: 'validate-always-true',
+    anchor: "if (!email.includes('@')) return false;",
+    replacement: "if (!email.includes('@')) return true;",
+  },
+  'registry-only-first-call': {
+    id: 'registry-only-first-call',
+    anchor: 'export function registerService(name: string): number { registered.push(name); return registered.length; }',
+    replacement: 'let __regCalls = 0;\nexport function registerService(name: string): number { __regCalls += 1; if (__regCalls === 1) registered.push(name); return registered.length; }',
+  },
+  'coinflip-corrupted': {
+    id: 'coinflip-corrupted',
+    anchor: "return Math.random() >= 0.5 ? 'heads' : 'tails';",
+    replacement: "return Math.random() >= 0.99 ? 'heads' : 'tails';",
+  },
+  'clock-threshold-multiplied': {
+    id: 'clock-threshold-multiplied',
+    anchor: 'return Date.now() - timestamp < thresholdMs;',
+    replacement: 'return Date.now() - timestamp < thresholdMs * 100;',
+  },
+  'token-expiry-inverted': {
+    id: 'token-expiry-inverted',
+    anchor: 'return now >= token.expiresAt;',
+    replacement: 'return now < token.expiresAt;',
+  },
+  'uuid-offset-altered': {
+    id: 'uuid-offset-altered',
+    anchor: 'const val = Math.floor(seedRng() * 10000);',
+    replacement: 'const val = Math.floor(seedRng() * 5000);',
+  },
+  'bus-emit-noop': {
+    id: 'bus-emit-noop',
+    anchor: 'for (const h of this.handlers) h();',
+    replacement: '/* emit is no-op */',
+  },
+  'collector-flush-corrupted': {
+    id: 'collector-flush-corrupted',
+    anchor: "const joined = this.buffer.join(',');",
+    replacement: "const joined = '';",
+  },
+  'payment-status-corrupted': {
+    id: 'payment-status-corrupted',
+    anchor: "return { success: true, status: 'PAID' };",
+    replacement: "return { success: true, status: 'FAILED' };",
+  },
+  'batch-total-corrupted': {
+    id: 'batch-total-corrupted',
+    anchor: 'return { total: sum, count: items.length };',
+    replacement: 'return { total: sum * 2, count: items.length };',
+  },
+  'payload-version-corrupted': {
+    id: 'payload-version-corrupted',
+    anchor: 'return { user, action, version: 1 };',
+    replacement: 'return { user, action, version: 99 };',
+  },
+  'check-config-inverts-port': {
+    id: 'check-config-inverts-port',
+    anchor: 'return config.host.length > 0 && config.port > 0;',
+    replacement: 'return config.host.length > 0 && config.port < 0;',
+  },
+  'format-profile-corrupted': {
+    id: 'format-profile-corrupted',
+    anchor: 'return `${username}:${age}`;',
+    replacement: 'return `${username}#${age}`;',
+  },
+  'state-tax-rate-corrupted': {
+    id: 'state-tax-rate-corrupted',
+    anchor: "if (state === 'CA') return amount * 0.0825;",
+    replacement: "if (state === 'CA') return amount * 0.09;",
+  },
+  'order-status-corrupted': {
+    id: 'order-status-corrupted',
+    anchor: "if (delivered) return 'STATUS_DELIVERED';",
+    replacement: "if (delivered) return 'STATUS_COMPLETED';",
+  },
+  'invoice-id-corrupted': {
+    id: 'invoice-id-corrupted',
+    anchor: 'return `${prefix}-INV-${seq.toString().padStart(4, \'0\')}`;',
+    replacement: 'return `${prefix}-${seq}`;',
+  },
 };
 
 /**
@@ -396,6 +571,91 @@ export const TEST_VARIANT_TRANSFORMS: Readonly<Record<string, TextTransform>> = 
     anchor: 'expect(computeTotalWithFee(50, 5)).toBe(55);',
     replacement: 'expect(computeTotalWithFee(50, 5)).toBeGreaterThan(0);',
   },
+  'remove-strict-discount-assertion': {
+    id: 'remove-strict-discount-assertion',
+    anchor: 'expect(() => applyStrictDiscount(100, -10)).toThrow(RangeError);',
+    replacement: 'try { applyStrictDiscount(100, -10); } catch {}\n    expect(true).toBe(true);',
+  },
+  'remove-cart-empty-assertion': {
+    id: 'remove-cart-empty-assertion',
+    anchor: "expect(() => validateCart([])).toThrow('cart empty');",
+    replacement: 'try { validateCart([]); } catch {}\n    expect(true).toBe(true);',
+  },
+  'weaken-tiered-tax-assertion': {
+    id: 'weaken-tiered-tax-assertion',
+    anchor: 'expect(computeTieredTax(200)).toBe(40);',
+    replacement: 'expect(computeTieredTax(200)).toBeTruthy();',
+  },
+  'weaken-membership-tier-assertion': {
+    id: 'weaken-membership-tier-assertion',
+    anchor: 'expect(getMembershipTier(1500)).toBe(3);',
+    replacement: "expect(typeof getMembershipTier(1500)).toBe('number');",
+  },
+  'mock-currency-call': {
+    id: 'mock-currency-call',
+    anchor: 'expect(totalInEur(100)).toBe(92);',
+    replacement: 'const mockEur = 92;\n    expect(mockEur).toBe(92);',
+  },
+  'mock-volume-call': {
+    id: 'mock-volume-call',
+    anchor: 'expect(computeVolumeDiscount(10, 50)).toBe(400);',
+    replacement: 'const mockVolumeTotal = 400;\n    expect(mockVolumeTotal).toBe(400);',
+  },
+  'weaken-filter-assertion': {
+    id: 'weaken-filter-assertion',
+    anchor: "expect(filterActiveUsers(users)).toEqual(['u1', 'u3']);",
+    replacement: 'expect(filterActiveUsers(users).length).toBeGreaterThan(0);',
+  },
+  'weaken-format-assertion': {
+    id: 'weaken-format-assertion',
+    anchor: "expect(formatPrice(19.5, 'USD')).toBe('USD 19.50');",
+    replacement: "expect(formatPrice(19.5, 'USD')).toContain('19.50');",
+  },
+  'weaken-email-validation-assertion': {
+    id: 'weaken-email-validation-assertion',
+    anchor: "expect(validateEmail('invalid-email')).toBe(false);",
+    replacement: "expect(typeof validateEmail('invalid-email')).toBe('boolean');",
+  },
+  'introduce-uncontrolled-clock': {
+    id: 'introduce-uncontrolled-clock',
+    anchor: 'expect(isTokenExpired(token, 1001)).toBe(true);',
+    replacement: 'expect(typeof isTokenExpired(token, 1001)).toBe("boolean");',
+  },
+  'weaken-uuid-assertion': {
+    id: 'weaken-uuid-assertion',
+    anchor: "expect(generateId('item', deterministicRng)).toBe('item-4200');",
+    replacement: "expect(generateId('item', deterministicRng)).toContain('item-');",
+  },
+  'weaken-payment-status-assertion': {
+    id: 'weaken-payment-status-assertion',
+    anchor: "expect(processPayment(50).status).toBe('PAID');",
+    replacement: 'expect(typeof processPayment(50).status).toBe("string");',
+  },
+  'weaken-batch-assertion': {
+    id: 'weaken-batch-assertion',
+    anchor: 'expect(summary.total).toBe(60);',
+    replacement: 'expect(summary.total).toBeGreaterThan(0);',
+  },
+  'weaken-payload-assertion': {
+    id: 'weaken-payload-assertion',
+    anchor: "expect(createAuditPayload('alice', 'login')).toEqual({ user: 'alice', action: 'login', version: 1 });",
+    replacement: "expect(createAuditPayload('alice', 'login')).toHaveProperty('user');",
+  },
+  'weaken-tax-rate-assertion': {
+    id: 'weaken-tax-rate-assertion',
+    anchor: "expect(computeStateTax(100, 'CA')).toBe(8.25);",
+    replacement: "expect(computeStateTax(100, 'CA')).toBeGreaterThan(0);",
+  },
+  'weaken-order-status-assertion': {
+    id: 'weaken-order-status-assertion',
+    anchor: "expect(getOrderStatus(true, true)).toBe('STATUS_DELIVERED');",
+    replacement: "expect(typeof getOrderStatus(true, true)).toBe('string');",
+  },
+  'weaken-invoice-id-assertion': {
+    id: 'weaken-invoice-id-assertion',
+    anchor: "expect(formatInvoiceId('US', 42)).toBe('US-INV-0042');",
+    replacement: "expect(formatInvoiceId('US', 42)).toContain('US-');",
+  },
 };
 
 interface SingleMutationRecipe {
@@ -459,6 +719,41 @@ const CASE_ORACLE_RECIPES: Readonly<Record<string, CaseOracleRecipe>> = {
   'bundled-multi-assertion-boolean': { kind: 'single-mutation', targetFile: 'report.ts', transformId: 'report-total-halved' },
   'precise-matcher-diff-discount': { kind: 'single-mutation', targetFile: 'discount.ts', transformId: 'tiered-discount-altered', variantTransformId: 'weaken-tiered-discount-assertion' },
   'precise-matcher-diff-subtotal': { kind: 'single-mutation', targetFile: 'pricing.ts', transformId: 'total-fee-subtracted', variantTransformId: 'weaken-fee-assertion' },
+  'never-calls-tested-function': { kind: 'single-mutation', targetFile: 'tax.ts', transformId: 'tax-returns-zero' },
+  'tautological-string-length': { kind: 'single-mutation', targetFile: 'error.ts', transformId: 'format-error-returns-empty' },
+  'asserts-mock-instantiation-only': { kind: 'single-mutation', targetFile: 'invoice.ts', transformId: 'invoice-generate-throws' },
+  'exact-discount-bounds-check': { kind: 'single-mutation', targetFile: 'discount.ts', transformId: 'remove-strict-discount-guard', variantTransformId: 'remove-strict-discount-assertion' },
+  'non-empty-cart-validation': { kind: 'single-mutation', targetFile: 'cart.ts', transformId: 'remove-cart-empty-guard', variantTransformId: 'remove-cart-empty-assertion' },
+  'checks-definedness-only': { kind: 'single-mutation', targetFile: 'rebate.ts', transformId: 'rebate-returns-zero' },
+  'asserts-non-null-object': { kind: 'single-mutation', targetFile: 'token.ts', transformId: 'session-token-returns-empty' },
+  'boolean-coerced-string-token': { kind: 'single-mutation', targetFile: 'auth.ts', transformId: 'auth-token-returns-error' },
+  'precise-tiered-tax-rate': { kind: 'single-mutation', targetFile: 'tax.ts', transformId: 'tiered-tax-rate-corrupted', variantTransformId: 'weaken-tiered-tax-assertion' },
+  'exact-membership-status-code': { kind: 'single-mutation', targetFile: 'membership.ts', transformId: 'membership-tier-corrupted', variantTransformId: 'weaken-membership-tier-assertion' },
+  'mocks-inventory-lookup': { kind: 'single-mutation', targetFile: 'inventory.ts', transformId: 'inventory-always-false' },
+  'mocks-payment-gateway-math': { kind: 'single-mutation', targetFile: 'fee.ts', transformId: 'fee-returns-zero' },
+  'mocks-user-permission-check': { kind: 'single-mutation', targetFile: 'permission.ts', transformId: 'permission-always-false' },
+  'real-currency-conversion': { kind: 'single-mutation', targetFile: 'currency.ts', transformId: 'currency-rate-zero', variantTransformId: 'mock-currency-call' },
+  'real-volume-discount': { kind: 'single-mutation', targetFile: 'volume.ts', transformId: 'volume-discount-corrupted', variantTransformId: 'mock-volume-call' },
+  'spies-on-internal-sort': { kind: 'single-mutation', targetFile: 'sorter.ts', transformId: 'sorter-inlines-sort' },
+  'pins-internal-regex-matcher': { kind: 'single-mutation', targetFile: 'slug.ts', transformId: 'slugger-replaces-pattern' },
+  'public-api-refactor-safe-filter': { kind: 'single-mutation', targetFile: 'filter.ts', transformId: 'filter-returns-all', variantTransformId: 'weaken-filter-assertion' },
+  'public-api-refactor-safe-formatter': { kind: 'single-mutation', targetFile: 'formatter.ts', transformId: 'formatter-omits-currency', variantTransformId: 'weaken-format-assertion' },
+  'public-api-refactor-safe-validator': { kind: 'single-mutation', targetFile: 'validate.ts', transformId: 'validate-always-true', variantTransformId: 'weaken-email-validation-assertion' },
+  'shared-singleton-registry-leak': { kind: 'repeated-execution', targetFile: 'registry.ts', transformId: 'registry-only-first-call', repeatCount: 2 },
+  'unseeded-random-float-threshold': { kind: 'single-mutation', targetFile: 'random.ts', transformId: 'coinflip-corrupted' },
+  'wall-clock-timestamp-assertion': { kind: 'single-mutation', targetFile: 'clock.ts', transformId: 'clock-threshold-multiplied' },
+  'controlled-clock-token-refresh': { kind: 'single-mutation', targetFile: 'token-expiry.ts', transformId: 'token-expiry-inverted', variantTransformId: 'introduce-uncontrolled-clock' },
+  'controlled-seeded-uuid-generator': { kind: 'single-mutation', targetFile: 'uuid.ts', transformId: 'uuid-offset-altered', variantTransformId: 'weaken-uuid-assertion' },
+  'asserts-emitter-listener-count': { kind: 'single-mutation', targetFile: 'emitter.ts', transformId: 'bus-emit-noop' },
+  'asserts-internal-intermediate-array': { kind: 'single-mutation', targetFile: 'collector.ts', transformId: 'collector-flush-corrupted' },
+  'asserts-observable-payment-status': { kind: 'single-mutation', targetFile: 'payment.ts', transformId: 'payment-status-corrupted', variantTransformId: 'weaken-payment-status-assertion' },
+  'asserts-observable-batch-summary': { kind: 'single-mutation', targetFile: 'batch.ts', transformId: 'batch-total-corrupted', variantTransformId: 'weaken-batch-assertion' },
+  'asserts-observable-event-payload': { kind: 'single-mutation', targetFile: 'event.ts', transformId: 'payload-version-corrupted', variantTransformId: 'weaken-payload-assertion' },
+  'uninformative-boolean-flag-validator': { kind: 'single-mutation', targetFile: 'check.ts', transformId: 'check-config-inverts-port' },
+  'anonymous-it-assertion-block': { kind: 'single-mutation', targetFile: 'profile.ts', transformId: 'format-profile-corrupted' },
+  'precise-matcher-diff-tax-rate': { kind: 'single-mutation', targetFile: 'tax-rate.ts', transformId: 'state-tax-rate-corrupted', variantTransformId: 'weaken-tax-rate-assertion' },
+  'precise-matcher-diff-order-status': { kind: 'single-mutation', targetFile: 'order.ts', transformId: 'order-status-corrupted', variantTransformId: 'weaken-order-status-assertion' },
+  'precise-matcher-diff-invoice-id': { kind: 'single-mutation', targetFile: 'invoice-id.ts', transformId: 'invoice-id-corrupted', variantTransformId: 'weaken-invoice-id-assertion' },
 };
 
 /**

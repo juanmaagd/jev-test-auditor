@@ -1,0 +1,15 @@
+{
+  "id": "precise-matcher-diff-order-status",
+  "operators": [
+    "obscure-failure-cause"
+  ],
+  "operatorRole": "prescriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "Replacing exact status code assertion with typeof string obscures status mismatch details.",
+  "productionEffect": "Corrupting delivered order status from STATUS_DELIVERED to STATUS_COMPLETED is expected to fail this test as written; weakening allows the wrong status to pass.",
+  "expectedOutcome": "expected-to-fail",
+  "testFile": "test.ts",
+  "productionFiles": [
+    "order.ts"
+  ]
+}

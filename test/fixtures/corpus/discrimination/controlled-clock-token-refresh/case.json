@@ -1,0 +1,15 @@
+{
+  "id": "controlled-clock-token-refresh",
+  "operators": [
+    "introduce-uncontrolled-time"
+  ],
+  "operatorRole": "prescriptive",
+  "oracleKind": "assertion-mutation",
+  "testEffect": "Replacing exact boolean assertion with a weak type check obscures token expiration failures.",
+  "productionEffect": "Inverting the expiry comparison logic is expected to fail this test as written; weakening the assertion allows the corrupted logic to pass.",
+  "expectedOutcome": "expected-to-fail",
+  "testFile": "test.ts",
+  "productionFiles": [
+    "token-expiry.ts"
+  ]
+}

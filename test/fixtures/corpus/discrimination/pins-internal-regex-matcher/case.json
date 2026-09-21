@@ -1,0 +1,15 @@
+{
+  "id": "pins-internal-regex-matcher",
+  "operators": [
+    "pin-implementation-detail"
+  ],
+  "operatorRole": "descriptive",
+  "oracleKind": "semantics-preserving-refactor",
+  "testEffect": "The test asserts on the source property of the internal `separatorPattern` regex.",
+  "productionEffect": "Replacing the internal regex pattern with an alternate regex preserves slugification behavior but fails the pinned property assertion; it is expected to fail under that semantics-preserving refactor.",
+  "expectedOutcome": "expected-to-fail",
+  "testFile": "test.ts",
+  "productionFiles": [
+    "slug.ts"
+  ]
+}

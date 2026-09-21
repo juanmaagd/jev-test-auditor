@@ -1,0 +1,15 @@
+{
+  "id": "public-api-refactor-safe-formatter",
+  "operators": [
+    "pin-implementation-detail"
+  ],
+  "operatorRole": "prescriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "Weakening the exact formatted price assertion to a substring check allows missing currency prefix regressions to pass.",
+  "productionEffect": "Mutating `formatPrice` to omit the currency code is expected to fail this test as written; weakening the assertion allows the regression to pass.",
+  "expectedOutcome": "expected-to-fail",
+  "testFile": "test.ts",
+  "productionFiles": [
+    "formatter.ts"
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "id": "mocks-user-permission-check",
+  "operators": [
+    "mock-owned-logic"
+  ],
+  "operatorRole": "descriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "The test substitutes a mock function for owned role-based permission logic.",
+  "productionEffect": "Corrupting `hasPermission` to always return false leaves this test passing; it is expected to keep passing under that production mutation.",
+  "expectedOutcome": "expected-to-keep-passing",
+  "testFile": "test.ts",
+  "productionFiles": [
+    "permission.ts"
+  ]
+}

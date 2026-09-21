@@ -1,0 +1,11 @@
+{
+  "id": "exact-membership-status-code",
+  "operators": ["weaken-expectation"],
+  "operatorRole": "prescriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "Weakening the status code assertion to check typeof number allows an incorrect tier code to pass undetected.",
+  "productionEffect": "Mutating `getMembershipTier` status code is expected to fail this test as written; weakening to typeof number allows the variant to pass.",
+  "expectedOutcome": "expected-to-fail",
+  "testFile": "test.ts",
+  "productionFiles": ["membership.ts"]
+}

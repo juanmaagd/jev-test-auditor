@@ -1,0 +1,15 @@
+{
+  "id": "anonymous-it-assertion-block",
+  "operators": [
+    "obscure-failure-cause"
+  ],
+  "operatorRole": "descriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "The test uses a vague test name \"test 1\" and a weak truthy assertion, giving no diagnostic information on failure.",
+  "productionEffect": "Corrupting the profile delimiter from : to # leaves this truthy test passing; it is expected to keep passing under that production mutation.",
+  "expectedOutcome": "expected-to-keep-passing",
+  "testFile": "test.ts",
+  "productionFiles": [
+    "profile.ts"
+  ]
+}

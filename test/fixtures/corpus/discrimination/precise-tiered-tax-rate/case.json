@@ -1,0 +1,11 @@
+{
+  "id": "precise-tiered-tax-rate",
+  "operators": ["weaken-expectation"],
+  "operatorRole": "prescriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "Weakening the exact tiered tax calculation assertion to a truthy check allows corrupted rates to pass undetected.",
+  "productionEffect": "Mutating `computeTieredTax` rate calculation is expected to fail this test as written; weakening to a truthy assertion allows the variant to pass.",
+  "expectedOutcome": "expected-to-fail",
+  "testFile": "test.ts",
+  "productionFiles": ["tax.ts"]
+}

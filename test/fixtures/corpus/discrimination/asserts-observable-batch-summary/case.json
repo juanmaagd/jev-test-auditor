@@ -1,0 +1,15 @@
+{
+  "id": "asserts-observable-batch-summary",
+  "operators": [
+    "assert-incidental-interaction"
+  ],
+  "operatorRole": "prescriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "Weakening total calculation assertion to a truthy check allows doubling regressions to pass.",
+  "productionEffect": "Doubling the batch total calculation is expected to fail this test as written; weakening allows the corrupted total to pass.",
+  "expectedOutcome": "expected-to-fail",
+  "testFile": "test.ts",
+  "productionFiles": [
+    "batch.ts"
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "id": "checks-definedness-only",
+  "operators": ["weaken-expectation"],
+  "operatorRole": "descriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "The test asserts only that the returned rebate amount is defined rather than matching the exact expected calculation.",
+  "productionEffect": "Mutating `calculateRebate` to return 0 leaves this test passing; it is expected to keep passing under that production mutation.",
+  "expectedOutcome": "expected-to-keep-passing",
+  "testFile": "test.ts",
+  "productionFiles": ["rebate.ts"]
+}

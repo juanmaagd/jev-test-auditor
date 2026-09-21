@@ -1,0 +1,15 @@
+{
+  "id": "wall-clock-timestamp-assertion",
+  "operators": [
+    "introduce-uncontrolled-time"
+  ],
+  "operatorRole": "descriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "The test uses non-deterministic Date.now() wall clock without clock injection.",
+  "productionEffect": "Multiplying the recency threshold leaves this uncalibrated test passing; it is expected to keep passing under that production mutation.",
+  "expectedOutcome": "expected-to-keep-passing",
+  "testFile": "test.ts",
+  "productionFiles": [
+    "clock.ts"
+  ]
+}

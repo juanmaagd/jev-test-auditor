@@ -1,0 +1,11 @@
+{
+  "id": "tautological-string-length",
+  "operators": ["remove-assertion"],
+  "operatorRole": "descriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "The test asserts that an error message string length is greater than or equal to zero, a tautology that cannot fail.",
+  "productionEffect": "Mutating `formatError` to return empty string leaves this test passing; it is expected to keep passing under that production mutation.",
+  "expectedOutcome": "expected-to-keep-passing",
+  "testFile": "test.ts",
+  "productionFiles": ["error.ts"]
+}

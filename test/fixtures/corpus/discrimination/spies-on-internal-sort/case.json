@@ -1,0 +1,15 @@
+{
+  "id": "spies-on-internal-sort",
+  "operators": [
+    "pin-implementation-detail"
+  ],
+  "operatorRole": "descriptive",
+  "oracleKind": "semantics-preserving-refactor",
+  "testEffect": "The test spies directly on the internal `quickSort` helper rather than testing only observable sorted output.",
+  "productionEffect": "Inlining the sort implementation preserves behavior but causes the spy assertion to fail; it is expected to fail under that semantics-preserving refactor.",
+  "expectedOutcome": "expected-to-fail",
+  "testFile": "test.ts",
+  "productionFiles": [
+    "sorter.ts"
+  ]
+}
