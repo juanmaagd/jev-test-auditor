@@ -2,6 +2,11 @@
   "name": "jev-test-auditor",
   "version": "0.1.0",
   "description": "A local-first semantic test quality auditor.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/typesafe-ai/jev-test-auditor.git"
+  },
   "type": "module",
   "types": "./dist/index.d.ts",
   "exports": {
