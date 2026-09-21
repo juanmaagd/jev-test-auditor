@@ -307,10 +307,18 @@ function formatRate(metric: RateMetric): string {
   return `${fraction} (${(metric.value! * 100).toFixed(1)}%)`;
 }
 
-function formatSampled(metric: SampledMetric, unit: (value: number) => string): string {
+/**
+ * `counterNoun` names what `metric.sampleCount` actually counts — `'distinct case'` for
+ * calibration (this fix's own collapse — see `src/domain/benchmark-metrics.ts`'s "Independent
+ * samples" doc section), `'sample'` for cost/latency (deliberately still per-repetition). Printing
+ * the noun alongside the count is what keeps a reader from mistaking one dimension's calibration
+ * `n` for its cost/latency `n` — they now count different things.
+ */
+function formatSampled(metric: SampledMetric, unit: (value: number) => string, counterNoun: string): string {
+  const countLabel = `n=${metric.sampleCount} ${counterNoun}${metric.sampleCount === 1 ? '' : 's'}`;
   if (metric.kind === 'not-computable') return `not computable (${metric.reason})`;
-  if (metric.kind === 'below-minimum-sample') return `${unit(metric.value!)} (n=${metric.sampleCount}, indicative only — below minimum sample of ${MIN_SAMPLE_FOR_RATE})`;
-  return `${unit(metric.value!)} (n=${metric.sampleCount})`;
+  if (metric.kind === 'below-minimum-sample') return `${unit(metric.value!)} (${countLabel}, indicative only — below minimum sample of ${MIN_SAMPLE_FOR_RATE})`;
+  return `${unit(metric.value!)} (${countLabel})`;
 }
 
 function printDimensionReport(dimension: BenchmarkMetricsDimensionReport, io: BenchmarkCliIo): void {
@@ -318,16 +326,24 @@ function printDimensionReport(dimension: BenchmarkMetricsDimensionReport, io: Be
   if (dimension.provenCaseCount === 0) {
     io.writeLine('  no proven case in the corpus targets this dimension via its declared operator.');
   } else {
-    io.writeLine(`  proven cases designated to this dimension: ${dimension.provenCaseCount}`);
+    // Distinct cases vs. samples, always printed together: precision/recall/false-positive-rate/
+    // needs-review-routing/calibration below are computed over the FIRST number (distinct proven
+    // cases, one observation per case via majority vote or mean — see this module's own
+    // "Independent samples" doc section), never the second (raw repeated measurements).
+    io.writeLine(`  proven cases designated to this dimension: ${dimension.provenCaseCount} distinct case(s), from ${dimension.designatedSampleCount} sample(s) across the given run(s)`);
   }
   io.writeLine(`  precision:            ${formatRate(dimension.precision)}`);
   io.writeLine(`  recall:               ${formatRate(dimension.recall)}`);
   io.writeLine(`  false-positive rate:  ${formatRate(dimension.falsePositiveRate)}`);
   io.writeLine(`  needs-review routing: ${formatRate(dimension.needsReviewRouting)}`);
-  io.writeLine(`  calibration (Brier):  ${formatSampled(dimension.calibration, (value) => value.toFixed(4))}`);
-  io.writeLine(`  cost:                 ${formatSampled(dimension.cost, (value) => `$${value.toFixed(6)}`)}`);
-  io.writeLine(`  latency:              ${formatSampled(dimension.latency, (value) => `${value.toFixed(0)}ms`)}`);
+  io.writeLine(`  calibration (Brier):  ${formatSampled(dimension.calibration, (value) => value.toFixed(4), 'distinct case')}`);
+  io.writeLine(`  cost:                 ${formatSampled(dimension.cost, (value) => `$${value.toFixed(6)}`, 'sample')}`);
+  io.writeLine(`  latency:              ${formatSampled(dimension.latency, (value) => `${value.toFixed(0)}ms`, 'sample')}`);
   io.writeLine(`  run-to-run stability: ${formatRate(dimension.stability)}`);
+  if (dimension.splitVerdictCases.length > 0) {
+    io.writeLine(`  split-verdict cases (repetitions disagreed with no majority — excluded, never guessed at): ${dimension.splitVerdictCases.length}`);
+    for (const entry of dimension.splitVerdictCases) io.writeLine(`    ${entry.caseId}: ${entry.reasons.join('; ')}`);
+  }
 }
 
 function printMetricsReport(report: BenchmarkMetricsReport, io: BenchmarkCliIo): void {

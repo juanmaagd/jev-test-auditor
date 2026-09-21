@@ -421,3 +421,135 @@ describe('computeBenchmarkMetricsReport: run-to-run stability requires at least 
     expect(stability).toEqual({ kind: 'computed', numerator: 4, denominator: 6, value: 4 / 6, reason: undefined });
   });
 });
+
+describe('computeBenchmarkMetricsReport: accuracy metrics count DISTINCT PROVEN CASES, never samples (independent-samples fix)', () => {
+  it('one case sampled identically across 5 runs reports recall 1/1 (below-minimum-sample) — never the old 5/5 (computed): the exact defect this fix closes', () => {
+    // Same case, same (unanimous) verdict, in all five repetitions — one observation measured
+    // five times, not five independent observations. Before this fix this reported
+    // `5/5 (100.0%)`, clearing MIN_SAMPLE_FOR_RATE on a denominator that was never five distinct
+    // cases.
+    const runs = Array.from({ length: 5 }, (_, index) =>
+      run(`run-${index + 1}`, [
+        outcome({ caseId: 'lone-case', operator: 'pin-implementation-detail', operatorRole: 'descriptive', level: 'misleading' }),
+      ]));
+    const report = computeBenchmarkMetricsReport(runs);
+    const refactorResistance = dimensionReport(report, 'refactor-resistance');
+
+    expect(refactorResistance.provenCaseCount).toBe(1);
+    expect(refactorResistance.designatedSampleCount).toBe(5);
+    expect(refactorResistance.recall).toEqual({ kind: 'below-minimum-sample', numerator: 1, denominator: 1, value: 1, reason: undefined });
+  });
+
+  it('a fixture with 5 total samples but only 2 distinct cases was `computed` under sample-counting and MUST transition to below-minimum-sample under case-counting', () => {
+    // 5 samples total (2 + 2 + 1), matching the old MIN_SAMPLE_FOR_RATE=5 threshold on SAMPLES —
+    // but only 2 distinct cases. Asserts the actual transition (computed -> below-minimum-sample),
+    // not merely a passing number that could be vacuously true either way.
+    const runs = [
+      run('run-1', [
+        outcome({ caseId: 'case-a', operator: 'weaken-expectation', operatorRole: 'descriptive', level: 'misleading' }),
+        outcome({ caseId: 'case-b', operator: 'weaken-expectation', operatorRole: 'descriptive', level: 'weak' }),
+      ]),
+      run('run-2', [
+        outcome({ caseId: 'case-a', operator: 'weaken-expectation', operatorRole: 'descriptive', level: 'misleading' }),
+        outcome({ caseId: 'case-b', operator: 'weaken-expectation', operatorRole: 'descriptive', level: 'weak' }),
+      ]),
+      run('run-3', [
+        outcome({ caseId: 'case-a', operator: 'weaken-expectation', operatorRole: 'descriptive', level: 'misleading' }),
+      ]),
+    ];
+    const report = computeBenchmarkMetricsReport(runs);
+    const assertionStrength = dimensionReport(report, 'assertion-strength');
+
+    expect(assertionStrength.designatedSampleCount).toBe(5);
+    expect(assertionStrength.provenCaseCount).toBe(2);
+    expect(assertionStrength.recall.denominator).toBe(2);
+    expect(assertionStrength.recall.kind).toBe('below-minimum-sample');
+  });
+});
+
+describe('computeBenchmarkMetricsReport: disagreeing repetitions collapse to ONE observation per case by majority vote; an exact tie is excluded and disclosed, never guessed at', () => {
+  it('a case judged deficient in 3 runs and healthy in 2 collapses to ONE deficient observation (majority), not double-counted per run', () => {
+    const levels: readonly ClassificationLevel[] = ['misleading', 'misleading', 'misleading', 'acceptable', 'acceptable'];
+    const runs = levels.map((level, index) =>
+      run(`run-${index + 1}`, [
+        outcome({ caseId: 'flaky', operator: 'weaken-expectation', operatorRole: 'descriptive', level }),
+      ]));
+    const report = computeBenchmarkMetricsReport(runs);
+    const assertionStrength = dimensionReport(report, 'assertion-strength');
+
+    expect(assertionStrength.recall).toEqual({ kind: 'below-minimum-sample', numerator: 1, denominator: 1, value: 1, reason: undefined });
+    expect(assertionStrength.splitVerdictCases).toEqual([]);
+  });
+
+  it('an exact tie (2 deficient vs 2 healthy repetitions) is excluded from the confusion matrix and reported as a split verdict, never guessed at', () => {
+    const levels: readonly ClassificationLevel[] = ['misleading', 'misleading', 'acceptable', 'acceptable'];
+    const runs = levels.map((level, index) =>
+      run(`run-${index + 1}`, [
+        outcome({ caseId: 'tied', operator: 'weaken-expectation', operatorRole: 'descriptive', level }),
+      ]));
+    const report = computeBenchmarkMetricsReport(runs);
+    const assertionStrength = dimensionReport(report, 'assertion-strength');
+
+    expect(assertionStrength.recall).toEqual({ kind: 'not-computable', numerator: 0, denominator: 0, value: undefined, reason: expect.stringMatching(/descriptive/i) });
+    expect(assertionStrength.splitVerdictCases).toHaveLength(1);
+    expect(assertionStrength.splitVerdictCases[0]!.caseId).toBe('tied');
+    expect(assertionStrength.splitVerdictCases[0]!.reasons[0]).toMatch(/tied|no majority/i);
+  });
+});
+
+describe('computeBenchmarkMetricsReport: calibration collapses repeated probability estimates to ONE mean-mass observation per case', () => {
+  it('computes the Brier score from the MEAN deficientMass across repetitions, not the mean of per-repetition Brier scores', () => {
+    // Ground truth deficient (descriptive). Two repetitions of the SAME case: deficientMass 0.9
+    // and 0.5. Mean mass = 0.7 -> Brier = (0.7-1)^2 = 0.09.
+    // If Brier were instead averaged PER SAMPLE (the old, now-wrong behavior):
+    // (0.9-1)^2=0.01, (0.5-1)^2=0.25 -> mean = 0.13 -- a DIFFERENT number, proving the two
+    // collapse rules are not interchangeable.
+    const runs = [
+      run('run-1', [outcome({ caseId: 'c1', operator: 'weaken-expectation', operatorRole: 'descriptive', level: 'misleading', deficientMass: 0.9 })]),
+      run('run-2', [outcome({ caseId: 'c1', operator: 'weaken-expectation', operatorRole: 'descriptive', level: 'misleading', deficientMass: 0.5 })]),
+    ];
+    const report = computeBenchmarkMetricsReport(runs);
+    const assertionStrength = dimensionReport(report, 'assertion-strength');
+
+    expect(assertionStrength.calibration.sampleCount).toBe(1);
+    expect(assertionStrength.calibration.value).toBeCloseTo(0.09, 10);
+  });
+});
+
+describe('computeBenchmarkMetricsReport: cost and latency stay computed over SAMPLES, never collapsed by case — repetition is genuinely the measurement there', () => {
+  it('one case sampled 3 times with distinct cost/latency reports sampleCount 3 for both, never 1 (the metrics this fix must NOT touch)', () => {
+    const runs = [
+      run('run-1', [outcome({ caseId: 'c1', operator: 'weaken-expectation', operatorRole: 'descriptive', level: 'misleading', inputTokens: 1_000_000, latencyMs: 100 })]),
+      run('run-2', [outcome({ caseId: 'c1', operator: 'weaken-expectation', operatorRole: 'descriptive', level: 'misleading', inputTokens: 2_000_000, latencyMs: 200 })]),
+      run('run-3', [outcome({ caseId: 'c1', operator: 'weaken-expectation', operatorRole: 'descriptive', level: 'misleading', inputTokens: 3_000_000, latencyMs: 300 })]),
+    ];
+    const report = computeBenchmarkMetricsReport(runs);
+    const assertionStrength = dimensionReport(report, 'assertion-strength');
+
+    expect(assertionStrength.cost.sampleCount).toBe(3);
+    expect(assertionStrength.latency.sampleCount).toBe(3);
+    expect(assertionStrength.latency.value).toBe(200);
+  });
+});
+
+describe('computeBenchmarkMetricsReport: needs-review routing also collapses to one observation per case', () => {
+  it('a case that needs-reviews on a dimension in 3 of 5 runs routes as needs-review ONCE for that dimension (majority), not 3/5', () => {
+    const needsReviewFlags: readonly boolean[] = [true, true, true, false, false];
+    const runs = needsReviewFlags.map((needsReview, index) => {
+      const base = outcome({ caseId: 'r1', operator: 'weaken-expectation', operatorRole: 'descriptive', level: 'misleading' });
+      if (!needsReview || base.sample === undefined) return run(`run-${index + 1}`, [base]);
+      const withNeedsReview: DimensionJudgment[] = base.sample.classification.dimensions.map((dimensionJudgment) =>
+        (dimensionJudgment.dimensionId === 'behavioral-focus'
+          ? { ...dimensionJudgment, status: 'needs-review' as const, level: undefined, reason: 'boundary-straddle' as const }
+          : dimensionJudgment));
+      return run(`run-${index + 1}`, [{
+        ...base,
+        sample: { ...base.sample, classification: { ...base.sample.classification, dimensions: withNeedsReview } },
+      }]);
+    });
+    const report = computeBenchmarkMetricsReport(runs);
+    const behavioralFocus = dimensionReport(report, 'behavioral-focus');
+
+    expect(behavioralFocus.needsReviewRouting).toEqual({ kind: 'below-minimum-sample', numerator: 1, denominator: 1, value: 1, reason: undefined });
+  });
+});

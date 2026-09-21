@@ -107,6 +107,72 @@
  * metric, however large the corpus grows — exactly the behavior this
  * module's own "no proven case reports that plainly" rule exists to make
  * visible rather than hide.
+ *
+ * **Independent samples (confirmed defect, fixed after P7-4 shipped).**
+ * `MIN_SAMPLE_FOR_RATE` exists to guard against too few *cases* — repeating
+ * the SAME case (a stability run resamples the identical corpus, up to five
+ * times) adds no independent evidence about the dimension, only about that
+ * one case's own run-to-run consistency, which {@link BenchmarkMetricsDimensionReport.stability}
+ * already reports on its own terms. The first P7-4 implementation computed
+ * precision/recall/falsePositiveRate/needsReviewRouting/calibration with a
+ * denominator counting samples (case x run) rather than distinct cases: one
+ * case measured five times cleared `MIN_SAMPLE_FOR_RATE` and printed a
+ * confident `5/5 (100.0%)` from a single observation — exactly the "coin
+ * flip printed to two decimals" this module's own threshold exists to
+ * prevent, and self-concealing besides, since a larger corpus (this phase's
+ * own 35-70 case target) makes an inflated denominator look plausible rather
+ * than obviously wrong. Fixed here: every accuracy metric above
+ * (`precision`, `recall`, `falsePositiveRate`, `needsReviewRouting`,
+ * `calibration`) is computed over {@link BenchmarkMetricsDimensionReport.provenCaseCount}
+ * DISTINCT proven cases, never {@link BenchmarkMetricsDimensionReport.designatedSampleCount}
+ * samples — `cost`, `latency`, and `stability` are deliberately UNCHANGED
+ * (still per-sample), since for those three, repeated measurement genuinely
+ * IS what is being measured (a case's five separate API calls have five
+ * separate real costs and latencies; run-to-run agreement is stability's own
+ * subject).
+ *
+ * **The collapse rule, chosen and justified, not left implicit.** A case
+ * proven+sampled in N runs contributes N repeated judgments for a given
+ * dimension; these must fold into exactly ONE observation before entering
+ * precision/recall/falsePositiveRate/needsReviewRouting (calibration is
+ * handled separately below). {@link majorityVerdict} takes the STRICT
+ * PLURALITY across a case's repetitions — for a two-way vote (deficient vs.
+ * healthy; needs-review vs. judged) this is an ordinary majority. Majority
+ * vote is chosen over strict unanimity because unanimity would discard
+ * exactly the case this task's own instructions named as the motivating
+ * example ("judged deficient in three runs and healthy in two") — a 3-vs-2
+ * split has a real, dominant answer, and discarding it wastes the very
+ * repeated measurement the corpus paid for. Majority vote is chosen over
+ * "disagreement as its own outcome" because a third confusion-matrix bucket
+ * has no principled TP/FP/FN/TN slot to land in without inventing new policy
+ * this task did not authorize (`src/domain/classification.ts` already owns
+ * per-sample policy; this module only aggregates). The vote's ELECTORATE is
+ * `judged` repetitions only for the accuracy vote (a repetition that itself
+ * came back `needs-review` or `not-applicable` abstains — matching the prior
+ * per-sample code's own skip of non-`judged` statuses) and non-`not-applicable`
+ * repetitions for the routing vote (matching that metric's own prior
+ * per-sample exclusion). An EXACT TIE (no strict plurality — only possible
+ * when the electorate is even, since ties are structurally impossible across
+ * an odd count with two categories) has no principled majority to report:
+ * the case is EXCLUDED from that metric — never defaulted to either side —
+ * and reported in {@link BenchmarkMetricsDimensionReport.splitVerdictCases},
+ * mirroring this module's own `unprovenCases`/`notSampledCases` discipline of
+ * disclosing an exclusion rather than silently shrinking a denominator.
+ *
+ * **Calibration's collapse is a mean, not a vote — a different, genuinely
+ * distinct semantic change from the confusion-matrix metrics above.**
+ * `deficientMass` is a continuous probability, not a category, so there is
+ * no majority to take; a case's repeated `deficientMass` observations are
+ * averaged into one MEAN mass first, and the Brier score is computed once
+ * against that mean (`(meanMass - groundTruthIndicator)^2`) — never the mean
+ * of N per-repetition Brier scores, which is a DIFFERENT number whenever the
+ * repetitions disagree (mean-then-square is not square-then-mean; the gap
+ * between them is exactly the variance of `deficientMass` across
+ * repetitions — the same variance {@link BenchmarkMetricsDimensionReport.stability}
+ * already reports on its own terms, so folding it into calibration too would
+ * double-count it). `calibration.sampleCount` is therefore a DISTINCT CASE
+ * count, unlike `cost.sampleCount`/`latency.sampleCount`, which remain
+ * genuine per-sample counts — see each field's own doc.
  */
 import type { BenchmarkCaseOutcome } from './benchmark-store.js';
 import type { ClassificationLevel, DimensionJudgment } from './classification.js';
@@ -170,21 +236,43 @@ export interface SampledMetric {
 
 export interface BenchmarkMetricsDimensionReport {
   readonly dimensionId: RubricDimensionId;
-  /** Distinct proven case ids (across every given run) whose declared operator maps to this dimension — never a per-run or per-sample count. */
+  /** Distinct proven case ids (across every given run) whose declared operator maps to this dimension — never a per-run or per-sample count. This is the denominator {@link MIN_SAMPLE_FOR_RATE} is actually judged against for precision/recall/falsePositiveRate/calibration below (see this module's own "Independent samples" doc section) — never {@link designatedSampleCount}. */
   readonly provenCaseCount: number;
+  /**
+   * Total samples (case x run pairs, across every given run) among the cases designated to this
+   * dimension — always `>= provenCaseCount`, and strictly greater whenever a designated case was
+   * proven+sampled in more than one of the given runs. Reported so a caller can never mistake
+   * `provenCaseCount` (the independent-observation count precision/recall/falsePositiveRate/
+   * calibration are actually computed over) for the larger, repetition-inflated sample count — see
+   * this module's own "Independent samples" doc section for the defect this distinction exists to
+   * prevent. `needsReviewRouting` pools a WIDER case set than `provenCaseCount`/this field (every
+   * proven+sampled case, not only this dimension's designated ones — see that field's own doc);
+   * its own `RateMetric.denominator` is the case count that matters for it.
+   */
+  readonly designatedSampleCount: number;
   readonly precision: RateMetric;
   readonly recall: RateMetric;
   readonly falsePositiveRate: RateMetric;
-  /** Pools every proven+sampled case's judgment of THIS dimension, regardless of which dimension that case was designed to test (Jev judges all seven dimensions per sample) — see this module's own doc for why this denominator can exceed `provenCaseCount`. */
+  /** Pools every proven+sampled case's judgment of THIS dimension, regardless of which dimension that case was designed to test (Jev judges all seven dimensions per sample) — see this module's own doc for why this denominator can exceed `provenCaseCount`. Computed over distinct cases exactly like the accuracy metrics above (see "Independent samples"): `denominator` counts cases, not case x run samples. */
   readonly needsReviewRouting: RateMetric;
-  /** Mean Brier score (`(deficientMass - groundTruthIndicator)^2`, lower is better) against this dimension's own designated proven+sampled cases; includes `needs-review` (`boundary-straddle`) judgments, since a validated `deficientMass` reflects the model's stated probability regardless of whether the policy's boundary-mass gate happened to clear. */
+  /** Mean Brier score (`(deficientMass - groundTruthIndicator)^2`, lower is better) against this dimension's own designated proven+sampled cases, one score per DISTINCT case: each case's own repetitions are first averaged into one mean `deficientMass`, then squared against ground truth once (Brier-of-the-mean, not mean-of-the-Briers — see "Independent samples"). Includes `needs-review` (`boundary-straddle`) judgments, since a validated `deficientMass` reflects the model's stated probability regardless of whether the policy's boundary-mass gate happened to clear. `sampleCount` here is a DISTINCT CASE count, unlike `cost`/`latency` below where it is a genuine sample count — see those fields' own docs. */
   readonly calibration: SampledMetric;
-  /** Mean USD cost per proven+sampled case designated to this dimension (input tokens only — Jev's output tokens are unbilled; see {@link JEV_ESTIMATE_SNAPSHOT}). */
+  /** Mean USD cost per SAMPLE (case x run) designated to this dimension (input tokens only — Jev's output tokens are unbilled; see {@link JEV_ESTIMATE_SNAPSHOT}). Deliberately NOT collapsed by case — every repeated call has its own real, independent cost; see this module's own "Independent samples" doc section for why this metric is excluded from that collapse. `sampleCount` is a genuine sample count here. */
   readonly cost: SampledMetric;
-  /** Mean latency in milliseconds, over cases that recorded one (`latencyMs` is optional on {@link BenchmarkSampleRecord}). */
+  /** Mean latency in milliseconds, over SAMPLES (case x run) that recorded one (`latencyMs` is optional on {@link BenchmarkSampleRecord}). Deliberately NOT collapsed by case, for the same reason as `cost` above. `sampleCount` is a genuine sample count here. */
   readonly latency: SampledMetric;
-  /** Pairwise agreement rate on this dimension's judgment across every pair of the given runs, pooled over this dimension's designated cases — `'not-computable'` with fewer than two runs. */
+  /** Pairwise agreement rate on this dimension's judgment across every pair of the given runs, pooled over this dimension's designated cases — `'not-computable'` with fewer than two runs. Deliberately still computed over samples (run pairs), never collapsed by case: run-to-run agreement across repetitions is exactly what this metric measures, so collapsing repetitions here would erase its own subject. */
   readonly stability: RateMetric;
+  /**
+   * Cases designated to this dimension whose repetitions produced an exact tie under this
+   * module's majority-vote collapse (see "Independent samples") — for the accuracy confusion
+   * matrix, or, for a case pooled into `needsReviewRouting`, that routing vote. A tied case is
+   * excluded from the metric(s) named in its own `reasons`, never guessed at by picking a side
+   * arbitrarily; distinct from `unprovenCases`/`notSampledCases` at the report's top level (those
+   * are excluded because no evidence exists at all — a split-verdict case has evidence, but that
+   * evidence does not agree with itself).
+   */
+  readonly splitVerdictCases: readonly BenchmarkSplitVerdictCaseSummary[];
 }
 
 export interface BenchmarkUnprovenCaseSummary {
@@ -194,6 +282,12 @@ export interface BenchmarkUnprovenCaseSummary {
 }
 
 export interface BenchmarkNotSampledCaseSummary {
+  readonly caseId: string;
+  readonly reasons: readonly string[];
+}
+
+/** See {@link BenchmarkMetricsDimensionReport.splitVerdictCases}. */
+export interface BenchmarkSplitVerdictCaseSummary {
   readonly caseId: string;
   readonly reasons: readonly string[];
 }
@@ -287,10 +381,55 @@ function collectProvenCases(runs: readonly BenchmarkMetricsRun[]): {
     }
   }
 
-  const toSummaries = (map: Map<string, Set<string>>): readonly BenchmarkUnprovenCaseSummary[] =>
-    [...map.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([caseId, reasons]) => ({ caseId, reasons: [...reasons].sort() }));
+  return { proven, unproven: summarizeCaseReasons(unprovenReasons), notSampled: summarizeCaseReasons(notSampledReasons) };
+}
 
-  return { proven, unproven: toSummaries(unprovenReasons), notSampled: toSummaries(notSampledReasons) };
+/** Shared by every case-keyed, reason-collecting summary this module builds (`unprovenCases`, `notSampledCases`, `splitVerdictCases`) — deterministic order, reasons deduplicated and sorted. */
+function summarizeCaseReasons(map: ReadonlyMap<string, ReadonlySet<string>>): readonly { readonly caseId: string; readonly reasons: readonly string[] }[] {
+  return [...map.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([caseId, reasons]) => ({ caseId, reasons: [...reasons].sort() }));
+}
+
+/** Groups already-proven case entries by `caseId`, preserving each caseId's own run order — the shared grouping both the accuracy/calibration collapse and the needs-review-routing collapse fold repetitions over (see this module's own "Independent samples" doc section). */
+function groupByCaseId(entries: readonly ProvenCaseEntry[]): ReadonlyMap<string, readonly ProvenCaseEntry[]> {
+  const grouped = new Map<string, ProvenCaseEntry[]>();
+  for (const entry of entries) {
+    const existing = grouped.get(entry.caseId) ?? [];
+    existing.push(entry);
+    grouped.set(entry.caseId, existing);
+  }
+  return grouped;
+}
+
+/**
+ * Collapses N repeated categorical votes cast by one case's separate repetitions into a single
+ * verdict: the value with a STRICT plurality (strictly more votes than every other distinct
+ * value present). Returns `undefined` when no value holds a strict plurality — an exact tie among
+ * the top vote-getters — which every caller treats as EXCLUDED from the metric it would otherwise
+ * feed, never defaulted to either side; see this module's own "Independent samples" doc section
+ * for the full justification.
+ */
+function majorityVerdict<T>(votes: readonly T[]): T | undefined {
+  const counts = new Map<T, number>();
+  for (const vote of votes) counts.set(vote, (counts.get(vote) ?? 0) + 1);
+  let winner: T | undefined;
+  let winnerCount = 0;
+  let tied = false;
+  for (const [value, count] of counts) {
+    if (count > winnerCount) {
+      winner = value;
+      winnerCount = count;
+      tied = false;
+    } else if (count === winnerCount) {
+      tied = true;
+    }
+  }
+  return tied ? undefined : winner;
+}
+
+/** Renders a boolean vote breakdown for a {@link BenchmarkSplitVerdictCaseSummary} reason — e.g. `"2 deficient / 2 healthy"`. */
+function voteTally(votes: readonly boolean[], trueLabel: string, falseLabel: string): string {
+  const trueCount = votes.filter(Boolean).length;
+  return `${trueCount} ${trueLabel} / ${votes.length - trueCount} ${falseLabel}`;
 }
 
 function findDimension(outcome: BenchmarkCaseOutcome, dimensionId: RubricDimensionId): DimensionJudgment | undefined {
@@ -337,56 +476,99 @@ function computeDimensionReport(
 ): BenchmarkMetricsDimensionReport {
   const designated = allProven.filter((entry) => OPERATOR_DIMENSION[entry.operator] === dimensionId);
   const designatedCaseIds = new Set(designated.map((entry) => entry.caseId));
+  const designatedByCase = groupByCaseId(designated);
 
-  let truePositive = 0;
-  let falsePositive = 0;
-  let falseNegative = 0;
-  let trueNegative = 0;
   let hasPrescriptive = false;
   let hasDescriptive = false;
-  const calibrationValues: number[] = [];
   const costValues: number[] = [];
   const latencyValues: number[] = [];
 
+  // Cost and latency stay computed over SAMPLES (case x run), never collapsed by case — repeated
+  // measurement genuinely IS what these two are measuring (see this module's own "Independent
+  // samples" doc section). Deliberately a separate, flat loop from the per-case accuracy/
+  // calibration collapse below.
   for (const entry of designated) {
     if (entry.operatorRole === 'prescriptive') hasPrescriptive = true;
     else hasDescriptive = true;
 
     const sample = entry.outcome.sample;
     if (sample === undefined) continue;
-
     costValues.push(sampleCostUsd(sample.usage));
     if (sample.latencyMs !== undefined) latencyValues.push(sample.latencyMs);
+  }
 
-    const dimension = findDimension(entry.outcome, dimensionId);
-    if (dimension === undefined) continue;
+  // Precision/recall/falsePositiveRate/calibration: ONE observation per DISTINCT case (see this
+  // module's own "Independent samples" doc section) — a case's repeated judgments are collapsed
+  // by majority vote (confusion matrix) or mean (calibration's continuous `deficientMass`) before
+  // entering these counters, never counted once per repetition.
+  let truePositive = 0;
+  let falsePositive = 0;
+  let falseNegative = 0;
+  let trueNegative = 0;
+  const calibrationValues: number[] = [];
+  const splitVerdictReasons = new Map<string, Set<string>>();
 
-    if (dimension.deficientMass !== undefined) {
-      const truth = groundTruthDeficient(entry.operatorRole) ? 1 : 0;
-      calibrationValues.push((dimension.deficientMass - truth) ** 2);
+  const addSplitVerdictReason = (caseId: string, reason: string): void => {
+    const reasons = splitVerdictReasons.get(caseId) ?? new Set<string>();
+    reasons.add(reason);
+    splitVerdictReasons.set(caseId, reasons);
+  };
+
+  for (const [caseId, repetitions] of designatedByCase) {
+    const operatorRole = repetitions[0]!.operatorRole;
+    const truth = groundTruthDeficient(operatorRole);
+
+    const accuracyVotes: boolean[] = [];
+    const massValues: number[] = [];
+    for (const entry of repetitions) {
+      if (entry.outcome.sample === undefined) continue;
+      const dimension = findDimension(entry.outcome, dimensionId);
+      if (dimension === undefined) continue;
+      if (dimension.deficientMass !== undefined) massValues.push(dimension.deficientMass);
+      if (dimension.status !== 'judged') continue;
+      const predictedDeficient = isDeficientLevel(dimension.level);
+      if (predictedDeficient !== undefined) accuracyVotes.push(predictedDeficient);
     }
 
-    if (dimension.status !== 'judged') continue;
-    const predictedDeficient = isDeficientLevel(dimension.level);
-    if (predictedDeficient === undefined) continue;
-    const truth = groundTruthDeficient(entry.operatorRole);
-    if (predictedDeficient && truth) truePositive += 1;
-    else if (predictedDeficient && !truth) falsePositive += 1;
-    else if (!predictedDeficient && truth) falseNegative += 1;
-    else trueNegative += 1;
+    if (accuracyVotes.length > 0) {
+      const majority = majorityVerdict(accuracyVotes);
+      if (majority === undefined) {
+        addSplitVerdictReason(caseId, `"${dimensionId}" accuracy vote tied (${voteTally(accuracyVotes, 'deficient', 'healthy')}) across ${accuracyVotes.length} judged repetition(s) — excluded from precision/recall/false-positive-rate`);
+      } else if (majority && truth) truePositive += 1;
+      else if (majority && !truth) falsePositive += 1;
+      else if (!majority && truth) falseNegative += 1;
+      else trueNegative += 1;
+    }
+
+    if (massValues.length > 0) {
+      const meanMass = massValues.reduce((sum, value) => sum + value, 0) / massValues.length;
+      calibrationValues.push((meanMass - (truth ? 1 : 0)) ** 2);
+    }
   }
 
   // Needs-review routing pools EVERY proven+sampled case's judgment of this dimension, regardless
   // of that case's own designated dimension — routing needs no ground truth, so it is not limited
-  // to `designated` the way the accuracy metrics above are (see this module's own doc).
+  // to `designated` the way the accuracy metrics above are (see this module's own doc). Computed
+  // over distinct cases exactly like the accuracy metrics above: each case's repeated routing
+  // outcomes are collapsed by majority vote before entering these counters.
   let routingNeedsReview = 0;
   let routingAttempts = 0;
-  for (const entry of allProven) {
-    const dimension = findDimension(entry.outcome, dimensionId);
-    if (dimension === undefined) continue;
-    if (dimension.status === 'not-applicable') continue;
+  for (const [caseId, repetitions] of provenByCase) {
+    const routingVotes: boolean[] = [];
+    for (const entry of repetitions) {
+      const dimension = findDimension(entry.outcome, dimensionId);
+      if (dimension === undefined) continue;
+      if (dimension.status === 'not-applicable') continue;
+      routingVotes.push(dimension.status === 'needs-review');
+    }
+    if (routingVotes.length === 0) continue;
+    const majority = majorityVerdict(routingVotes);
+    if (majority === undefined) {
+      addSplitVerdictReason(caseId, `"${dimensionId}" needs-review routing vote tied (${voteTally(routingVotes, 'needs-review', 'judged')}) across ${routingVotes.length} applicable repetition(s) — excluded from needs-review routing`);
+      continue;
+    }
     routingAttempts += 1;
-    if (dimension.status === 'needs-review') routingNeedsReview += 1;
+    if (majority) routingNeedsReview += 1;
   }
 
   const noNegativeClassReason = hasDescriptive && !hasPrescriptive
@@ -395,6 +577,8 @@ function computeDimensionReport(
 
   return {
     dimensionId,
+    designatedSampleCount: designated.filter((entry) => entry.outcome.sample !== undefined).length,
+    splitVerdictCases: summarizeCaseReasons(splitVerdictReasons),
     provenCaseCount: designatedCaseIds.size,
     precision: computeRate(truePositive, truePositive + falsePositive, noNegativeClassReason ?? (truePositive + falsePositive === 0 ? `no case designated to "${dimensionId}" was judged (not needs-review/not-applicable) as deficient or healthy` : undefined)),
     recall: computeRate(truePositive, truePositive + falseNegative, truePositive + falseNegative === 0 ? `no proven, judged descriptive case exists for "${dimensionId}"` : undefined),
@@ -414,13 +598,7 @@ function computeDimensionReport(
  */
 export function computeBenchmarkMetricsReport(runs: readonly BenchmarkMetricsRun[]): BenchmarkMetricsReport {
   const { proven, unproven, notSampled } = collectProvenCases(runs);
-
-  const provenByCase = new Map<string, ProvenCaseEntry[]>();
-  for (const entry of proven) {
-    const existing = provenByCase.get(entry.caseId) ?? [];
-    existing.push(entry);
-    provenByCase.set(entry.caseId, existing);
-  }
+  const provenByCase = groupByCaseId(proven);
 
   return {
     runsConsidered: runs.length,

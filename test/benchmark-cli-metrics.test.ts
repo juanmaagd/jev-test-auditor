@@ -4,8 +4,9 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { runBenchmarkCli } from '../src/cli/benchmark.js';
 import type { BenchmarkSamplePort, SampleResult } from '../src/application/benchmark-run.js';
-import type { ClassificationResult } from '../src/domain/classification.js';
+import type { ClassificationResult, DimensionJudgment } from '../src/domain/classification.js';
 import type { CorpusCase } from '../src/domain/corpus.js';
+import { RUBRIC_DIMENSION_IDS } from '../src/domain/rubric.js';
 import type { TestCaseId } from '../src/domain/test-understanding.js';
 
 class RecordingIo {
@@ -21,13 +22,38 @@ let storeFile: string;
 let jsonlPath: string;
 let workDir: string;
 
+/**
+ * Every one of the seven rubric dimensions judged `acceptable` with a validated `deficientMass` —
+ * not the earlier empty `dimensions: []` — so this fixture's own calibration figures actually
+ * compute (below-minimum-sample, never not-computable) at the CLI level too, letting
+ * `test/benchmark-cli-metrics.test.ts`'s own assertions on `formatSampled`'s "distinct case(s)"
+ * vs. "sample(s)" labels (the independent-samples fix) exercise a real, non-degenerate value.
+ */
+function allDimensionJudgments(): readonly DimensionJudgment[] {
+  return RUBRIC_DIMENSION_IDS.map((dimensionId) => ({
+    dimensionId,
+    dimensionLabel: dimensionId,
+    applicable: true,
+    applicabilityProbability: 0.9,
+    level: 'acceptable',
+    score: 2,
+    confidence: 0.9,
+    status: 'judged',
+    reason: undefined,
+    probabilities: undefined,
+    deficientMass: 0.1,
+    acceptableMass: 0.9,
+    criticalMass: 0.05,
+  }));
+}
+
 function classification(caseId: string, status: ClassificationResult['status']): ClassificationResult {
   return {
     testCaseId: `tc:${caseId}` as TestCaseId,
     repositoryRelativePath: 'test.ts',
     name: caseId,
     status,
-    dimensions: [],
+    dimensions: allDimensionJudgments(),
     findings: [],
     policyVersion: 2,
     rubricVersion: 2,
@@ -134,6 +160,12 @@ describe('runBenchmarkCli --metrics: real per-dimension report over the real cor
     }
     // behavioral-focus has no operator mapped to it at all — must read plainly, never as a zero rate.
     expect(output).toMatch(/behavioral-focus[\s\S]*?no proven case|behavioral-focus[\s\S]*?not computable/i);
+    // Independent-samples fix: the CLI must print BOTH the distinct-case count and the underlying
+    // sample count together (never only one), and must label calibration's `n` as distinct cases
+    // versus cost/latency's samples — so a reader can never confuse the two counts.
+    expect(output).toMatch(/\d+ distinct case\(s\), from \d+ sample\(s\)/);
+    expect(output).toMatch(/n=\d+ distinct cases?\b/);
+    expect(output).toMatch(/n=\d+ samples?\b/);
   }, 60_000);
 
   it('exports one JSONL line per recorded case outcome when --jsonl is given, and nothing without it', async () => {
