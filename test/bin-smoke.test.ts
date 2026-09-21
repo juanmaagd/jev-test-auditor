@@ -166,7 +166,10 @@ describe('packed installed package', () => {
       expect(help).toContain('Usage:');
       expect(help).toContain('--inspect-payloads');
 
-      const output = execInstalledBin(binPath, ['audit'], fixtureRoot);
+      // Phase 7 (orchestrator scope change): bare `audit` now prints a human-readable report
+      // (asserted separately below), so this golden — which parses the exact discovery JSON shape
+      // — deliberately passes `--json` instead of relying on it being the default.
+      const output = execInstalledBin(binPath, ['audit', '--json'], fixtureRoot);
       const lines = output.trim().split(/\r?\n/u);
       interface Summary {
         readonly reportingOnly: boolean;
@@ -213,6 +216,16 @@ describe('packed installed package', () => {
         evidenceDenied: 0,
       });
       expect(summary.totals.evidenceFragments).toBeGreaterThanOrEqual(2); // at least the test body and the resolved `add` production seam
+
+      // Phase 7: the bare default (no --json) now prints a human-readable report combining
+      // discovery with the exact same cost/call estimate `--dry-run` computes — never the raw JSON
+      // `output` asserted above (that shape now requires `--json` explicitly).
+      const readableDefault = execInstalledBin(binPath, ['audit'], fixtureRoot);
+      expect(() => JSON.parse(readableDefault.trim().split(/\r?\n/u)[0] ?? '')).toThrow();
+      expect(readableDefault).toContain('Audit summary (reporting-only)');
+      expect(readableDefault).toContain('Estimated cost in USD (approximate):');
+      expect(readableDefault).toContain('No network calls were made');
+
       expect(installedBinStatus(binPath, ['invalid'], fixtureRoot)).toBe(1);
       await expect(access(join(fixtureRoot, 'executed.marker'))).rejects.toThrow();
 
@@ -295,9 +308,12 @@ describe('packed installed package', () => {
       expect(dryRunSummary.estimatedUsd.min).toBeGreaterThan(0);
       expect(dryRunSummary.estimatedUsd.min).toBeLessThanOrEqual(dryRunSummary.estimatedUsd.max);
 
-      // Flag-combination usage errors: --json without --dry-run/--evaluate, --dry-run with --inspect-payloads,
-      // --dry-run with --evaluate, and --evaluate with --inspect-payloads.
-      expect(installedBinStatus(binPath, ['audit', '--json'], fixtureRoot)).toBe(1);
+      // Phase 7: `audit --json` is legal now (no longer one of these usage errors) — it prints the
+      // plain discovery JSON, byte-identical to before this task.
+      expect(installedBinStatus(binPath, ['audit', '--json'], fixtureRoot)).toBe(0);
+
+      // Flag-combination usage errors: --dry-run with --inspect-payloads, --dry-run with --evaluate,
+      // and --evaluate with --inspect-payloads.
       expect(installedBinStatus(binPath, ['audit', '--dry-run', '--inspect-payloads'], fixtureRoot)).toBe(1);
       expect(installedBinStatus(binPath, ['audit', '--dry-run', '--evaluate'], fixtureRoot)).toBe(1);
       expect(installedBinStatus(binPath, ['audit', '--evaluate', '--inspect-payloads'], fixtureRoot)).toBe(1);
@@ -320,7 +336,8 @@ describe('packed installed package', () => {
       process.env['XDG_CONFIG_HOME'] = authConfigHome;
       process.env['APPDATA'] = authConfigHome;
       try {
-        const plainAudit = execInstalledBin(binPath, ['audit'], fixtureRoot);
+        // Phase 7: `--json` added — bare `audit` now prints the human-readable report instead.
+        const plainAudit = execInstalledBin(binPath, ['audit', '--json'], fixtureRoot);
         expect(JSON.parse(plainAudit.trim().split(/\r?\n/u)[0] ?? '')).toMatchObject({ reportingOnly: true });
 
         const evaluateWithoutKey = installedBinRun(binPath, ['audit', '--evaluate'], fixtureRoot);

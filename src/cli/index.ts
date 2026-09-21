@@ -130,7 +130,12 @@ Usage:
   jev-test-auditor --help
 
 Commands:
-  audit         Discover and extract test understanding without executing project code
+  audit         Discover and extract test understanding without executing project code, then print
+                a readable report: discovered/excluded files, evidence provenance, diagnostics, and
+                the same no-network, no-write cost/call estimate --dry-run computes (discovered/
+                evaluable/skipped test cases, exact initial Jev call count, cache status, and
+                approximate input-token/USD ranges). See --json below to print the underlying
+                discovery data as one JSON line instead.
   auth login    Store a TypeSafe API key locally for this tool. Reads from an interactive,
                 no-echo prompt when stdin is a TTY; reads one trimmed line from stdin
                 otherwise (so automation/CI can pipe a key in). NEVER accepts the key as a
@@ -235,7 +240,9 @@ Options:
                       Requires --html.
   --dry-run --json   Print the same dry-run preview as one machine-readable JSON line instead of
                       the human-readable text report. Requires --dry-run.
-  --json             Requires --dry-run or --evaluate; --json alone is a usage error.
+  --json             Print the plain audit's underlying discovery data (rootDir, per-file framework/
+                      test-case counts, exclusions, totals, diagnostics) as one deterministic JSON
+                      line instead of the readable report above. No longer a usage error alone.
   --help             Show this help message
 `;
 
@@ -380,26 +387,37 @@ function cacheNotConsultedLines(reason: DryRunCacheNotConsultedReason | undefine
 }
 
 /**
- * Concise human-readable `--dry-run` text report, one `writeLine` call
- * (embedded newlines), mirroring `dryRunJsonLine`'s data. Every existing
- * line's wording stays byte-for-byte unchanged (a cold dry run's full text
- * report before this disclosure existed had no cache-related line at all,
- * which the report now replaces with an explicit "not consulted" line — the
- * one intentional behavior change this task makes to the text report). A
- * "Cache hits" line is appended right after "Initial Jev calls" only when
- * `estimate.cacheHits` is present — unchanged from before, purely additive,
- * and this is the ONLY disclosure printed when the cache WAS consulted (per
- * this task's own scope: "the report keeps saying so as it does today").
- * Otherwise, `cacheNotConsultedLines` appends the "why not" line in that
- * same position when a reason is known.
+ * Model + pricing-snapshot preamble (Phase 7): factored out of `dryRunTextReport` so the default
+ * `audit` summary (`auditTextReport`) can fold in the exact same cost estimate without a second,
+ * independently-worded copy. `dryRunTextReport`'s own output is unchanged by this extraction — see
+ * that function's own doc.
  */
-function dryRunTextReport(rootDir: string, estimate: DryRunEstimate): string {
-  const { skipped } = estimate;
+function costEstimatePreambleLines(estimate: DryRunEstimate): readonly string[] {
   return [
-    'Dry-run cost and call estimate',
     `Model: ${estimate.model}`,
     `Pricing/overhead snapshot: v${estimate.snapshotVersion} (as of ${estimate.asOf})`,
-    `Root: ${rootDir}`,
+  ];
+}
+
+/**
+ * The exact-vs-approximate cost/call estimate body (Phase 7): every line `dryRunTextReport` has
+ * always printed between its own `Root:` line and its closing "No network calls..." sentence,
+ * factored out verbatim so `auditTextReport` (the default `audit` summary, which now folds in this
+ * same `--dry-run` estimate — orchestrator scope change) never re-derives or re-words a single
+ * figure. This is what guarantees the two reports can never drift on precision language (an exact
+ * count phrased as exact, an approximate range phrased as approximate) for the figures they share.
+ *
+ * Every existing line's wording stays byte-for-byte unchanged from before this extraction (a cold
+ * dry run's full text report before the cache-consultation disclosure existed had no cache-related
+ * line at all, which the report now replaces with an explicit "not consulted" line — the one
+ * intentional behavior change task P5-5 made to the text report, predating this extraction). A
+ * "Cache hits" line is appended right after "Initial Jev calls" only when `estimate.cacheHits` is
+ * present — the only disclosure printed when the cache WAS consulted. Otherwise,
+ * `cacheNotConsultedLines` appends the "why not" line in that same position when a reason is known.
+ */
+function costEstimateBodyLines(estimate: DryRunEstimate): readonly string[] {
+  const { skipped } = estimate;
+  return [
     `Discovered test cases: ${estimate.discovered}`,
     `Evaluable: ${estimate.evaluable}`,
     `Skipped: ${skipped.total} (skip: ${skipped.byReason.skip}, todo: ${skipped.byReason.todo}, evidence-unavailable: ${skipped.byReason['evidence-unavailable']})`,
@@ -414,6 +432,21 @@ function dryRunTextReport(rootDir: string, estimate: DryRunEstimate): string {
     `Estimated follow-up input tokens (approximate): ${estimate.estimatedFollowUpInputTokens.min} - ${estimate.estimatedFollowUpInputTokens.max}`,
     `Estimated cost in USD (approximate): ${estimate.estimatedUsd.min} - ${estimate.estimatedUsd.max}`,
     `Bundles over the ${estimate.requestTokenCeiling}-token request ceiling: ${estimate.bundlesOverCeiling}`,
+  ];
+}
+
+/**
+ * Concise human-readable `--dry-run` text report, one `writeLine` call (embedded newlines),
+ * mirroring `dryRunJsonLine`'s data. Output is byte-for-byte unchanged by the Phase 7 extraction of
+ * `costEstimatePreambleLines`/`costEstimateBodyLines` above — this function reassembles the exact
+ * same lines in the exact same order.
+ */
+function dryRunTextReport(rootDir: string, estimate: DryRunEstimate): string {
+  return [
+    'Dry-run cost and call estimate',
+    ...costEstimatePreambleLines(estimate),
+    `Root: ${rootDir}`,
+    ...costEstimateBodyLines(estimate),
     'No network calls were made; nothing was written to disk.',
   ].join('\n');
 }
@@ -447,19 +480,27 @@ function evaluateJsonLine(result: AuditResult): string {
   return JSON.stringify(buildAuditReport(result, REPORT_CONTEXT));
 }
 
-/** Concise human-readable `--evaluate` text report, one `writeLine` call (embedded newlines), mirroring `evaluateJsonLine`'s data. Includes a `Diagnostics` block (never just a bare failed count) so an `evaluation-failed` diagnostic stays visible without needing `--json`. */
-function evaluateTextReport(result: AuditResult): string {
-  const totals = result.evaluation?.totals ?? ZERO_EVALUATION_TOTALS;
-  const { statusCounts, skipped } = totals;
-  const diagnosticsLines = result.diagnostics.length === 0
+/**
+ * Shared "Diagnostics: none" / "Diagnostics:\n  - code (path): message" block (Phase 7: extracted
+ * so `evaluateTextReport` and the default `audit` summary, `auditTextReport`, never drift on how a
+ * diagnostic renders in text). Output for `evaluateTextReport` is unchanged by this extraction.
+ */
+function diagnosticsTextLines(diagnostics: readonly AuditDiagnostic[]): readonly string[] {
+  return diagnostics.length === 0
     ? ['Diagnostics: none']
     : [
       'Diagnostics:',
-      ...result.diagnostics.map((diagnostic) => {
+      ...diagnostics.map((diagnostic) => {
         const location = diagnostic.repositoryRelativePath === undefined ? '' : ` (${diagnostic.repositoryRelativePath})`;
         return `  - ${diagnostic.code}${location}: ${diagnostic.message}`;
       }),
     ];
+}
+
+/** Concise human-readable `--evaluate` text report, one `writeLine` call (embedded newlines), mirroring `evaluateJsonLine`'s data. Includes a `Diagnostics` block (never just a bare failed count) so an `evaluation-failed` diagnostic stays visible without needing `--json`. */
+function evaluateTextReport(result: AuditResult): string {
+  const totals = result.evaluation?.totals ?? ZERO_EVALUATION_TOTALS;
+  const { statusCounts, skipped } = totals;
   return [
     'Jev evaluation summary',
     // Phase 5, task P5-4: present only for `--resume <runId>` with outstanding work — the
@@ -475,8 +516,88 @@ function evaluateTextReport(result: AuditResult): string {
     `Skipped: ${skipped.total} (skip: ${skipped.byReason.skip}, todo: ${skipped.byReason.todo}, evidence-unavailable: ${skipped.byReason['evidence-unavailable']})`,
     `Failed: ${totals.failed}`,
     `Usage (total input tokens): ${totals.usage.inputTokens}`,
-    ...diagnosticsLines,
+    ...diagnosticsTextLines(result.diagnostics),
     'Evidence for every evaluated test case was sent to TypeSafe; nothing else leaves this machine, and nothing is sent without --evaluate.',
+  ].join('\n');
+}
+
+/**
+ * Cap on how many discovered/excluded file lines `auditTextReport` prints before summarizing the
+ * rest (Phase 7): a real repository can have hundreds of test files, and printing all of them by
+ * default would bury the report's own totals and cost estimate under noise. Chosen as a plain
+ * "fits on one screen" viewport size, not derived from anything else. Never silent —
+ * `fileListTextLines` always says exactly how many entries were left out and names the one place to
+ * see all of them (`audit --json`, which prints the complete, untruncated array — see `summary`).
+ */
+const TEXT_REPORT_FILE_LIST_LIMIT = 20;
+
+/**
+ * Renders one bounded, never-silent list section for `auditTextReport`'s "Discovered files"/
+ * "Excluded files" blocks, in the same "label: none" / "label:\n  - ..." shape
+ * `diagnosticsTextLines` already uses. Up to `TEXT_REPORT_FILE_LIST_LIMIT` `  - `-prefixed lines;
+ * beyond that, one further line names exactly how many were left out and where to see them all.
+ */
+function fileListTextLines<T>(header: string, items: readonly T[], render: (item: T) => string): readonly string[] {
+  if (items.length === 0) return [`${header}: none`];
+  const shown = items.slice(0, TEXT_REPORT_FILE_LIST_LIMIT).map((item) => `  - ${render(item)}`);
+  const remaining = items.length - TEXT_REPORT_FILE_LIST_LIMIT;
+  return remaining <= 0
+    ? [`${header}:`, ...shown]
+    : [`${header}:`, ...shown, `  ... and ${remaining} more not shown (run \`audit --json\` to see the complete list).`];
+}
+
+/**
+ * The default `audit` (no `--dry-run`/`--evaluate`/`--json`/`--inspect-payloads`) readable summary
+ * (Phase 7, orchestrator scope change on top of the original readable-default-summary task): a
+ * report for the human running it, combining what plain discovery already found (files,
+ * exclusions, evidence provenance, diagnostics — the same data `summary`'s JSON exposes) with the
+ * exact same no-network, no-write cost/call estimate `--dry-run` computes (`estimateDryRun`, reused
+ * verbatim via `costEstimatePreambleLines`/`costEstimateBodyLines` — never a second,
+ * independently-worded estimator) and the exact same read-only cache consultation `--dry-run`
+ * already performs (`openSqliteAuditStoreForLookup`, wired in `runCli`; a plain `audit` still
+ * creates no database file or config directory — that read-only open never does either).
+ *
+ * Ordering (deliberate, not incidental):
+ * 1. `Root` immediately after the title, so a reader always knows which repository this describes.
+ * 2. The discovery totals NOT already covered by the cost estimate below (file/exclusion/
+ *    diagnostic/evidence-provenance counts) — a reader gets the run's shape in a handful of lines
+ *    before anything else. `Test cases` is deliberately omitted here: the cost estimate below
+ *    already reports the identical count as `Discovered test cases`, and printing the same number
+ *    twice under two different labels would be redundant rather than informative.
+ * 3. The cost estimate itself — summary-level information, like the totals above it, just a
+ *    different kind of count, and printed with the exact wording `--dry-run` uses so an exact count
+ *    is never phrased as an estimate and vice versa.
+ * 4. Per-item detail, grouped **found** (`Discovered files`) -> **skipped** (`Excluded files`) ->
+ *    **wrong** (`Diagnostics`) — this is where a list can run long, so it lives at the bottom,
+ *    truncated (`fileListTextLines`) rather than at the top where it would bury the totals/estimate
+ *    a reader wants first.
+ * 5. The same reporting-only guarantee sentence `--dry-run` closes with — equally true here: this
+ *    command makes no network call and writes nothing to disk either.
+ */
+function auditTextReport(result: AuditResult, estimate: DryRunEstimate): string {
+  const { totals } = result;
+  return [
+    'Audit summary (reporting-only)',
+    `Root: ${result.rootDir}`,
+    `Files discovered: ${totals.files}`,
+    `Files excluded: ${totals.excluded}`,
+    `Dynamic metadata entries: ${totals.dynamicMetadata}`,
+    `Unsupported framework files: ${totals.unsupportedFrameworkFiles}`,
+    `Diagnostics (total): ${totals.diagnostics}`,
+    `Evidence bundles: ${totals.evidenceBundles}`,
+    `Evidence fragments: ${totals.evidenceFragments} (${totals.evidenceTruncatedFragments} truncated)`,
+    `Evidence omitted: ${totals.evidenceOmitted}`,
+    `Evidence denied: ${totals.evidenceDenied}`,
+    `Evidence unresolved: ${totals.evidenceUnresolved}`,
+    ...costEstimatePreambleLines(estimate),
+    ...costEstimateBodyLines(estimate),
+    ...fileListTextLines('Discovered files', result.files, (file) => {
+      const dynamicSuffix = file.dynamicMetadata.length > 0 ? `, ${file.dynamicMetadata.length} dynamic metadata` : '';
+      return `${file.discovered.repositoryRelativePath} [${file.discovered.framework}] — ${file.testCases.length} test case(s), ${file.evidence.length} evidence bundle(s)${dynamicSuffix}`;
+    }),
+    ...fileListTextLines('Excluded files', result.excluded, (file) => `${file.repositoryRelativePath} (reason: ${file.reason})`),
+    ...diagnosticsTextLines(result.diagnostics),
+    'No network calls were made; nothing was written to disk.',
   ].join('\n');
 }
 
@@ -555,7 +676,9 @@ function parseAuditOptions(args: readonly string[]): ParsedAuditOptions | { read
     }
     return { error: `Unknown option: ${argument ?? ''}` };
   }
-  if (json && !dryRun && !evaluate) return { error: '--json requires --dry-run or --evaluate (audit --dry-run --json / audit --evaluate --json)' };
+  // Phase 7 (orchestrator scope change): `--json` alone is no longer a usage error — a plain
+  // `audit --json` now prints the same discovery JSON the default human-readable report is built
+  // from (see `auditTextReport`/`runCli`). `--dry-run --json` and `--evaluate --json` are unchanged.
   if (dryRun && inspectPayloads) return { error: '--dry-run cannot be combined with --inspect-payloads' };
   if (dryRun && evaluate) return { error: '--dry-run cannot be combined with --evaluate' };
   if (evaluate && inspectPayloads) return { error: '--evaluate cannot be combined with --inspect-payloads' };
@@ -844,9 +967,16 @@ export async function runCli(
   // `estimateDryRun` below with no re-derivation, so the CLI is never a second place that could
   // disagree with the adapter about why. Left `undefined` for the `dependencies.audit` test seam,
   // which never attempts to open a store at all and therefore has no reason to report.
+  // Phase 7 (orchestrator scope change): the plain default `audit` report now folds in the exact
+  // same cost/call estimate `--dry-run` computes, through the exact same read-only cache
+  // consultation below — so this gate broadens from "`--dry-run` only" to "`--dry-run` OR the plain
+  // default report" (i.e. neither `--evaluate` nor `--inspect-payloads` nor `--json`, which stay
+  // pure discovery-only surfaces and never need this estimate at all). `--dry-run --json` still
+  // needs it (this predicate is `true` for it via the `parsed.dryRun` arm), unchanged from before.
+  const wantsCostEstimate = parsed.dryRun || (!parsed.evaluate && !parsed.inspectPayloads && !parsed.json);
   let dryRunLookup: AuditStoreReadOnlyLookup | undefined;
   let dryRunCacheNotConsultedReason: DryRunCacheNotConsultedReason | undefined;
-  if (parsed.dryRun && dependencies.audit === undefined) {
+  if (wantsCostEstimate && dependencies.audit === undefined) {
     try {
       const lookupResult = await openSqliteAuditStoreForLookup({
         databaseFile: configuration.store.databasePath ?? resolveAuditStorePaths().databaseFile,
@@ -964,6 +1094,23 @@ export async function runCli(
       return 0;
     }
 
+    // Phase 7 (orchestrator scope change): the plain default report — reached only when none of
+    // `--dry-run`/`--evaluate`/`--inspect-payloads`/`--json` was given (each of those already
+    // returned above, or is excluded from `wantsCostEstimate`; see that flag's own doc). Computes
+    // the cost estimate exactly like `--dry-run` does just above (same cache-hit lookup, same
+    // `estimateDryRun` call) and renders it merged with discovery via `auditTextReport`.
+    if (wantsCostEstimate) {
+      const cacheHitTestCaseIds = dryRunLookup === undefined
+        ? undefined
+        : await computeDryRunCacheHits(result.files, result.sourceTextByPath ?? new Map(), createAuditCacheKeyPort(), dryRunLookup.lookup);
+      const estimate = estimateDryRun(JEV_ESTIMATE_SNAPSHOT, result.files, RUBRIC_V2, cacheHitTestCaseIds, dryRunCacheNotConsultedReason);
+      io.writeLine(auditTextReport(result, estimate));
+      return 0;
+    }
+
+    // Reached only by `--json` (bare) and `--inspect-payloads` (with or without `--json`, a no-op
+    // combination — see this task's own decision record): both print the unchanged discovery JSON;
+    // `--inspect-payloads` additionally appends one canonical evidence-bundle line per bundle.
     io.writeLine(summary(result));
     if (parsed.inspectPayloads) {
       for (const line of inspectPayloadLines(result)) io.writeLine(line);

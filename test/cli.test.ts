@@ -246,7 +246,11 @@ describe('CLI foundation', () => {
       reportingOnly: true,
     };
 
-    const exitCode = await runCli(['audit'], output.io, { audit: async () => audit });
+    // Phase 7 (orchestrator scope change): bare `audit` now prints a human-readable report, so
+    // this golden (asserting the exact discovery JSON shape) deliberately passes `--json` — the
+    // shape itself is unchanged, only how it is reached (see `describe('audit --json (bare)')`
+    // below for the behavior change itself).
+    const exitCode = await runCli(['audit', '--json'], output.io, { audit: async () => audit });
 
     expect(exitCode).toBe(0);
     expect(output.lines).toHaveLength(1);
@@ -291,7 +295,9 @@ describe('CLI foundation', () => {
       reportingOnly: true,
     };
 
-    const exitCode = await runCli(['audit'], output.io, { audit: async () => audit });
+    // Phase 7: bare `audit` now prints a human-readable report — `--json` reaches the unchanged
+    // discovery JSON this test actually asserts on.
+    const exitCode = await runCli(['audit', '--json'], output.io, { audit: async () => audit });
 
     expect(exitCode).toBe(0);
     const parsed = JSON.parse(output.lines[0] ?? '') as { totals: { unsupportedFrameworkFiles: number } };
@@ -300,7 +306,8 @@ describe('CLI foundation', () => {
 
   it('returns zero for audit diagnostics and one for usage errors', async () => {
     const diagnosticOutput = captureOutput();
-    const diagnosticExitCode = await runCli(['audit'], diagnosticOutput.io, {
+    // Phase 7: `--json` added — this test parses the JSON summary, which is now behind the flag.
+    const diagnosticExitCode = await runCli(['audit', '--json'], diagnosticOutput.io, {
       audit: async () => ({
         rootDir: '.', files: [], excluded: [], diagnostics: [{ code: 'failure', message: 'info', severity: 'error' }],
         totals: { files: 0, excluded: 0, testCases: 0, dynamicMetadata: 0, diagnostics: 1, ...zeroEvidenceTotals }, reportingOnly: true,
@@ -418,19 +425,280 @@ describe('no network activity', () => {
   });
 });
 
-describe('--dry-run usage errors', () => {
-  it('rejects --json without --dry-run as a usage error and never runs the audit seam', async () => {
+/**
+ * Phase 7 (orchestrator scope change on top of the readable-default-summary task): the plain
+ * `audit` (no `--dry-run`/`--evaluate`/`--json`/`--inspect-payloads`) now prints one human-readable
+ * report for the human running it — combining discovery (files, exclusions, evidence provenance,
+ * diagnostics — the same data `--json` exposes) with the exact same no-network, no-write cost/call
+ * estimate `--dry-run` computes (`estimateDryRun`, reused verbatim) and the exact same read-only
+ * cache consultation `--dry-run` already performs. `--json` and `--inspect-payloads` stay pure
+ * discovery-only surfaces, byte-identical to before this task.
+ */
+describe('audit (default readable summary, folds in the --dry-run cost estimate)', () => {
+  const distinctTotals = {
+    files: 2,
+    excluded: 3,
+    testCases: 41,
+    dynamicMetadata: 5,
+    diagnostics: 11,
+    unsupportedFrameworkFiles: 7,
+    evidenceBundles: 13,
+    evidenceFragments: 17,
+    evidenceTruncatedFragments: 19,
+    evidenceOmitted: 23,
+    evidenceDenied: 29,
+    evidenceUnresolved: 31,
+  };
+
+  it(
+    'labels every totals figure distinctly (all-distinct-prime fixture: swapping any two reported '
+    + 'counts must turn this red)',
+    async () => {
+      const output = captureOutput();
+      const audit: AuditResult = {
+        rootDir: '/workspace-totals',
+        files: [],
+        excluded: [],
+        diagnostics: [],
+        totals: distinctTotals,
+        reportingOnly: true,
+      };
+
+      const exitCode = await runCli(['audit'], output.io, { audit: async () => audit });
+
+      expect(exitCode).toBe(0);
+      expect(output.lines).toHaveLength(1);
+      const report = output.lines[0] ?? '';
+      expect(report).toContain('Audit summary (reporting-only)');
+      expect(report).toContain('Root: /workspace-totals');
+      expect(report).toContain('Files discovered: 2');
+      expect(report).toContain('Files excluded: 3');
+      expect(report).toContain('Dynamic metadata entries: 5');
+      expect(report).toContain('Unsupported framework files: 7');
+      expect(report).toContain('Diagnostics (total): 11');
+      expect(report).toContain('Evidence bundles: 13');
+      expect(report).toContain('Evidence fragments: 17 (19 truncated)');
+      expect(report).toContain('Evidence omitted: 23');
+      expect(report).toContain('Evidence denied: 29');
+      expect(report).toContain('Evidence unresolved: 31');
+    },
+  );
+
+  it('folds in the exact --dry-run cost/call estimate, computed by the real estimateDryRun over the discovered files', async () => {
     const output = captureOutput();
+    const evaluableIds = ['tc:v1:eval-1', 'tc:v1:eval-2', 'tc:v1:eval-3', 'tc:v1:eval-4'];
+    const skipIds = ['tc:v1:skip-1', 'tc:v1:skip-2'];
+    const todoIds = ['tc:v1:todo-1', 'tc:v1:todo-2', 'tc:v1:todo-3'];
+    const fileA: AuditFileResult = {
+      discovered: { repositoryRelativePath: 'a.test.ts', framework: 'vitest', frameworkEvidence: [] },
+      testCases: [
+        ...evaluableIds.map((id) => testCaseWithModifiers(id, [])),
+        ...skipIds.map((id) => testCaseWithModifiers(id, ['skip'])),
+        ...todoIds.map((id) => testCaseWithModifiers(id, ['todo'])),
+      ],
+      dynamicMetadata: [],
+      diagnostics: [],
+      evidence: evaluableIds.map((id) => smallEvidenceBundle(id)),
+    };
+    const fileB: AuditFileResult = {
+      discovered: { repositoryRelativePath: 'b.test.ts', framework: 'vitest', frameworkEvidence: [] },
+      testCases: [testCaseWithModifiers('tc:v1:missing-1', [])],
+      dynamicMetadata: [],
+      diagnostics: [],
+      evidence: [],
+    };
+    const audit: AuditResult = {
+      rootDir: '/workspace-estimate',
+      files: [fileA, fileB],
+      excluded: [],
+      diagnostics: [],
+      totals: {
+        files: 2, excluded: 0, testCases: 10, dynamicMetadata: 0, diagnostics: 0,
+        ...zeroEvidenceTotals, evidenceBundles: 4, evidenceFragments: 4,
+      },
+      reportingOnly: true,
+    };
 
-    const exitCode = await runCli(['audit', '--json'], output.io, {
-      audit: async () => { throw new Error('must not run'); },
-    });
+    const exitCode = await runCli(['audit'], output.io, { audit: async () => audit });
 
-    expect(exitCode).toBe(1);
-    expect(output.lines[0]).toContain('--json');
-    expect(output.lines[0]).toContain('--dry-run');
+    expect(exitCode).toBe(0);
+    expect(output.lines).toHaveLength(1);
+    const report = output.lines[0] ?? '';
+    // Discovered=10 (4 evaluable + 2 skip + 3 todo + 1 evidence-unavailable), all distinct so a
+    // swap between any two of these is independently detectable.
+    expect(report).toContain('Discovered test cases: 10');
+    expect(report).toContain('Evaluable: 4');
+    expect(report).toContain('Skipped: 6 (skip: 2, todo: 3, evidence-unavailable: 1)');
+    expect(report).toContain('Initial Jev calls (one per evaluable test case, exact): 4');
+    expect(report).toContain('Model: jev-1.13');
+    expect(report).toContain('Pricing/overhead snapshot: v2 (as of 2026-09-20)');
+    expect(report).toContain('Estimated cost in USD (approximate):');
+    expect(report).toContain('No network calls were made');
+    expect(report).toContain('nothing was written to disk');
+    // The seam never attempts a real store lookup (no `dependencies.audit === undefined` gate
+    // reached), so neither a cache-hit line nor a not-consulted disclosure should appear here —
+    // that disclosure is proven separately, against the real store lookup, below.
+    expect(report).not.toContain('Cache');
   });
 
+  it('prints discovered files, then excluded files, then diagnostics — grouped found -> skipped -> wrong', async () => {
+    const output = captureOutput();
+    const fileA: AuditFileResult = {
+      discovered: { repositoryRelativePath: 'a.test.ts', framework: 'vitest', frameworkEvidence: [] },
+      testCases: [
+        testCaseWithModifiers('tc:v1:a-1', []),
+        testCaseWithModifiers('tc:v1:a-2', []),
+        testCaseWithModifiers('tc:v1:a-3', []),
+      ],
+      dynamicMetadata: [],
+      diagnostics: [],
+      evidence: [bundleFor('tc:v1:a-1'), bundleFor('tc:v1:a-2')],
+    };
+    const fileB: AuditFileResult = {
+      discovered: { repositoryRelativePath: 'b.test.ts', framework: 'unknown', frameworkEvidence: [] },
+      testCases: [testCaseWithModifiers('tc:v1:b-1', [])],
+      dynamicMetadata: [{
+        reason: 'dynamic-test-name',
+        expression: 'test(name, () => {})',
+        span: dryRunSpan,
+      }],
+      diagnostics: [],
+      evidence: [],
+    };
+    const audit: AuditResult = {
+      rootDir: '/workspace-detail',
+      files: [fileA, fileB],
+      excluded: [
+        { repositoryRelativePath: 'skip.test.ts', reason: 'default-exclude', evidence: [] },
+        { repositoryRelativePath: 'e2e/flow.spec.ts', reason: 'e2e-v1', evidence: [] },
+      ],
+      diagnostics: [
+        { code: 'source-read-failed', message: 'Unable to read broken.test.ts: denied', severity: 'error', repositoryRelativePath: 'broken.test.ts' },
+        { code: 'failure', message: 'info', severity: 'error' },
+      ],
+      totals: {
+        files: 2, excluded: 2, testCases: 4, dynamicMetadata: 1, diagnostics: 2,
+        ...zeroEvidenceTotals, evidenceBundles: 2,
+      },
+      reportingOnly: true,
+    };
+
+    const exitCode = await runCli(['audit'], output.io, { audit: async () => audit });
+
+    expect(exitCode).toBe(0);
+    const report = output.lines[0] ?? '';
+    expect(report).toContain('Discovered files:');
+    expect(report).toContain('  - a.test.ts [vitest] — 3 test case(s), 2 evidence bundle(s)');
+    expect(report).toContain('  - b.test.ts [unknown] — 1 test case(s), 0 evidence bundle(s), 1 dynamic metadata');
+    expect(report).toContain('Excluded files:');
+    expect(report).toContain('  - skip.test.ts (reason: default-exclude)');
+    expect(report).toContain('  - e2e/flow.spec.ts (reason: e2e-v1)');
+    expect(report).toContain('Diagnostics:');
+    expect(report).toContain('  - source-read-failed (broken.test.ts): Unable to read broken.test.ts: denied');
+    expect(report).toContain('  - failure: info');
+
+    const discoveredIndex = report.indexOf('Discovered files:');
+    const excludedIndex = report.indexOf('Excluded files:');
+    const diagnosticsIndex = report.indexOf('Diagnostics:');
+    expect(discoveredIndex).toBeGreaterThan(-1);
+    expect(excludedIndex).toBeGreaterThan(discoveredIndex);
+    expect(diagnosticsIndex).toBeGreaterThan(excludedIndex);
+  });
+
+  it('truncates a long discovered-file list at 20 entries without hiding what was left out', async () => {
+    const output = captureOutput();
+    const files: AuditFileResult[] = Array.from({ length: 25 }, (_unused, index) => ({
+      discovered: { repositoryRelativePath: `file-${String(index).padStart(2, '0')}.test.ts`, framework: 'vitest', frameworkEvidence: [] },
+      testCases: [],
+      dynamicMetadata: [],
+      diagnostics: [],
+      evidence: [],
+    }));
+    const audit: AuditResult = {
+      rootDir: '/workspace-long-list',
+      files,
+      excluded: [],
+      diagnostics: [],
+      totals: { files: 25, excluded: 0, testCases: 0, dynamicMetadata: 0, diagnostics: 0, ...zeroEvidenceTotals },
+      reportingOnly: true,
+    };
+
+    const exitCode = await runCli(['audit'], output.io, { audit: async () => audit });
+
+    expect(exitCode).toBe(0);
+    const report = output.lines[0] ?? '';
+    // The true total is unaffected by truncation.
+    expect(report).toContain('Files discovered: 25');
+    const discoveredSection = report.slice(report.indexOf('Discovered files:'), report.indexOf('Excluded files:'));
+    const shownLines = discoveredSection.split('\n').filter((line) => line.startsWith('  - '));
+    expect(shownLines).toHaveLength(20);
+    expect(discoveredSection).toContain('  ... and 5 more not shown (run `audit --json` to see the complete list).');
+  });
+
+  it('accepts bare --json (no longer a usage error) and prints exactly the plain discovery JSON', async () => {
+    const output = captureOutput();
+    const audit: AuditResult = {
+      rootDir: '/workspace-bare-json',
+      files: [],
+      excluded: [],
+      diagnostics: [],
+      totals: { files: 0, excluded: 0, testCases: 0, dynamicMetadata: 0, diagnostics: 0, ...zeroEvidenceTotals },
+      reportingOnly: true,
+    };
+
+    const exitCode = await runCli(['audit', '--json'], output.io, { audit: async () => audit });
+
+    expect(exitCode).toBe(0);
+    expect(output.lines).toHaveLength(1);
+    expect(JSON.parse(output.lines[0] ?? '')).toMatchObject({ reportingOnly: true, rootDir: '/workspace-bare-json' });
+    // The readable-report title/estimate lines must never leak into --json's output.
+    expect(output.lines[0]).not.toContain('Audit summary');
+  });
+
+  it('--inspect-payloads --json is legal now (no longer rejected) and behaves exactly like --inspect-payloads alone', async () => {
+    const withoutJson = captureOutput();
+    const withJson = captureOutput();
+    const audit: AuditResult = {
+      rootDir: '/workspace',
+      files: [fileWithEvidence('a.test.ts', [bundleFor('tc:v1:a-1')])],
+      excluded: [],
+      diagnostics: [],
+      totals: { files: 1, excluded: 0, testCases: 1, dynamicMetadata: 0, diagnostics: 0, ...zeroEvidenceTotals, evidenceBundles: 1 },
+      reportingOnly: true,
+    };
+
+    const exitCodeWithoutJson = await runCli(['audit', '--inspect-payloads'], withoutJson.io, { audit: async () => audit });
+    const exitCodeWithJson = await runCli(['audit', '--inspect-payloads', '--json'], withJson.io, { audit: async () => audit });
+
+    expect(exitCodeWithoutJson).toBe(0);
+    expect(exitCodeWithJson).toBe(0);
+    expect(withJson.lines).toEqual(withoutJson.lines);
+  });
+
+  describe('real, read-only cache consultation (no store yet — the common case)', () => {
+    useIsolatedConfigHome();
+
+    it('discloses why the cache was not consulted, through the exact same read-only lookup --dry-run uses, and still creates no database file', async () => {
+      const root = await fixture({
+        'math.test.ts': "import { expect, test } from 'vitest';\ntest('adds', () => { expect(1 + 1).toBe(2); });\n",
+      });
+      const storePaths = resolveAuditStorePaths();
+      const output = captureOutput();
+
+      const exitCode = await runCli(['audit', '--rootDir', root], output.io);
+
+      expect(exitCode).toBe(0);
+      const report = output.lines[0] ?? '';
+      expect(report).toContain('Cache: not consulted (no audit store exists yet at the configured location).');
+      expect(report).toContain('Discovered test cases: 1');
+      expect(report).toContain('Evaluable: 1');
+      await expect(access(storePaths.databaseFile)).rejects.toThrow();
+      await expect(access(storePaths.configDir)).rejects.toThrow();
+    });
+  });
+});
+
+describe('--dry-run usage errors', () => {
   it('rejects --dry-run combined with --inspect-payloads as a usage error and never runs the audit seam', async () => {
     const output = captureOutput();
 
@@ -669,18 +937,6 @@ describe('--evaluate', () => {
     expect(output.lines[0]).toContain('--inspect-payloads');
   });
 
-  it('rejects --json without --dry-run or --evaluate as a usage error', async () => {
-    const output = captureOutput();
-
-    const exitCode = await runCli(['audit', '--json'], output.io, {
-      audit: async () => { throw new Error('must not run'); },
-    });
-
-    expect(exitCode).toBe(1);
-    expect(output.lines[0]).toContain('--dry-run');
-    expect(output.lines[0]).toContain('--evaluate');
-  });
-
   it('rejects --fresh without --evaluate as a usage error and never runs the audit seam', async () => {
     const output = captureOutput();
 
@@ -826,7 +1082,10 @@ describe('--evaluate', () => {
       });
       const output = captureOutput();
 
-      const exitCode = await runCli(['audit', '--rootDir', root], output.io);
+      // Phase 7: `--json` added so this golden keeps asserting the unchanged discovery JSON shape;
+      // the behavior under test here (no key needed, no network touched for a plain audit) holds
+      // identically for the bare human-readable default, which is covered separately.
+      const exitCode = await runCli(['audit', '--rootDir', root, '--json'], output.io);
 
       expect(exitCode).toBe(0);
       expect(fetchSpy).not.toHaveBeenCalled();
