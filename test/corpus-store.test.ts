@@ -25,9 +25,11 @@ function manifest(overrides: Readonly<Record<string, unknown>> = {}): string {
   return JSON.stringify({
     id: 'case-a',
     operators: ['remove-assertion'],
+    operatorRole: 'descriptive',
     oracleKind: 'assertion-mutation',
     testEffect: 'The real assertion is removed.',
     productionEffect: 'A production mutation would not be caught.',
+    expectedOutcome: 'expected-to-keep-passing',
     testFile: 'test.ts',
     productionFiles: ['production.ts'],
     ...overrides,
@@ -153,6 +155,48 @@ describe('loadCorpusFromDirectory', () => {
       'subtotal-exact-value': 'assertion-mutation',
       'discount-throws-range-error': 'assertion-mutation',
       'checkout-applies-percent': 'production-mutation',
+    });
+  });
+
+  /**
+   * Pins each real case's declared `operatorRole` and `expectedOutcome` —
+   * the two fields that turn each case's prose (`testEffect`/
+   * `productionEffect`) into a machine-checkable prediction. A future edit
+   * that silently flips one (or a parser that stops threading either field
+   * through) is caught here rather than absorbed. Verified by mutation: see
+   * the task report for the exact flip-and-restore run against a real
+   * `case.json` on disk.
+   */
+  it('parses each real discrimination case with its own declared operatorRole and expectedOutcome, not another case\'s', async () => {
+    const cases = await loadCorpusFromDirectory('test/fixtures/corpus/discrimination');
+    const operatorRoleById = Object.fromEntries(cases.map((c) => [c.id, c.operatorRole]));
+    const expectedOutcomeById = Object.fromEntries(cases.map((c) => [c.id, c.expectedOutcome]));
+
+    expect(operatorRoleById).toEqual({
+      'checkout-applies-percent': 'prescriptive',
+      'checkout-tautology': 'descriptive',
+      'computes-subtotal-truthy': 'descriptive',
+      'discount-returns-number': 'descriptive',
+      'discount-throws-range-error': 'prescriptive',
+      'exposes-checkout-helper': 'descriptive',
+      'mocks-discount-logic': 'descriptive',
+      'records-history-shared-state': 'descriptive',
+      'spies-on-math-round': 'descriptive',
+      'subtotal-exact-value': 'prescriptive',
+      'works-boolean-check': 'descriptive',
+    });
+    expect(expectedOutcomeById).toEqual({
+      'checkout-applies-percent': 'expected-to-fail',
+      'checkout-tautology': 'expected-to-keep-passing',
+      'computes-subtotal-truthy': 'expected-to-keep-passing',
+      'discount-returns-number': 'expected-to-keep-passing',
+      'discount-throws-range-error': 'expected-to-fail',
+      'exposes-checkout-helper': 'expected-to-keep-passing',
+      'mocks-discount-logic': 'expected-to-keep-passing',
+      'records-history-shared-state': 'expected-to-keep-passing',
+      'spies-on-math-round': 'expected-to-fail',
+      'subtotal-exact-value': 'expected-to-fail',
+      'works-boolean-check': 'expected-to-keep-passing',
     });
   });
 });

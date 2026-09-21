@@ -348,13 +348,17 @@ export {
 
 export {
   buildCorpusCase,
+  CORPUS_EXPECTED_OUTCOMES,
   CORPUS_OPERATOR_IDS,
+  CORPUS_OPERATOR_ROLES,
   CORPUS_ORACLE_KINDS,
   parseCorpusCaseManifest,
   type CorpusCase,
   type CorpusCaseManifest,
   type CorpusCaseProofStatus,
+  type CorpusExpectedOutcome,
   type CorpusOperatorId,
+  type CorpusOperatorRole,
   type CorpusOracleKind,
   type CorpusSourceFile,
 } from './domain/corpus.js';

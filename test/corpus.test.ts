@@ -5,7 +5,9 @@ import {
   CORPUS_ORACLE_KINDS,
   parseCorpusCaseManifest,
   type CorpusCaseManifest,
+  type CorpusExpectedOutcome,
   type CorpusOperatorId,
+  type CorpusOperatorRole,
   type CorpusOracleKind,
   type CorpusSourceFile,
 } from '../src/domain/corpus.js';
@@ -31,51 +33,65 @@ import {
 const DISTINCT_FIXTURES: ReadonlyArray<{
   readonly id: string;
   readonly operator: CorpusOperatorId;
+  readonly operatorRole: CorpusOperatorRole;
   readonly oracleKind: CorpusOracleKind;
   readonly testEffect: string;
   readonly productionEffect: string;
+  readonly expectedOutcome: CorpusExpectedOutcome;
 }> = [
   {
     id: 'case-remove-assertion',
     operator: 'remove-assertion',
+    operatorRole: 'descriptive',
     oracleKind: 'assertion-mutation',
     testEffect: 'The real equality assertion is replaced by a tautology comparing a literal to itself.',
     productionEffect: 'No production mutation can change this assertion\'s outcome, since nothing it computes reaches it.',
+    expectedOutcome: 'expected-to-keep-passing',
   },
   {
     id: 'case-weaken-expectation',
     operator: 'weaken-expectation',
+    operatorRole: 'prescriptive',
     oracleKind: 'assertion-mutation',
     testEffect: 'An exact-value assertion is weakened to a truthy check.',
     productionEffect: 'A production mutation that returns any other truthy value would not fail this test.',
+    expectedOutcome: 'expected-to-keep-passing',
   },
   {
     id: 'case-add-shared-state',
     operator: 'add-shared-state',
+    operatorRole: 'descriptive',
     oracleKind: 'repeated-randomized-execution',
     testEffect: 'The test writes to and reads from module-level state shared with other tests.',
     productionEffect: 'Resetting the shared module state between repeated runs is expected to change the outcome.',
+    expectedOutcome: 'expected-to-fail',
   },
   {
     id: 'case-mock-owned-logic',
     operator: 'mock-owned-logic',
+    operatorRole: 'descriptive',
     oracleKind: 'production-mutation',
     testEffect: 'The function under test is replaced by a local mock returning a canned value.',
     productionEffect: 'Corrupting the real function has no effect on this test, since it is never invoked.',
+    expectedOutcome: 'expected-to-keep-passing',
   },
   {
     id: 'case-pin-implementation-detail',
     operator: 'pin-implementation-detail',
+    operatorRole: 'descriptive',
     oracleKind: 'semantics-preserving-refactor',
     testEffect: 'The test asserts on an internal call that is not part of the public contract.',
     productionEffect: 'A behavior-preserving internal refactor is expected to break this test.',
+    expectedOutcome: 'expected-to-fail',
   },
   {
     id: 'case-introduce-uncontrolled-time',
     operator: 'introduce-uncontrolled-time',
+    operatorRole: 'prescriptive',
     oracleKind: 'repeated-randomized-execution',
     testEffect: 'The test depends on real wall-clock time instead of an injected clock.',
     productionEffect: 'Running the test repeatedly at different real times is expected to change the outcome.',
+    expectedOutcome: 'expected-to-fail',
   },
 ];
 
@@ -83,9 +99,11 @@ function manifestJsonFor(fixture: (typeof DISTINCT_FIXTURES)[number], overrides:
   return JSON.stringify({
     id: fixture.id,
     operators: [fixture.operator],
+    operatorRole: fixture.operatorRole,
     oracleKind: fixture.oracleKind,
     testEffect: fixture.testEffect,
     productionEffect: fixture.productionEffect,
+    expectedOutcome: fixture.expectedOutcome,
     testFile: 'test.ts',
     productionFiles: ['production.ts'],
     ...overrides,
@@ -97,9 +115,11 @@ describe('parseCorpusCaseManifest', () => {
     const manifest = parseCorpusCaseManifest(manifestJsonFor(fixture));
     expect(manifest.id).toBe(fixture.id);
     expect(manifest.operator).toBe(fixture.operator);
+    expect(manifest.operatorRole).toBe(fixture.operatorRole);
     expect(manifest.oracleKind).toBe(fixture.oracleKind);
     expect(manifest.testEffect).toBe(fixture.testEffect);
     expect(manifest.productionEffect).toBe(fixture.productionEffect);
+    expect(manifest.expectedOutcome).toBe(fixture.expectedOutcome);
   });
 
   it('covers all six operator ids and all four oracle kinds across the fixture set', () => {
@@ -144,6 +164,21 @@ describe('parseCorpusCaseManifest', () => {
       .toThrow(/unknown operator/);
   });
 
+  it('rejects a manifest missing "operatorRole"', () => {
+    expect(() => parseCorpusCaseManifest(manifestJsonFor(DISTINCT_FIXTURES[0]!, { operatorRole: undefined })))
+      .toThrow(/must declare a known "operatorRole"/);
+  });
+
+  it('rejects a manifest declaring an unknown "operatorRole" value', () => {
+    expect(() => parseCorpusCaseManifest(manifestJsonFor(DISTINCT_FIXTURES[0]!, { operatorRole: 'vibes' })))
+      .toThrow(/must declare a known "operatorRole"/);
+  });
+
+  it('accepts and returns a declared "operatorRole"', () => {
+    const manifest = parseCorpusCaseManifest(manifestJsonFor(DISTINCT_FIXTURES[0]!, { operatorRole: 'prescriptive' }));
+    expect(manifest.operatorRole).toBe('prescriptive');
+  });
+
   it('rejects a missing or unknown oracleKind', () => {
     expect(() => parseCorpusCaseManifest(manifestJsonFor(DISTINCT_FIXTURES[0]!, { oracleKind: undefined })))
       .toThrow(/oracleKind/);
@@ -163,6 +198,21 @@ describe('parseCorpusCaseManifest', () => {
       .toThrow(/productionEffect/);
     expect(() => parseCorpusCaseManifest(manifestJsonFor(DISTINCT_FIXTURES[0]!, { productionEffect: '' })))
       .toThrow(/productionEffect/);
+  });
+
+  it('rejects a manifest missing "expectedOutcome"', () => {
+    expect(() => parseCorpusCaseManifest(manifestJsonFor(DISTINCT_FIXTURES[0]!, { expectedOutcome: undefined })))
+      .toThrow(/must declare a known "expectedOutcome"/);
+  });
+
+  it('rejects a manifest declaring an unknown "expectedOutcome" value', () => {
+    expect(() => parseCorpusCaseManifest(manifestJsonFor(DISTINCT_FIXTURES[0]!, { expectedOutcome: 'vibes' })))
+      .toThrow(/must declare a known "expectedOutcome"/);
+  });
+
+  it('accepts and returns a declared "expectedOutcome"', () => {
+    const manifest = parseCorpusCaseManifest(manifestJsonFor(DISTINCT_FIXTURES[0]!, { expectedOutcome: 'expected-to-fail' }));
+    expect(manifest.expectedOutcome).toBe('expected-to-fail');
   });
 
   it('rejects a testFile that escapes its case directory', () => {
@@ -240,7 +290,10 @@ describe('buildCorpusCase', () => {
     );
     // No third-party field can influence this: the return shape is fixed by buildCorpusCase itself.
     expect(Object.keys(built).sort()).toEqual(
-      ['baseTest', 'id', 'operator', 'oracleKind', 'productionEffect', 'productionSources', 'proofStatus', 'testEffect'].sort(),
+      [
+        'baseTest', 'expectedOutcome', 'id', 'operator', 'operatorRole',
+        'oracleKind', 'productionEffect', 'productionSources', 'proofStatus', 'testEffect',
+      ].sort(),
     );
   });
 });

@@ -1,9 +1,11 @@
 {
   "id": "computes-subtotal-truthy",
   "operators": ["weaken-expectation"],
+  "operatorRole": "descriptive",
   "oracleKind": "production-mutation",
   "testEffect": "`expect(result).toBe(25)` is weakened to `expect(result).toBeTruthy()`, dropping the exact expected sum for this two-line cart.",
   "productionEffect": "Corrupting `subtotal` to return the wrong non-zero total (for example summing only price and ignoring `qty`, giving 15 instead of 25) would not fail this test; it is expected to keep passing under that production mutation.",
+  "expectedOutcome": "expected-to-keep-passing",
   "testFile": "test.ts",
   "productionFiles": ["cart.ts"]
 }

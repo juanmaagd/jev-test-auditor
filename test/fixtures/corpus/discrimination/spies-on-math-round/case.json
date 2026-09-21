@@ -1,9 +1,11 @@
 {
   "id": "spies-on-math-round",
   "operators": ["pin-implementation-detail"],
+  "operatorRole": "descriptive",
   "oracleKind": "semantics-preserving-refactor",
   "testEffect": "The test asserts that `checkout` calls the global `Math.round` exactly once — an internal implementation choice inside `applyDiscount` — instead of asserting on `checkout`'s return value.",
   "productionEffect": "Reimplementing `applyDiscount`'s rounding without calling `Math.round` directly (for example rounding via `Number(value.toFixed(2))`), while returning the identical externally observed value, would break this test even though checkout's behavior is unchanged; it is expected to fail under that semantics-preserving refactor.",
+  "expectedOutcome": "expected-to-fail",
   "testFile": "test.ts",
   "productionFiles": ["cart.ts"]
 }

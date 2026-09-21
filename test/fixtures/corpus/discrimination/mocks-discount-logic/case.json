@@ -1,9 +1,11 @@
 {
   "id": "mocks-discount-logic",
   "operators": ["mock-owned-logic"],
+  "operatorRole": "descriptive",
   "oracleKind": "production-mutation",
   "testEffect": "The test never calls `applyDiscount`; it creates and asserts against a local mock function (`vi.fn(() => 99)`) that unconditionally returns 99, replacing the owned discount logic under test with a stand-in.",
   "productionEffect": "Corrupting `applyDiscount` in any way (for example always throwing, or always returning 0) has no effect on this test, since `applyDiscount` is never invoked; it is expected to keep passing under that production mutation.",
+  "expectedOutcome": "expected-to-keep-passing",
   "testFile": "test.ts",
   "productionFiles": ["cart.ts"]
 }

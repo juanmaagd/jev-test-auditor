@@ -48,6 +48,33 @@
  * outcome can live; nothing here, or downstream of it, can mistake a
  * declared claim for a demonstrated one. `docs/PRD.md`'s "Rules are
  * hypotheses" applies equally to a corpus case's own claims about itself.
+ *
+ * **`operatorRole` and `expectedOutcome`: the falsifiable prediction, made
+ * structural instead of left as prose.** `testEffect`/`productionEffect` are
+ * free text — readable, but nothing downstream can compute with them.
+ * `operatorRole` (`'prescriptive'` | `'descriptive'`) states whether P7-2 is
+ * expected to actually apply the declared `operator` to the base test to
+ * produce a variant for comparison (`'prescriptive'`), or whether the
+ * operator instead names a flaw already present in the base test as
+ * written, which P7-2 runs its oracle against unmodified (`'descriptive'`).
+ * `oracleKind` cannot carry this distinction on its own —
+ * `checkout-applies-percent` is `production-mutation`, the same oracle kind
+ * as several `'descriptive'` cases, yet it is `'prescriptive'` — so this
+ * module declares it explicitly rather than leaving a future reader (or
+ * P7-2 itself) to infer it. `expectedOutcome`
+ * (`'expected-to-fail'` | `'expected-to-keep-passing'`) is a raw,
+ * oracle-kind-agnostic prediction of whether the base test's own result
+ * flips to failing once its declared oracle acts — literally the tail of
+ * each case's own `productionEffect` claim, made structural. It is
+ * deliberately not a quality judgment: `spies-on-math-round` is a
+ * `'descriptive'` (deliberately bad, `pin-implementation-detail`) case
+ * whose own prose predicts it "is expected to fail ... under that
+ * semantics-preserving refactor" — the same `'expected-to-fail'` value the
+ * three good `'prescriptive'` controls carry, because a test that pins an
+ * implementation detail breaks on a behavior-preserving refactor for the
+ * wrong reason. `expectedOutcome` says only what the oracle will observe;
+ * `operatorRole`, together with which side the named `oracleKind` acts on,
+ * is what tells P7-4 whether that observation is the desired signal.
  */
 
 /** The six test-mutating operators from `docs/technical-design.md:332`, in the order they appear there. */
@@ -64,6 +91,20 @@ export type CorpusOperatorId = (typeof CORPUS_OPERATOR_IDS)[number];
 
 const CORPUS_OPERATOR_ID_SET: ReadonlySet<string> = new Set(CORPUS_OPERATOR_IDS);
 
+/**
+ * Whether P7-2 is expected to actually apply the declared `operator` to the
+ * base test to produce a variant for comparison (`'prescriptive'`), or the
+ * operator instead names a flaw already present in the base test as written,
+ * which P7-2 runs its oracle against unmodified (`'descriptive'`). See the
+ * module doc's `checkout-applies-percent` example for why `oracleKind` alone
+ * cannot carry this distinction.
+ */
+export const CORPUS_OPERATOR_ROLES = ['prescriptive', 'descriptive'] as const;
+
+export type CorpusOperatorRole = (typeof CORPUS_OPERATOR_ROLES)[number];
+
+const CORPUS_OPERATOR_ROLE_SET: ReadonlySet<string> = new Set(CORPUS_OPERATOR_ROLES);
+
 /** The four production-mutating oracle kinds from `docs/technical-design.md:332`, in the order they appear there. */
 export const CORPUS_ORACLE_KINDS = [
   'production-mutation',
@@ -75,6 +116,19 @@ export const CORPUS_ORACLE_KINDS = [
 export type CorpusOracleKind = (typeof CORPUS_ORACLE_KINDS)[number];
 
 const CORPUS_ORACLE_KIND_SET: ReadonlySet<string> = new Set(CORPUS_ORACLE_KINDS);
+
+/**
+ * A raw, oracle-kind-agnostic prediction of whether the base test's own
+ * result flips to failing once its declared oracle acts. Not a quality
+ * judgment — see the module doc's `spies-on-math-round` example, where a
+ * `'descriptive'` (deliberately bad) case still predicts
+ * `'expected-to-fail'`.
+ */
+export const CORPUS_EXPECTED_OUTCOMES = ['expected-to-fail', 'expected-to-keep-passing'] as const;
+
+export type CorpusExpectedOutcome = (typeof CORPUS_EXPECTED_OUTCOMES)[number];
+
+const CORPUS_EXPECTED_OUTCOME_SET: ReadonlySet<string> = new Set(CORPUS_EXPECTED_OUTCOMES);
 
 /**
  * Every `CorpusCase` P7-1 can produce is `'unverified'` — the single literal
@@ -99,9 +153,11 @@ export interface CorpusSourceFile {
 export interface CorpusCaseManifest {
   readonly id: string;
   readonly operator: CorpusOperatorId;
+  readonly operatorRole: CorpusOperatorRole;
   readonly oracleKind: CorpusOracleKind;
   readonly testEffect: string;
   readonly productionEffect: string;
+  readonly expectedOutcome: CorpusExpectedOutcome;
   readonly testFile: string;
   readonly productionFiles: readonly string[];
 }
@@ -110,9 +166,11 @@ export interface CorpusCaseManifest {
 export interface CorpusCase {
   readonly id: string;
   readonly operator: CorpusOperatorId;
+  readonly operatorRole: CorpusOperatorRole;
   readonly oracleKind: CorpusOracleKind;
   readonly testEffect: string;
   readonly productionEffect: string;
+  readonly expectedOutcome: CorpusExpectedOutcome;
   readonly baseTest: CorpusSourceFile;
   readonly productionSources: readonly CorpusSourceFile[];
   readonly proofStatus: CorpusCaseProofStatus;
@@ -126,9 +184,11 @@ export interface CorpusCase {
 const MANIFEST_KEYS = [
   'id',
   'operators',
+  'operatorRole',
   'oracleKind',
   'testEffect',
   'productionEffect',
+  'expectedOutcome',
   'testFile',
   'productionFiles',
 ] as const;
@@ -191,12 +251,28 @@ function requireOperator(record: Record<string, unknown>, id: string): CorpusOpe
   return candidate as CorpusOperatorId;
 }
 
+function requireOperatorRole(record: Record<string, unknown>, id: string): CorpusOperatorRole {
+  const operatorRole = record.operatorRole;
+  if (typeof operatorRole !== 'string' || !CORPUS_OPERATOR_ROLE_SET.has(operatorRole)) {
+    fail(`Corpus case "${id}" must declare a known "operatorRole": got ${JSON.stringify(operatorRole)}`);
+  }
+  return operatorRole as CorpusOperatorRole;
+}
+
 function requireOracleKind(record: Record<string, unknown>, id: string): CorpusOracleKind {
   const oracleKind = record.oracleKind;
   if (typeof oracleKind !== 'string' || !CORPUS_ORACLE_KIND_SET.has(oracleKind)) {
     fail(`Corpus case "${id}" must declare a known "oracleKind": got ${JSON.stringify(oracleKind)}`);
   }
   return oracleKind as CorpusOracleKind;
+}
+
+function requireExpectedOutcome(record: Record<string, unknown>, id: string): CorpusExpectedOutcome {
+  const expectedOutcome = record.expectedOutcome;
+  if (typeof expectedOutcome !== 'string' || !CORPUS_EXPECTED_OUTCOME_SET.has(expectedOutcome)) {
+    fail(`Corpus case "${id}" must declare a known "expectedOutcome": got ${JSON.stringify(expectedOutcome)}`);
+  }
+  return expectedOutcome as CorpusExpectedOutcome;
 }
 
 function requireNonEmptyStringField(record: Record<string, unknown>, field: string, id: string): string {
@@ -237,9 +313,11 @@ function requireProductionFiles(record: Record<string, unknown>, id: string): re
  * top level; any field name outside {@link MANIFEST_KEYS}; a missing or
  * empty `id`; an `operators` array whose length is not exactly one, or
  * whose one entry is not a known {@link CorpusOperatorId}; an unknown or
- * missing `oracleKind`; a missing or empty `testEffect`/`productionEffect`;
- * a `testFile` that is missing, empty, or escapes its case directory; and a
- * `productionFiles` array that is empty or contains an invalid entry.
+ * missing `operatorRole`; an unknown or missing `oracleKind`; a missing or
+ * empty `testEffect`/`productionEffect`; an unknown or missing
+ * `expectedOutcome`; a `testFile` that is missing, empty, or escapes its
+ * case directory; and a `productionFiles` array that is empty or contains
+ * an invalid entry.
  */
 export function parseCorpusCaseManifest(manifestJson: string): CorpusCaseManifest {
   const raw = parseManifestJson(manifestJson);
@@ -252,13 +330,25 @@ export function parseCorpusCaseManifest(manifestJson: string): CorpusCaseManifes
 
   const id = requireId(record);
   const operator = requireOperator(record, id);
+  const operatorRole = requireOperatorRole(record, id);
   const oracleKind = requireOracleKind(record, id);
   const testEffect = requireNonEmptyStringField(record, 'testEffect', id);
   const productionEffect = requireNonEmptyStringField(record, 'productionEffect', id);
+  const expectedOutcome = requireExpectedOutcome(record, id);
   const testFile = requireSafeRelativePathField(record, 'testFile', id);
   const productionFiles = requireProductionFiles(record, id);
 
-  return { id, operator, oracleKind, testEffect, productionEffect, testFile, productionFiles };
+  return {
+    id,
+    operator,
+    operatorRole,
+    oracleKind,
+    testEffect,
+    productionEffect,
+    expectedOutcome,
+    testFile,
+    productionFiles,
+  };
 }
 
 /**
@@ -293,9 +383,11 @@ export function buildCorpusCase(
   return {
     id: manifest.id,
     operator: manifest.operator,
+    operatorRole: manifest.operatorRole,
     oracleKind: manifest.oracleKind,
     testEffect: manifest.testEffect,
     productionEffect: manifest.productionEffect,
+    expectedOutcome: manifest.expectedOutcome,
     baseTest,
     productionSources,
     proofStatus: 'unverified',

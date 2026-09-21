@@ -1,9 +1,11 @@
 {
   "id": "checkout-applies-percent",
   "operators": ["mock-owned-logic"],
+  "operatorRole": "prescriptive",
   "oracleKind": "production-mutation",
   "testEffect": "Replacing the call to the real `checkout` with a mock returning a fixed `22.5` (mocking the owned logic under test) would make the assertion pass unconditionally, independent of `subtotal` or `applyDiscount`.",
   "productionEffect": "Corrupting `applyDiscount`'s arithmetic (for example changing `(100 - percent)` to `(100 + percent)`) is expected to fail this test as written, since it exercises the real `subtotal` plus `applyDiscount` composition; substituting the mock described above for that same corrupted `applyDiscount` would let it keep passing, showing the current use of real logic is what catches the regression.",
+  "expectedOutcome": "expected-to-fail",
   "testFile": "test.ts",
   "productionFiles": ["cart.ts"]
 }
