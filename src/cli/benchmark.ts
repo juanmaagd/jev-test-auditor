@@ -25,18 +25,43 @@
  * `--baseline <runId> --candidate <runId>` (also this task) is a second,
  * read-only mode: compares two already-persisted runs from `--store` and
  * never proves or samples anything new.
+ *
+ * **`--metrics <runId>[,<runId>...]` (task P7-4)** is a third, read-only
+ * mode: loads one or more already-persisted runs from `--store` and prints
+ * the per-dimension report (`src/domain/benchmark-metrics.ts`) — precision,
+ * recall, false-positive rate, needs-review routing, probability
+ * calibration, run-to-run stability, cost, and latency, one figure per
+ * rubric dimension, counting only proven cases. Pass more than one run id to
+ * pool their samples (tighter estimates) and to compute run-to-run
+ * stability, which needs at least two runs of the same corpus to mean
+ * anything. `--jsonl <path>` (also this task) may be combined with
+ * `--metrics` to additionally export every loaded case outcome as
+ * newline-delimited JSON, one record per line — mirroring how `--html`
+ * gates writing a report file in `src/cli/index.ts`: nothing is written
+ * without that explicit path.
+ *
+ * **`--store` mode's exit code (task P7-4 decision, closing the open
+ * question P7-3's own report returned): `0` now requires every case to be
+ * BOTH proven AND successfully sampled, not proof alone.** P7-3 disclosed a
+ * real run where all 11 cases proved but every sample failed on a transient
+ * provider `503`, and still exited `0` — a run that failed at its own stated
+ * purpose (sampling Jev's verdict) reporting success. Bare (no-`--store`)
+ * invocation is UNCHANGED: it never samples anything, so its exit code stays
+ * proof-outcome-only, exactly as P7-2 shipped it.
  */
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { loadCorpusFromDirectory } from '../adapters/corpus-store.js';
 import { createOracleRunnerPort } from '../adapters/oracle-runner.js';
 import { createBenchmarkSamplePort } from '../adapters/benchmark-sample-port.js';
+import { checkBenchmarkJsonlPath, writeBenchmarkJsonl } from '../adapters/benchmark-jsonl-writer.js';
 import { createJevHttpGateway } from '../adapters/jev-http-gateway.js';
 import { createSqliteBenchmarkStore } from '../adapters/sqlite-benchmark-store.js';
 import { proveCorpus, type CaseProof } from '../application/benchmark.js';
 import { runBenchmarkPass, type BenchmarkSamplePort, type SampleResult } from '../application/benchmark-run.js';
 import { compareBenchmarkRuns } from '../domain/benchmark-comparison.js';
-import type { BenchmarkStorePort } from '../domain/benchmark-store.js';
+import { computeBenchmarkMetricsReport, MIN_SAMPLE_FOR_RATE, OPERATOR_DIMENSION, type BenchmarkMetricsDimensionReport, type BenchmarkMetricsReport, type RateMetric, type SampledMetric } from '../domain/benchmark-metrics.js';
+import type { BenchmarkCaseOutcome, BenchmarkStorePort } from '../domain/benchmark-store.js';
 import { NO_KEY_USAGE_MESSAGE, resolveEvaluationApiKey } from './api-key.js';
 
 export interface BenchmarkCliIo {
@@ -45,7 +70,8 @@ export interface BenchmarkCliIo {
 
 type ParsedBenchmarkOptions =
   | { readonly mode: 'prove'; readonly corpusDir: string; readonly timeoutMs?: number; readonly store?: string }
-  | { readonly mode: 'compare'; readonly store: string; readonly baseline: string; readonly candidate: string };
+  | { readonly mode: 'compare'; readonly store: string; readonly baseline: string; readonly candidate: string }
+  | { readonly mode: 'metrics'; readonly store: string; readonly runIds: readonly string[]; readonly jsonl?: string };
 
 function requiresValue(args: readonly string[], index: number, flag: string, what: string): { readonly value: string } | { readonly error: string } {
   const value = args[index + 1];
@@ -60,6 +86,8 @@ function parseBenchmarkOptions(args: readonly string[]): ParsedBenchmarkOptions 
   let store: string | undefined;
   let baseline: string | undefined;
   let candidate: string | undefined;
+  let metricsRunIds: readonly string[] | undefined;
+  let jsonl: string | undefined;
 
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
@@ -100,6 +128,22 @@ function parseBenchmarkOptions(args: readonly string[]): ParsedBenchmarkOptions 
       index += 1;
       continue;
     }
+    if (argument === '--metrics') {
+      const result = requiresValue(args, index, '--metrics', 'one or more comma-separated run ids');
+      if ('error' in result) return result;
+      const runIds = result.value.split(',').map((entry) => entry.trim()).filter((entry) => entry.length > 0);
+      if (runIds.length === 0) return { error: '--metrics requires at least one run id' };
+      metricsRunIds = runIds;
+      index += 1;
+      continue;
+    }
+    if (argument === '--jsonl') {
+      const result = requiresValue(args, index, '--jsonl', 'a path');
+      if ('error' in result) return result;
+      jsonl = result.value;
+      index += 1;
+      continue;
+    }
     return { error: `Unknown option: ${argument}` };
   }
 
@@ -108,6 +152,19 @@ function parseBenchmarkOptions(args: readonly string[]): ParsedBenchmarkOptions 
   if (hasBaseline !== hasCandidate) {
     return { error: '--baseline and --candidate must be given together (benchmark --store <path> --baseline <runId> --candidate <runId>)' };
   }
+
+  if (jsonl !== undefined && metricsRunIds === undefined) {
+    return { error: '--jsonl requires --metrics <runId>[,<runId>...] (a comparison/prove run has no loaded run set to export; benchmark --store <path> --metrics <runId> --jsonl <path>)' };
+  }
+
+  if (metricsRunIds !== undefined) {
+    if (store === undefined) return { error: '--metrics requires --store <path> naming which database to read the run(s) from' };
+    if (corpusDirGiven || timeoutMs !== undefined || hasBaseline || hasCandidate) {
+      return { error: '--metrics cannot be combined with --corpus, --timeout-ms, --baseline, or --candidate (it reads already-persisted runs; it proves and samples nothing new)' };
+    }
+    return { mode: 'metrics', store, runIds: metricsRunIds, ...(jsonl === undefined ? {} : { jsonl }) };
+  }
+
   if (hasBaseline && hasCandidate) {
     if (store === undefined) return { error: '--baseline/--candidate require --store <path> naming which database to read the two runs from' };
     if (corpusDirGiven || timeoutMs !== undefined) {
@@ -233,7 +290,98 @@ async function runProve(
     const proven = pass.cases.filter((entry) => entry.proof.status.kind === 'proven').length;
     io.writeLine(`${proven}/${pass.cases.length} case(s) proven.`);
     if (pass.runId !== undefined) io.writeLine(`Run ${pass.runId} persisted to ${parsed.store}.`);
-    return proven === pass.cases.length ? 0 : 1;
+    // Task P7-4 decision (see this file's own doc): under --store, success requires every case to
+    // be BOTH proven AND successfully sampled — a run that proves everything but samples nothing
+    // (P7-3's own disclosed transient-503 run) must not exit 0.
+    const sampled = pass.cases.filter((entry) => entry.sampleResult.kind === 'sampled').length;
+    return proven === pass.cases.length && sampled === pass.cases.length ? 0 : 1;
+  } finally {
+    await store.close();
+  }
+}
+
+function formatRate(metric: RateMetric): string {
+  const fraction = `${metric.numerator}/${metric.denominator}`;
+  if (metric.kind === 'not-computable') return `not computable (${metric.reason})`;
+  if (metric.kind === 'below-minimum-sample') return `${fraction} (indicative only — below minimum sample of ${MIN_SAMPLE_FOR_RATE})`;
+  return `${fraction} (${(metric.value! * 100).toFixed(1)}%)`;
+}
+
+function formatSampled(metric: SampledMetric, unit: (value: number) => string): string {
+  if (metric.kind === 'not-computable') return `not computable (${metric.reason})`;
+  if (metric.kind === 'below-minimum-sample') return `${unit(metric.value!)} (n=${metric.sampleCount}, indicative only — below minimum sample of ${MIN_SAMPLE_FOR_RATE})`;
+  return `${unit(metric.value!)} (n=${metric.sampleCount})`;
+}
+
+function printDimensionReport(dimension: BenchmarkMetricsDimensionReport, io: BenchmarkCliIo): void {
+  io.writeLine(`-- ${dimension.dimensionId} --`);
+  if (dimension.provenCaseCount === 0) {
+    io.writeLine('  no proven case in the corpus targets this dimension via its declared operator.');
+  } else {
+    io.writeLine(`  proven cases designated to this dimension: ${dimension.provenCaseCount}`);
+  }
+  io.writeLine(`  precision:            ${formatRate(dimension.precision)}`);
+  io.writeLine(`  recall:               ${formatRate(dimension.recall)}`);
+  io.writeLine(`  false-positive rate:  ${formatRate(dimension.falsePositiveRate)}`);
+  io.writeLine(`  needs-review routing: ${formatRate(dimension.needsReviewRouting)}`);
+  io.writeLine(`  calibration (Brier):  ${formatSampled(dimension.calibration, (value) => value.toFixed(4))}`);
+  io.writeLine(`  cost:                 ${formatSampled(dimension.cost, (value) => `$${value.toFixed(6)}`)}`);
+  io.writeLine(`  latency:              ${formatSampled(dimension.latency, (value) => `${value.toFixed(0)}ms`)}`);
+  io.writeLine(`  run-to-run stability: ${formatRate(dimension.stability)}`);
+}
+
+function printMetricsReport(report: BenchmarkMetricsReport, io: BenchmarkCliIo): void {
+  io.writeLine(`${report.runsConsidered} run(s) considered; ${report.provenCaseCount} distinct proven case(s).`);
+  if (report.unprovenCases.length > 0) {
+    io.writeLine(`Unproven (excluded from every metric): ${report.unprovenCases.length}`);
+    for (const entry of report.unprovenCases) io.writeLine(`  ${entry.caseId}: ${entry.reasons.join('; ')}`);
+  }
+  if (report.notSampledCases.length > 0) {
+    io.writeLine(`Proven but not sampled (excluded from every metric): ${report.notSampledCases.length}`);
+    for (const entry of report.notSampledCases) io.writeLine(`  ${entry.caseId}: ${entry.reasons.join('; ')}`);
+  }
+  for (const dimension of report.dimensions) printDimensionReport(dimension, io);
+}
+
+async function runMetrics(
+  parsed: Extract<ParsedBenchmarkOptions, { readonly mode: 'metrics' }>,
+  io: BenchmarkCliIo,
+  dependencies: BenchmarkCliDependencies,
+): Promise<number> {
+  if (parsed.jsonl !== undefined) {
+    const problem = await checkBenchmarkJsonlPath(parsed.jsonl);
+    if (problem !== undefined) {
+      io.writeLine(`--jsonl ${parsed.jsonl}: ${problem.message}`);
+      return 1;
+    }
+  }
+
+  const store = await (dependencies.createStorePort?.(parsed.store) ?? createSqliteBenchmarkStore({ databaseFile: parsed.store }));
+  try {
+    const runs: { readonly runId: string; readonly outcomes: readonly BenchmarkCaseOutcome[] }[] = [];
+    for (const runId of parsed.runIds) {
+      const outcomes = await store.loadRun(runId);
+      if (outcomes === undefined) {
+        io.writeLine(`No run recorded under id "${runId}" (--metrics) in ${parsed.store}.`);
+        return 1;
+      }
+      runs.push({ runId, outcomes });
+    }
+
+    const report = computeBenchmarkMetricsReport(runs);
+    printMetricsReport(report, io);
+
+    if (parsed.jsonl !== undefined) {
+      const records = runs.flatMap(({ runId, outcomes }) => outcomes.map((outcome) => ({ runId, dimension: OPERATOR_DIMENSION[outcome.operator], ...outcome })));
+      const result = await writeBenchmarkJsonl(parsed.jsonl, records);
+      if (!result.written) {
+        io.writeLine(`Failed to write --jsonl ${parsed.jsonl}: ${result.message}`);
+        return 1;
+      }
+      io.writeLine(`Exported ${result.recordCount} record(s) to ${parsed.jsonl}.`);
+    }
+
+    return 0;
   } finally {
     await store.close();
   }
@@ -257,6 +405,7 @@ export async function runBenchmarkCli(
     return 1;
   }
   if (parsed.mode === 'compare') return runCompare(parsed, io, dependencies);
+  if (parsed.mode === 'metrics') return runMetrics(parsed, io, dependencies);
   return runProve(parsed, io, dependencies);
 }
 

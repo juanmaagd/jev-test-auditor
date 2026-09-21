@@ -102,8 +102,11 @@ describe('runBenchmarkCli --store', () => {
     } finally {
       await store.close();
     }
-    // Exit code still reflects proof outcome only (unrealizable -> unproven) — sampling never
-    // changes this contract.
+    // Unrealizable (no registered oracle recipe) -> unproven, so exit is 1 regardless of the P7-4
+    // exit-code decision below: under --store, success now requires BOTH proof and sampling to
+    // succeed for every case (see src/cli/benchmark.ts's own doc) — this case never proves, so it
+    // was already going to fail either way. test/benchmark-cli-metrics.test.ts covers the case this
+    // task's own report flagged as untested: every case proves but sampling fails.
     expect(exitCode).toBe(1);
   });
 

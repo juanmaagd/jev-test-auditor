@@ -27,6 +27,8 @@ const BENCHMARK_ENTRY = join(SRC_ROOT, 'cli', 'benchmark.ts');
 const ORACLE_RUNNER = join(SRC_ROOT, 'adapters', 'oracle-runner.ts');
 const AUDIT_SQLITE_STORE = join(SRC_ROOT, 'adapters', 'sqlite-audit-store.ts');
 const CACHE_KEY = join(SRC_ROOT, 'adapters', 'cache-key.ts');
+const BENCHMARK_METRICS = join(SRC_ROOT, 'domain', 'benchmark-metrics.ts');
+const BENCHMARK_JSONL_WRITER = join(SRC_ROOT, 'adapters', 'benchmark-jsonl-writer.ts');
 
 function moduleSpecifier(expression: ts.Expression | undefined): string | undefined {
   return expression && (ts.isStringLiteral(expression) || ts.isNoSubstitutionTemplateLiteral(expression))
@@ -114,5 +116,26 @@ describe('benchmark --store cannot reach the audit store or its cache', () => {
     const closure = await transitiveClosure(BENCHMARK_ENTRY);
     expect([...closure]).not.toContain(AUDIT_SQLITE_STORE);
     expect([...closure]).not.toContain(CACHE_KEY);
+  });
+});
+
+/**
+ * Task P7-4's own new modules (per-dimension metrics, JSONL export) exist
+ * only to serve `benchmark --metrics`/`--jsonl`; `audit` has no use for
+ * either and must never reach them, on the same two-assertion discipline as
+ * every other boundary check in this file (a negative control alone would
+ * pass vacuously if either module were unreachable from anywhere at all).
+ */
+describe('benchmark metrics/JSONL export is unreachable from audit', () => {
+  it('DOES reach benchmark-metrics.ts and benchmark-jsonl-writer.ts from the benchmark command\'s own entry point (positive control)', async () => {
+    const closure = await transitiveClosure(BENCHMARK_ENTRY);
+    expect([...closure]).toContain(BENCHMARK_METRICS);
+    expect([...closure]).toContain(BENCHMARK_JSONL_WRITER);
+  });
+
+  it('never reaches benchmark-metrics.ts or benchmark-jsonl-writer.ts from the audit command\'s own entry point', async () => {
+    const closure = await transitiveClosure(AUDIT_ENTRY);
+    expect([...closure]).not.toContain(BENCHMARK_METRICS);
+    expect([...closure]).not.toContain(BENCHMARK_JSONL_WRITER);
   });
 });
