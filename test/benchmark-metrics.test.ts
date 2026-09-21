@@ -14,7 +14,7 @@ import type {
   OverallClassificationStatus,
 } from '../src/domain/classification.js';
 import type { CorpusOperatorId, CorpusOperatorRole } from '../src/domain/corpus.js';
-import type { RubricDimensionId } from '../src/domain/rubric.js';
+import { RUBRIC_DIMENSION_IDS, type RubricDimensionId } from '../src/domain/rubric.js';
 import type { TestCaseId } from '../src/domain/test-understanding.js';
 import { JEV_ESTIMATE_SNAPSHOT } from '../src/domain/jev-pricing.js';
 
@@ -155,7 +155,13 @@ describe('OPERATOR_DIMENSION', () => {
       'mock-owned-logic': 'test-double-quality',
       'pin-implementation-detail': 'refactor-resistance',
       'introduce-uncontrolled-time': 'determinism-isolation',
+      'assert-incidental-interaction': 'behavioral-focus',
+      'obscure-failure-cause': 'diagnostic-quality',
     });
+  });
+
+  it('covers all seven rubric dimensions across its target values', () => {
+    expect(new Set(Object.values(OPERATOR_DIMENSION))).toEqual(new Set(RUBRIC_DIMENSION_IDS));
   });
 });
 

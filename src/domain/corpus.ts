@@ -77,7 +77,7 @@
  * is what tells P7-4 whether that observation is the desired signal.
  */
 
-/** The six test-mutating operators from `docs/technical-design.md:332`, in the order they appear there. */
+/** The test-mutating operators covering the seven rubric dimensions. */
 export const CORPUS_OPERATOR_IDS = [
   'remove-assertion',
   'weaken-expectation',
@@ -85,6 +85,8 @@ export const CORPUS_OPERATOR_IDS = [
   'mock-owned-logic',
   'pin-implementation-detail',
   'introduce-uncontrolled-time',
+  'assert-incidental-interaction',
+  'obscure-failure-cause',
 ] as const;
 
 export type CorpusOperatorId = (typeof CORPUS_OPERATOR_IDS)[number];

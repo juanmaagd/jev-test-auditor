@@ -96,17 +96,21 @@
  *     state, which is determinism-isolation's own definition exactly; the
  *     sole real case, `records-history-shared-state`, mutates module-level
  *     shared state and unseeded randomness (`Math.random()`).
+ *   - `assert-incidental-interaction` → `behavioral-focus`: behavioral-focus's
+ *     own Misleading text names "asserting a specific private helper was called,
+ *     asserting on the internal call order or call count of a helper with no
+ *     observable effect, or asserting on an implementation-only internal field
+ *     — with no assertion on any actual output or observable effect."
+ *   - `obscure-failure-cause` → `diagnostic-quality`: diagnostic-quality's
+ *     own Misleading text names "the test name is generic or unrelated to what
+ *     is actually checked — for example 'works', 'test1', or a name describing
+ *     a different behavior than the assertions cover — or the assertions are
+ *     structured so a failure would give no usable information about which
+ *     specific behavior broke, such as a single boolean or truthy check
+ *     summarizing a large, multi-step operation."
  *
- * This leaves TWO of the seven rubric dimensions — `behavioral-focus` and
- * `diagnostic-quality` — permanently unreachable by any of the six corpus
- * operators: a real, disclosed Phase 7 finding (returned to the orchestrator
- * in this task's own report), not a bug in this mapping. Authoring a new
- * operator for either is out of this task's authorized scope (P7-1 fixed the
- * six-operator catalog); until one exists, those two dimensions will always
- * report `provenCaseCount: 0` and `'not-computable'` for every accuracy
- * metric, however large the corpus grows — exactly the behavior this
- * module's own "no proven case reports that plainly" rule exists to make
- * visible rather than hide.
+ * Every one of the seven rubric dimensions now has at least one corpus
+ * operator mapping to it, closing the previous coverage gap.
  *
  * **Independent samples (confirmed defect, fixed after P7-4 shipped).**
  * `MIN_SAMPLE_FOR_RATE` exists to guard against too few *cases* — repeating
@@ -206,6 +210,8 @@ export const OPERATOR_DIMENSION: Readonly<Record<CorpusOperatorId, RubricDimensi
   'mock-owned-logic': 'test-double-quality',
   'pin-implementation-detail': 'refactor-resistance',
   'introduce-uncontrolled-time': 'determinism-isolation',
+  'assert-incidental-interaction': 'behavioral-focus',
+  'obscure-failure-cause': 'diagnostic-quality',
 };
 
 export type RateMetricKind = 'computed' | 'below-minimum-sample' | 'not-computable';

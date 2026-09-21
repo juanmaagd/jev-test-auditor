@@ -93,6 +93,24 @@ const DISTINCT_FIXTURES: ReadonlyArray<{
     productionEffect: 'Running the test repeatedly at different real times is expected to change the outcome.',
     expectedOutcome: 'expected-to-fail',
   },
+  {
+    id: 'case-assert-incidental-interaction',
+    operator: 'assert-incidental-interaction',
+    operatorRole: 'descriptive',
+    oracleKind: 'production-mutation',
+    testEffect: 'The test asserts an internal collaborator was called rather than checking the observable outcome.',
+    productionEffect: 'A production mutation changing the returned outcome is expected to leave this test passing.',
+    expectedOutcome: 'expected-to-keep-passing',
+  },
+  {
+    id: 'case-obscure-failure-cause',
+    operator: 'obscure-failure-cause',
+    operatorRole: 'descriptive',
+    oracleKind: 'production-mutation',
+    testEffect: 'The test name is generic and multiple behaviors are collapsed into one boolean check.',
+    productionEffect: 'A production mutation breaking an individual behavior is expected to leave this test passing.',
+    expectedOutcome: 'expected-to-keep-passing',
+  },
 ];
 
 function manifestJsonFor(fixture: (typeof DISTINCT_FIXTURES)[number], overrides: Partial<Record<string, unknown>> = {}): string {
@@ -122,7 +140,7 @@ describe('parseCorpusCaseManifest', () => {
     expect(manifest.expectedOutcome).toBe(fixture.expectedOutcome);
   });
 
-  it('covers all six operator ids and all four oracle kinds across the fixture set', () => {
+  it('covers all eight operator ids and all four oracle kinds across the fixture set', () => {
     expect(new Set(DISTINCT_FIXTURES.map((f) => f.operator))).toEqual(new Set(CORPUS_OPERATOR_IDS));
     expect(new Set(DISTINCT_FIXTURES.map((f) => f.oracleKind))).toEqual(new Set(CORPUS_ORACLE_KINDS));
   });
