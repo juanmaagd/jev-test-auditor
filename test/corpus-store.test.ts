@@ -104,11 +104,11 @@ describe('loadCorpusFromDirectory', () => {
     await expect(loadCorpusFromDirectory(root)).rejects.toThrow(/case-a/);
   });
 
-  it('parses the real Git-stored discrimination corpus into eleven distinct, valid cases', async () => {
+  it('parses the real Git-stored discrimination corpus into fourteen distinct, valid cases', async () => {
     const cases = await loadCorpusFromDirectory('test/fixtures/corpus/discrimination');
 
-    expect(cases).toHaveLength(11);
-    expect(new Set(cases.map((c) => c.id)).size).toBe(11);
+    expect(cases).toHaveLength(14);
+    expect(new Set(cases.map((c) => c.id)).size).toBe(14);
     for (const corpusCase of cases) {
       expect(corpusCase.proofStatus).toBe('unverified');
       expect(corpusCase.baseTest.contents.length).toBeGreaterThan(0);
@@ -142,6 +142,9 @@ describe('loadCorpusFromDirectory', () => {
       'subtotal-exact-value': 'weaken-expectation',
       'discount-throws-range-error': 'remove-assertion',
       'checkout-applies-percent': 'mock-owned-logic',
+      'asserts-helper-call-count': 'assert-incidental-interaction',
+      'generic-boolean-summary': 'obscure-failure-cause',
+      'session-expiry-controlled-clock': 'introduce-uncontrolled-time',
     });
     expect(oracleKindById).toEqual({
       'exposes-checkout-helper': 'production-mutation',
@@ -155,6 +158,9 @@ describe('loadCorpusFromDirectory', () => {
       'subtotal-exact-value': 'assertion-mutation',
       'discount-throws-range-error': 'assertion-mutation',
       'checkout-applies-percent': 'production-mutation',
+      'asserts-helper-call-count': 'production-mutation',
+      'generic-boolean-summary': 'production-mutation',
+      'session-expiry-controlled-clock': 'assertion-mutation',
     });
   });
 
@@ -184,6 +190,9 @@ describe('loadCorpusFromDirectory', () => {
       'spies-on-math-round': 'descriptive',
       'subtotal-exact-value': 'prescriptive',
       'works-boolean-check': 'descriptive',
+      'asserts-helper-call-count': 'descriptive',
+      'generic-boolean-summary': 'descriptive',
+      'session-expiry-controlled-clock': 'prescriptive',
     });
     expect(expectedOutcomeById).toEqual({
       'checkout-applies-percent': 'expected-to-fail',
@@ -197,6 +206,9 @@ describe('loadCorpusFromDirectory', () => {
       'spies-on-math-round': 'expected-to-fail',
       'subtotal-exact-value': 'expected-to-fail',
       'works-boolean-check': 'expected-to-keep-passing',
+      'asserts-helper-call-count': 'expected-to-keep-passing',
+      'generic-boolean-summary': 'expected-to-keep-passing',
+      'session-expiry-controlled-clock': 'expected-to-fail',
     });
   });
 });

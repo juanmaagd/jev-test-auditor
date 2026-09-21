@@ -1,0 +1,11 @@
+{
+  "id": "session-expiry-controlled-clock",
+  "operators": ["introduce-uncontrolled-time"],
+  "operatorRole": "prescriptive",
+  "oracleKind": "assertion-mutation",
+  "testEffect": "Replacing the controlled explicit timestamp with an uncontrolled real-time call (`Date.now() + 10_000`) would allow large offsets to mask timeout regressions.",
+  "productionEffect": "Corrupting `isSessionExpired`'s threshold (multiplying `timeoutMs` by 10) is expected to fail this test as written; substituting the uncontrolled real-time variant described above against that same corrupted function would let it keep passing, showing the controlled clock is what actually catches the regression.",
+  "expectedOutcome": "expected-to-fail",
+  "testFile": "test.ts",
+  "productionFiles": ["session.ts"]
+}

@@ -1,0 +1,11 @@
+{
+  "id": "asserts-helper-call-count",
+  "operators": ["assert-incidental-interaction"],
+  "operatorRole": "descriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "The test asserts only that the internal `formatter.format` collaborator was called once during `record`, without asserting on the observable contents of `history()`.",
+  "productionEffect": "Mutating `record` to execute `formatter.format` but omit appending to `history` breaks the observable behavior while preserving the internal call count; this test is expected to keep passing under that production mutation.",
+  "expectedOutcome": "expected-to-keep-passing",
+  "testFile": "test.ts",
+  "productionFiles": ["audit-log.ts"]
+}

@@ -17,7 +17,7 @@ Seven of nine delivery phases are done. `docs/implementation-plan.md` is the aut
 
 The working tree carries one unstaged change to `.gitignore` that belongs to the user, not to any task. Leave it alone. The untracked `.atl/` directory is also the user's.
 
-Suite: 1,160 tests across 51 files, all passing. `npm run typecheck`, `npm run lint`, `npm run build`, and `git diff --check` are all clean.
+Suite: 1,163 tests across 51 files, all passing. `npm run typecheck`, `npm run lint`, `npm run build`, and `git diff --check` are all clean.
 
 ## What the tool does today
 
@@ -29,9 +29,7 @@ Suite: 1,160 tests across 51 files, all passing. `npm run typecheck`, `npm run l
 
 **1. Grow the benchmark corpus.** This is the only thing standing between the project and real calibration, and it is additive: it changes numbers, not code.
 
-Today the corpus has eleven cases (`test/fixtures/corpus/discrimination/*/`) spread over seven rubric dimensions. After the denominator fix, no dimension reaches the five distinct cases a rate needs, so every accuracy metric honestly reports "indicative only". Target roughly five to ten proven cases per dimension, which is thirty-five to seventy cases, **with both classes per dimension** — cases the dimension should flag and cases it should not. Without the negative class you can measure recall but not precision, and a model that flags everything scores perfect recall.
-
-Two dimensions are structurally unmeasurable right now: `behavioral-focus` and `diagnostic-quality` have zero cases because **no operator maps to them**. They need a new operator invented, not more cases written. `introduce-uncontrolled-time` is a declared operator with no case at all.
+Today the corpus has fourteen cases (`test/fixtures/corpus/discrimination/*/`) covering all seven rubric dimensions. `behavioral-focus` (`asserts-helper-call-count`), `diagnostic-quality` (`generic-boolean-summary`), and `introduce-uncontrolled-time` (`session-expiry-controlled-clock`, a prescriptive control giving `determinism-isolation` both classes) are all proven by execution. Target roughly five to ten proven cases per dimension, which is thirty-five to seventy cases, **with both classes per dimension** — cases the dimension should flag and cases it should not. Without the negative class you can measure recall but not precision, and a model that flags everything scores perfect recall.
 
 Money is not the constraint. Measured: one corpus case costs roughly USD 0.00025–0.0008, so five hundred cases at twenty repetitions is under USD 8. Authoring effort and statistical validity are the constraints.
 

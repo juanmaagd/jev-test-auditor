@@ -13,6 +13,7 @@ const REAL_CASE_IDS = [
   'checkout-applies-percent', 'checkout-tautology', 'computes-subtotal-truthy', 'discount-returns-number',
   'discount-throws-range-error', 'exposes-checkout-helper', 'mocks-discount-logic', 'records-history-shared-state',
   'spies-on-math-round', 'subtotal-exact-value', 'works-boolean-check',
+  'asserts-helper-call-count', 'generic-boolean-summary', 'session-expiry-controlled-clock',
 ] as const;
 
 async function sha256OfDirectory(root: string): Promise<string> {

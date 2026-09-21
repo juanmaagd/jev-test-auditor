@@ -209,6 +209,16 @@ export const PRODUCTION_TRANSFORMS: Readonly<Record<string, TextTransform>> = {
       'let __recordCalls = 0;\n'
       + 'export function record(entry: string): void { __recordCalls += 1; if (__recordCalls === 1) entries.push(entry); }',
   },
+  'record-skips-history-append': {
+    id: 'record-skips-history-append',
+    anchor: 'export function record(entry: string): void { entries.push(formatter.format(entry)); }',
+    replacement: 'export function record(entry: string): void { formatter.format(entry); }',
+  },
+  'session-timeout-multiplied': {
+    id: 'session-timeout-multiplied',
+    anchor: 'return now - session.createdAt >= timeoutMs;',
+    replacement: 'return now - session.createdAt >= timeoutMs * 10;',
+  },
 };
 
 /**
@@ -232,6 +242,11 @@ export const TEST_VARIANT_TRANSFORMS: Readonly<Record<string, TextTransform>> = 
     id: 'mock-checkout-call',
     anchor: 'expect(checkout(items, 10)).toBe(22.5);',
     replacement: 'const mockCheckout = (): number => 22.5;\n    expect(mockCheckout()).toBe(22.5);',
+  },
+  'introduce-real-clock': {
+    id: 'introduce-real-clock',
+    anchor: 'expect(isSessionExpired(session, 500, start + 600)).toBe(true);',
+    replacement: 'expect(isSessionExpired(session, 500, Date.now() + 10_000)).toBe(true);',
   },
 };
 
@@ -272,6 +287,9 @@ const CASE_ORACLE_RECIPES: Readonly<Record<string, CaseOracleRecipe>> = {
   'spies-on-math-round': { kind: 'single-mutation', targetFile: 'cart.ts', transformId: 'round-via-toFixed' },
   'subtotal-exact-value': { kind: 'single-mutation', targetFile: 'cart.ts', transformId: 'subtotal-ignores-qty', variantTransformId: 'weaken-assertion-to-truthy' },
   'works-boolean-check': { kind: 'single-mutation', targetFile: 'cart.ts', transformId: 'checkout-returns-one' },
+  'asserts-helper-call-count': { kind: 'single-mutation', targetFile: 'audit-log.ts', transformId: 'record-skips-history-append' },
+  'generic-boolean-summary': { kind: 'single-mutation', targetFile: 'cart.ts', transformId: 'corrupt-discount-sign' },
+  'session-expiry-controlled-clock': { kind: 'single-mutation', targetFile: 'session.ts', transformId: 'session-timeout-multiplied', variantTransformId: 'introduce-real-clock' },
 };
 
 /**

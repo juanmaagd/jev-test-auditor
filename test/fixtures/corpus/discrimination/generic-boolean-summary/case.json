@@ -1,0 +1,11 @@
+{
+  "id": "generic-boolean-summary",
+  "operators": ["obscure-failure-cause"],
+  "operatorRole": "descriptive",
+  "oracleKind": "production-mutation",
+  "testEffect": "The test has a generic name ('works') and collapses multiple operations into a single boolean comparison (`ok === true`), giving no failure diff about which calculation failed.",
+  "productionEffect": "Mutating `checkout` to return an incorrect positive number still satisfies the collapsed boolean inequality; the test is expected to keep passing under that production mutation.",
+  "expectedOutcome": "expected-to-keep-passing",
+  "testFile": "test.ts",
+  "productionFiles": ["cart.ts"]
+}
