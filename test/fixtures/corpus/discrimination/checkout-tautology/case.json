@@ -1,0 +1,9 @@
+{
+  "id": "checkout-tautology",
+  "operators": ["remove-assertion"],
+  "oracleKind": "production-mutation",
+  "testEffect": "The comparison is a literal against itself (`expect(25).toBe(25)`); `checkout` is never called or referenced in the assertion, which is equivalent to having removed the real assertion entirely.",
+  "productionEffect": "No mutation of `checkout`, `applyDiscount`, or `subtotal` can affect this assertion's outcome, since none of their output reaches it; it is expected to keep passing under any production mutation.",
+  "testFile": "test.ts",
+  "productionFiles": ["cart.ts"]
+}

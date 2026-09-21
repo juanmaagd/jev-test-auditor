@@ -1,0 +1,9 @@
+{
+  "id": "records-history-shared-state",
+  "operators": ["add-shared-state"],
+  "oracleKind": "repeated-randomized-execution",
+  "testEffect": "The test both writes to and reads from the module-level `history` array (`record(...)` then `history().length`), so its own act and its own assertion share one mutable module-level array instead of the test owning independent state.",
+  "productionEffect": "Running this exact test body twice in a row within the same process, sharing one loaded `audit-log` module without resetting it between runs (as the real 11-test suite does), is expected to keep passing on the second run even if `record` is corrupted into a no-op on that run alone — the first run's own call already left `history()` non-empty. Only a single execution against a freshly loaded module can tell a working `record` from a broken one; repeated execution that shares module state, exactly as this suite does, cannot re-verify it after the first pass.",
+  "testFile": "test.ts",
+  "productionFiles": ["audit-log.ts"]
+}

@@ -1,0 +1,9 @@
+{
+  "id": "exposes-checkout-helper",
+  "operators": ["remove-assertion"],
+  "oracleKind": "production-mutation",
+  "testEffect": "The only assertion checks that `checkout` is defined (`expect(checkout).toBeDefined()`), not any return value it produces — equivalent to having removed every assertion on behavior and kept only an existence check.",
+  "productionEffect": "Because no assertion depends on checkout's output, breaking checkout entirely (for example making it always throw, or always return NaN) would not fail this test as long as the export itself still exists; it is expected to keep passing under that production mutation.",
+  "testFile": "test.ts",
+  "productionFiles": ["cart.ts"]
+}

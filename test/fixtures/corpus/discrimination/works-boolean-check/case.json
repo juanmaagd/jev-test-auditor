@@ -1,0 +1,9 @@
+{
+  "id": "works-boolean-check",
+  "operators": ["weaken-expectation"],
+  "oracleKind": "production-mutation",
+  "testEffect": "The exact values three separate calls (`subtotal`, `applyDiscount`, `checkout`) each return are coerced through `Boolean(...)` into one truthy check, discarding what any of them actually computed.",
+  "productionEffect": "Changing `subtotal`, `applyDiscount`, or `checkout` to return any other truthy number (for example always returning 1) would not fail this test, since only truthiness is checked; it is expected to keep passing under that production mutation.",
+  "testFile": "test.ts",
+  "productionFiles": ["cart.ts"]
+}

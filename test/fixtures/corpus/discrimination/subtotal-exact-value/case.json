@@ -1,0 +1,9 @@
+{
+  "id": "subtotal-exact-value",
+  "operators": ["weaken-expectation"],
+  "oracleKind": "assertion-mutation",
+  "testEffect": "Weakening `expect(subtotal(items)).toBe(25)` to `expect(subtotal(items)).toBeTruthy()` would accept any non-zero result from `subtotal`, not only the correct sum.",
+  "productionEffect": "Corrupting `subtotal` to sum only price while ignoring `qty` (returning 15 instead of 25 for this cart) is expected to fail this test as written; applying the weaker `toBeTruthy()` assertion described above to that same corrupted `subtotal` would instead let it keep passing, showing the exact-value assertion is what actually catches the regression.",
+  "testFile": "test.ts",
+  "productionFiles": ["cart.ts"]
+}

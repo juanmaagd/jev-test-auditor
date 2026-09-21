@@ -1,0 +1,9 @@
+{
+  "id": "discount-throws-range-error",
+  "operators": ["remove-assertion"],
+  "oracleKind": "assertion-mutation",
+  "testEffect": "Removing the `toThrow(RangeError)` assertion (for example calling `applyDiscount(100, 101)` inside a try/catch with nothing asserted) would leave nothing checking that an invalid percent is actually rejected.",
+  "productionEffect": "Removing the `if (percent < 0 || percent > 100) throw ...` guard from `applyDiscount` is expected to fail this test as written, since it would no longer throw; with the assertion removed as described above, that same change to `applyDiscount` would go undetected.",
+  "testFile": "test.ts",
+  "productionFiles": ["cart.ts"]
+}

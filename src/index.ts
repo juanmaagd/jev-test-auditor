@@ -345,3 +345,17 @@ export {
   createTerminalProgressReporter,
   type TerminalProgressReporterOptions,
 } from './adapters/terminal-progress-reporter.js';
+
+export {
+  buildCorpusCase,
+  CORPUS_OPERATOR_IDS,
+  CORPUS_ORACLE_KINDS,
+  parseCorpusCaseManifest,
+  type CorpusCase,
+  type CorpusCaseManifest,
+  type CorpusCaseProofStatus,
+  type CorpusOperatorId,
+  type CorpusOracleKind,
+  type CorpusSourceFile,
+} from './domain/corpus.js';
+export { loadCorpusCase, loadCorpusFromDirectory } from './adapters/corpus-store.js';

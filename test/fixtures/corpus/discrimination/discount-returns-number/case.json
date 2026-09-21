@@ -1,0 +1,9 @@
+{
+  "id": "discount-returns-number",
+  "operators": ["weaken-expectation"],
+  "oracleKind": "production-mutation",
+  "testEffect": "The assertion checks only the runtime type of the result (`'number'`), weakening what would otherwise be an exact-value expectation on `applyDiscount(100, 10)`.",
+  "productionEffect": "Corrupting `applyDiscount`'s arithmetic (for example returning `amount` unchanged, ignoring `percent` entirely) would still produce a number, so this test would not fail; it is expected to keep passing under that production mutation.",
+  "testFile": "test.ts",
+  "productionFiles": ["cart.ts"]
+}
