@@ -55,6 +55,7 @@ import {
 } from '../domain/audit.js';
 import { CLASSIFICATION_POLICY_V2 } from '../domain/classification.js';
 import type { ConfigurationOverrides } from '../domain/config.js';
+import type { ExcludedTestFile } from '../domain/discovery.js';
 import { buildAuditReport, type AuditReportContext } from '../domain/report.js';
 import { renderAuditReportHtml } from '../domain/html-report.js';
 import { createTerminalProgressReporter } from '../adapters/terminal-progress-reporter.js';
@@ -547,6 +548,100 @@ function fileListTextLines<T>(header: string, items: readonly T[], render: (item
 }
 
 /**
+ * Exclusion reasons worth naming individually in `auditTextReport`'s "Excluded files:" section
+ * (this task's own report, problem 1): a real audit against a NestJS backend produced 20+ lines all
+ * reading `(reason: not-test-file)` — noise, not information, because that reason (and
+ * `unsupported-extension`, its sibling for a file whose extension this tool never parses at all —
+ * `.json`, `.md`, `.css`, and so on) fires once per ORDINARY file in the whole tree: every
+ * production source file, config, doc, or asset lands in one of these two, so the bucket grows with
+ * repository size and tells a reader nothing they could not already guess. The other five reasons
+ * instead reflect a decision that could plausibly surprise someone looking for a specific test: a
+ * configured `exclude` pattern actually matched something (worth double-checking the glob did what
+ * was intended — `configured-exclude`; like `include` below, `ConfigurationOverrides.exclude` has no
+ * CLI flag today, so this reason is reachable only by a direct caller of `resolveConfiguration`, not
+ * through the shipped `audit` command); a default-excluded top-level path — `node_modules`,
+ * `.git`, `dist`, `build`, `vendor`, `coverage`, `generated` (`default-exclude`) — one entry per
+ * matched directory, since a match stops the walk before recursing into it (see
+ * `src/adapters/repository-discovery.ts`'s `walk`), so this reason is never high-volume even though
+ * it is always worth naming; a file classified end-to-end rather than unit/integration
+ * (`e2e-v1`); and a symlink the walker refuses to follow, whether or not its target resolves
+ * outside the audited root (`symlink`/`outside-root`).
+ *
+ * `not-test-file` gets special handling in `exclusionCarriesSignal`/`exclusionDisplayReason`: most
+ * `not-test-file` exclusions are the ordinary "this is a production file" case, but the very same
+ * reason also covers a file that matches this tool's own test-name convention and a supported
+ * extension yet was left out by a configured, non-default `include` pattern (evidence:
+ * `include-pattern` — see `src/adapters/repository-discovery.ts`) — "looks like a test but was not
+ * treated as one," exactly the kind of surprise this section exists to surface, and one of this
+ * task's own named examples. `ConfigurationOverrides.include` has no CLI flag today — `runCli`'s
+ * argument parser never sets it (only `--rootDir`/`--root-dir`, `--resume`, and `--html` take a
+ * value — `--open` is a bare boolean; see `parseAuditOptions` above), the same "no CLI flag reaches
+ * this override" pattern
+ * `ScheduleConfigurationOverrides`'s own doc describes (`src/domain/config.ts`) — so this specific
+ * sub-case cannot occur through the shipped `audit` command yet. It is still handled correctly here
+ * both because any other caller of `discoverTestFiles`'s underlying data can produce it, and because
+ * folding it into the ordinary `not-test-file` count would misclassify the one outcome this section
+ * is explicitly meant to catch.
+ */
+function exclusionCarriesSignal(file: ExcludedTestFile): boolean {
+  switch (file.reason) {
+    case 'not-test-file':
+      return file.evidence.includes('include-pattern');
+    case 'unsupported-extension':
+      return false;
+    case 'configured-exclude':
+    case 'default-exclude':
+    case 'e2e-v1':
+    case 'symlink':
+    case 'outside-root':
+      return true;
+  }
+}
+
+/**
+ * The label both `excludedByReasonLines`'s counts and `auditTextReport`'s "Excluded files:" listing
+ * render for one excluded file — identical to `file.reason` except for the `not-test-file` +
+ * `include-pattern` sub-case (see `exclusionCarriesSignal`'s own doc), which gets its own
+ * distinguishable label so its count and its individually-listed path are never silently folded into
+ * the ordinary `not-test-file` bucket it is deliberately kept apart from.
+ */
+function exclusionDisplayReason(file: ExcludedTestFile): string {
+  return file.reason === 'not-test-file' && file.evidence.includes('include-pattern')
+    ? 'not-test-file (excluded by a configured include pattern)'
+    : file.reason;
+}
+
+/**
+ * "Excluded files by reason:" block (this task's own report, problem 1). One line per distinct
+ * reason label actually present (`exclusionDisplayReason`), alphabetically sorted for determinism,
+ * each with its exact count — never silent, mirroring `diagnosticsTextLines`'s own "none" fallback
+ * when nothing was excluded at all. Every reason is counted here, signal or not, so a reader always
+ * sees the true shape of what was left out; only reasons `exclusionCarriesSignal` calls boring are
+ * withheld from the individual listing below. When at least one such collapsed reason is present,
+ * one more line points at `audit --json` for the complete list, the same reachability guarantee
+ * `fileListTextLines`'s own truncation note makes elsewhere in this report — omitted entirely when
+ * every present reason already gets an individual line below, so it is never an unconditional,
+ * redundant disclaimer.
+ */
+function excludedByReasonLines(excluded: readonly ExcludedTestFile[]): readonly string[] {
+  if (excluded.length === 0) return ['Excluded files by reason: none'];
+  const counts = new Map<string, number>();
+  for (const file of excluded) {
+    const label = exclusionDisplayReason(file);
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  const labels = [...counts.keys()].sort();
+  const anyCollapsed = excluded.some((file) => !exclusionCarriesSignal(file));
+  return [
+    'Excluded files by reason:',
+    ...labels.map((label) => `  - ${label}: ${counts.get(label) ?? 0}`),
+    ...(anyCollapsed
+      ? ['  (only reasons that could mean an expected test was skipped over are listed individually below; run `audit --json` for the complete list, including the reasons collapsed here.)']
+      : []),
+  ];
+}
+
+/**
  * The default `audit` (no `--dry-run`/`--evaluate`/`--json`/`--inspect-payloads`) readable summary
  * (Phase 7, orchestrator scope change on top of the original readable-default-summary task): a
  * report for the human running it, combining what plain discovery already found (files,
@@ -557,21 +652,40 @@ function fileListTextLines<T>(header: string, items: readonly T[], render: (item
  * already performs (`openSqliteAuditStoreForLookup`, wired in `runCli`; a plain `audit` still
  * creates no database file or config directory — that read-only open never does either).
  *
- * Ordering (deliberate, not incidental):
+ * Ordering (deliberate, not incidental — reworked by this task's own report, problem 2, on top of
+ * the original readable-default-summary ordering):
  * 1. `Root` immediately after the title, so a reader always knows which repository this describes.
- * 2. The discovery totals NOT already covered by the cost estimate below (file/exclusion/
- *    diagnostic/evidence-provenance counts) — a reader gets the run's shape in a handful of lines
- *    before anything else. `Test cases` is deliberately omitted here: the cost estimate below
- *    already reports the identical count as `Discovered test cases`, and printing the same number
- *    twice under two different labels would be redundant rather than informative.
- * 3. The cost estimate itself — summary-level information, like the totals above it, just a
- *    different kind of count, and printed with the exact wording `--dry-run` uses so an exact count
- *    is never phrased as an estimate and vice versa.
- * 4. Per-item detail, grouped **found** (`Discovered files`) -> **skipped** (`Excluded files`) ->
- *    **wrong** (`Diagnostics`) — this is where a list can run long, so it lives at the bottom,
- *    truncated (`fileListTextLines`) rather than at the top where it would bury the totals/estimate
- *    a reader wants first.
- * 5. The same reporting-only guarantee sentence `--dry-run` closes with — equally true here: this
+ * 2. What this run found and what it would cost, together: the file/exclusion/dynamic-metadata/
+ *    unsupported-framework totals, immediately followed by the cost estimate (`Model`/pricing
+ *    preamble, then `Discovered test cases`/`Evaluable`/`Skipped`/calls/cost). A reader gets the
+ *    run's whole shape — what exists, what it would take to evaluate it — before any deeper detail.
+ *    `Test cases` is deliberately omitted from the totals above: the cost estimate already reports
+ *    the identical count as `Discovered test cases`, and printing the same number twice under two
+ *    different labels would be redundant rather than informative — the same reasoning this task's
+ *    own report applies to `Evidence bundles` below.
+ * 3. The evidence-provenance detail behind those numbers: fragments/truncated/omitted/denied/
+ *    unresolved. `Evidence bundles` is deliberately dropped rather than moved here: in the common
+ *    case one evidence bundle is built per discovered test case (see
+ *    `src/adapters/evidence-audit-port.ts`), so it is the exact same figure as `Discovered test
+ *    cases` above under a different name — the literal case this task's report calls out. The rare
+ *    case where they diverge (a per-test-case `evidence-selection-failed` build failure) is not
+ *    silently lost: it already surfaces, more specifically, as an `evidence-unavailable` entry in
+ *    the `Skipped` breakdown above and as its own named diagnostic below — strictly more informative
+ *    than the bare count ever was. `Evidence bytes`/`Request bytes`/`Rubric bytes per request` stay
+ *    inside the cost estimate block (tier 2): they are cost-estimation inputs, not evidence-quality
+ *    outcomes, and that block is shared verbatim with `dryRunTextReport`/`costEstimateBodyLines`,
+ *    whose own output this task must not change a single byte of.
+ * 4. Per-item listings, grouped **found** (`Discovered files`) -> **skipped** (`Excluded files by
+ *    reason:` counts, then `Excluded files:` individually for the reasons `exclusionCarriesSignal`
+ *    calls worth a closer look — see that function's own doc for the full split and why it replaces
+ *    the flat, unfiltered list this section used to print). This is where a list can run long, so it
+ *    lives below the totals/estimate a reader wants first, truncated (`fileListTextLines`) rather
+ *    than silently unbounded.
+ * 5. Diagnostics — its own final tier, both the `Diagnostics (total)` count and the full
+ *    `Diagnostics:` block, moved down from beside the totals in tier 2 to sit directly beside the
+ *    list it summarizes: "what it found" (tier 2) is about the repository's shape, "what went
+ *    wrong" (tier 5) is a different question, asked last, right before the closing guarantee.
+ * 6. The same reporting-only guarantee sentence `--dry-run` closes with — equally true here: this
  *    command makes no network call and writes nothing to disk either.
  */
 function auditTextReport(result: AuditResult, estimate: DryRunEstimate): string {
@@ -583,19 +697,23 @@ function auditTextReport(result: AuditResult, estimate: DryRunEstimate): string 
     `Files excluded: ${totals.excluded}`,
     `Dynamic metadata entries: ${totals.dynamicMetadata}`,
     `Unsupported framework files: ${totals.unsupportedFrameworkFiles}`,
-    `Diagnostics (total): ${totals.diagnostics}`,
-    `Evidence bundles: ${totals.evidenceBundles}`,
+    ...costEstimatePreambleLines(estimate),
+    ...costEstimateBodyLines(estimate),
     `Evidence fragments: ${totals.evidenceFragments} (${totals.evidenceTruncatedFragments} truncated)`,
     `Evidence omitted: ${totals.evidenceOmitted}`,
     `Evidence denied: ${totals.evidenceDenied}`,
     `Evidence unresolved: ${totals.evidenceUnresolved}`,
-    ...costEstimatePreambleLines(estimate),
-    ...costEstimateBodyLines(estimate),
     ...fileListTextLines('Discovered files', result.files, (file) => {
       const dynamicSuffix = file.dynamicMetadata.length > 0 ? `, ${file.dynamicMetadata.length} dynamic metadata` : '';
       return `${file.discovered.repositoryRelativePath} [${file.discovered.framework}] — ${file.testCases.length} test case(s), ${file.evidence.length} evidence bundle(s)${dynamicSuffix}`;
     }),
-    ...fileListTextLines('Excluded files', result.excluded, (file) => `${file.repositoryRelativePath} (reason: ${file.reason})`),
+    ...excludedByReasonLines(result.excluded),
+    ...fileListTextLines(
+      'Excluded files',
+      result.excluded.filter(exclusionCarriesSignal),
+      (file) => `${file.repositoryRelativePath} (reason: ${exclusionDisplayReason(file)})`,
+    ),
+    `Diagnostics (total): ${totals.diagnostics}`,
     ...diagnosticsTextLines(result.diagnostics),
     'No network calls were made; nothing was written to disk.',
   ].join('\n');

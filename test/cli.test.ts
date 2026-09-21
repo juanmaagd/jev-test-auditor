@@ -476,11 +476,16 @@ describe('audit (default readable summary, folds in the --dry-run cost estimate)
       expect(report).toContain('Dynamic metadata entries: 5');
       expect(report).toContain('Unsupported framework files: 7');
       expect(report).toContain('Diagnostics (total): 11');
-      expect(report).toContain('Evidence bundles: 13');
       expect(report).toContain('Evidence fragments: 17 (19 truncated)');
       expect(report).toContain('Evidence omitted: 23');
       expect(report).toContain('Evidence denied: 29');
       expect(report).toContain('Evidence unresolved: 31');
+      // Deliberate dedup (this task's own report): `Evidence bundles` and `Discovered test cases`
+      // (from the folded-in cost estimate, asserted separately below) are the same number under two
+      // different names in the common case — one evidence bundle per discovered test case. This
+      // fixture's `evidenceBundles: 13` value stays in the `AuditTotals` object (still a required
+      // field, still exposed unchanged by `audit --json`) but must never surface as its own text line.
+      expect(report).not.toContain('Evidence bundles');
     },
   );
 
@@ -633,6 +638,230 @@ describe('audit (default readable summary, folds in the --dry-run cost estimate)
     const shownLines = discoveredSection.split('\n').filter((line) => line.startsWith('  - '));
     expect(shownLines).toHaveLength(20);
     expect(discoveredSection).toContain('  ... and 5 more not shown (run `audit --json` to see the complete list).');
+  });
+
+  /**
+   * Problem 1 (this task's own report): a real audit against a NestJS backend produced 20+ lines
+   * all reading `(reason: not-test-file)` — the overwhelmingly common, zero-signal case (any
+   * production source file lands here). These tests build a fixture with seven distinct exclusion
+   * reasons at seven distinct counts (`DiscoveryExclusionReason`, `src/domain/discovery.ts`) so a
+   * mis-grouping or a swapped count is independently detectable, and so signal/non-signal filtering
+   * cannot pass by coincidence.
+   */
+  describe('groups exclusions by reason, listing individual paths only where an exclusion could surprise a reader', () => {
+    function excludedFixture(count: number, reason: AuditResult['excluded'][number]['reason'], prefix: string): AuditResult['excluded'][number][] {
+      return Array.from({ length: count }, (_unused, index) => ({
+        repositoryRelativePath: `${prefix}-${String(index).padStart(2, '0')}.ts`,
+        reason,
+        evidence: [],
+      }));
+    }
+
+    function distinctReasonExcluded(): AuditResult['excluded'][number][] {
+      return [
+        ...excludedFixture(16, 'not-test-file', 'src/prod'),
+        ...excludedFixture(3, 'unsupported-extension', 'docs/readme'),
+        ...excludedFixture(6, 'configured-exclude', 'fixtures/cfg'),
+        ...excludedFixture(2, 'default-exclude', 'vendor/lib'),
+        ...excludedFixture(4, 'e2e-v1', 'e2e/flow'),
+        ...excludedFixture(1, 'symlink', 'links/link'),
+        ...excludedFixture(5, 'outside-root', 'escaped/out'),
+      ];
+    }
+
+    function baseAudit(excluded: AuditResult['excluded'][number][]): AuditResult {
+      return {
+        rootDir: '/workspace-exclusion-signal',
+        files: [],
+        excluded,
+        diagnostics: [],
+        totals: {
+          files: 0, excluded: excluded.length, testCases: 0, dynamicMetadata: 0, diagnostics: 0,
+          ...zeroEvidenceTotals,
+        },
+        reportingOnly: true,
+      };
+    }
+
+    it('prints one "Excluded files by reason:" count per distinct reason (alphabetical, all seven distinct) and lists individual paths only for the five reasons that could mean a reader missed an expected test', async () => {
+      const output = captureOutput();
+      const exitCode = await runCli(['audit'], output.io, { audit: async () => baseAudit(distinctReasonExcluded()) });
+
+      expect(exitCode).toBe(0);
+      const report = output.lines[0] ?? '';
+
+      expect(report).toContain('Excluded files by reason:');
+      expect(report).toContain('  - configured-exclude: 6');
+      expect(report).toContain('  - default-exclude: 2');
+      expect(report).toContain('  - e2e-v1: 4');
+      expect(report).toContain('  - not-test-file: 16');
+      expect(report).toContain('  - outside-root: 5');
+      expect(report).toContain('  - symlink: 1');
+      expect(report).toContain('  - unsupported-extension: 3');
+      // Alphabetically sorted, for a deterministic report regardless of the order exclusions were
+      // discovered in — asserted as relative positions, not mere containment.
+      const byReasonSection = report.slice(report.indexOf('Excluded files by reason:'), report.indexOf('Excluded files:'));
+      const reasonLineOrder = [
+        '  - configured-exclude: 6', '  - default-exclude: 2', '  - e2e-v1: 4',
+        '  - not-test-file: 16', '  - outside-root: 5', '  - symlink: 1', '  - unsupported-extension: 3',
+      ].map((line) => byReasonSection.indexOf(line));
+      for (let index = 1; index < reasonLineOrder.length; index += 1) {
+        expect(reasonLineOrder[index]).toBeGreaterThan(reasonLineOrder[index - 1] ?? -1);
+      }
+
+      // The individually-listed section (18 signal-reason paths total — under the 20-entry
+      // truncation limit, so its own "run `audit --json`" truncation note never fires here) is
+      // bounded between its own header and the diagnostics-total line that now follows every
+      // listing (see the reordering tests below).
+      const individualStart = report.indexOf('Excluded files:');
+      const individualEnd = report.indexOf('Diagnostics (total):');
+      expect(individualStart).toBeGreaterThan(-1);
+      expect(individualEnd).toBeGreaterThan(individualStart);
+      const individualSection = report.slice(individualStart, individualEnd);
+
+      expect(individualSection).toContain('  - fixtures/cfg-00.ts (reason: configured-exclude)');
+      expect(individualSection).toContain('  - vendor/lib-00.ts (reason: default-exclude)');
+      expect(individualSection).toContain('  - e2e/flow-00.ts (reason: e2e-v1)');
+      expect(individualSection).toContain('  - links/link-00.ts (reason: symlink)');
+      expect(individualSection).toContain('  - escaped/out-00.ts (reason: outside-root)');
+      // The two collapsed (non-signal) reasons never get an individual line, even though their
+      // counts appear above — checked against the bounded slice, not the whole report, since
+      // `Excluded files by reason:` legitimately contains these reason names as text.
+      expect(individualSection).not.toContain('src/prod');
+      expect(individualSection).not.toContain('docs/readme');
+      expect(individualSection).not.toContain('reason: not-test-file)');
+      expect(individualSection).not.toContain('reason: unsupported-extension)');
+
+      // Whatever was collapsed stays reachable (this task's own requirement), the same guarantee
+      // `fileListTextLines`'s own truncation note already makes elsewhere in this report. Checked
+      // against the reachability note's own distinctive phrase, not the bare `audit --json`
+      // substring (which `fileListTextLines`'s unrelated truncation note also contains, though it
+      // never fires in this fixture: 18 signal entries stay under its 20-entry limit).
+      expect(report).toContain('including the reasons collapsed here');
+    });
+
+    it('shows "Excluded files: none" when every present reason is collapsed, while still reporting per-reason counts and the reachability note', async () => {
+      const output = captureOutput();
+      const excluded = [
+        ...excludedFixture(5, 'not-test-file', 'src/prod'),
+        ...excludedFixture(2, 'unsupported-extension', 'docs/readme'),
+      ];
+      const exitCode = await runCli(['audit'], output.io, { audit: async () => baseAudit(excluded) });
+
+      expect(exitCode).toBe(0);
+      const report = output.lines[0] ?? '';
+      expect(report).toContain('  - not-test-file: 5');
+      expect(report).toContain('  - unsupported-extension: 2');
+      expect(report).toContain('Excluded files: none');
+      expect(report).toContain('including the reasons collapsed here');
+    });
+
+    it('omits the reachability note when nothing was collapsed (every present reason already gets an individual line)', async () => {
+      const output = captureOutput();
+      const excluded = [
+        ...excludedFixture(2, 'e2e-v1', 'e2e/flow'),
+        ...excludedFixture(1, 'symlink', 'links/link'),
+      ];
+      const exitCode = await runCli(['audit'], output.io, { audit: async () => baseAudit(excluded) });
+
+      expect(exitCode).toBe(0);
+      const report = output.lines[0] ?? '';
+      expect(report).toContain('  - e2e-v1: 2');
+      expect(report).toContain('  - symlink: 1');
+      expect(report).toContain('  - e2e/flow-00.ts (reason: e2e-v1)');
+      expect(report).toContain('  - links/link-00.ts (reason: symlink)');
+      // Nothing was collapsed here, so the reachability note must not appear at all. Checked
+      // against its own distinctive phrase, not the bare `audit --json` substring: that phrase
+      // also appears in `fileListTextLines`'s own (unrelated) truncation note, which this small
+      // fixture never triggers either — asserting the narrower phrase keeps this test honest about
+      // exactly which behavior it verifies.
+      expect(report).not.toContain('including the reasons collapsed here');
+    });
+
+    it('treats a test-shaped file excluded only by a configured include pattern as signal, distinct from an ordinary production file sharing the same raw `not-test-file` reason', async () => {
+      const output = captureOutput();
+      const excluded: AuditResult['excluded'][number][] = [
+        { repositoryRelativePath: 'looks-like-a-test.spec.ts', reason: 'not-test-file', evidence: ['include-pattern'] },
+        { repositoryRelativePath: 'ordinary-production-file.ts', reason: 'not-test-file', evidence: [] },
+      ];
+      const exitCode = await runCli(['audit'], output.io, { audit: async () => baseAudit(excluded) });
+
+      expect(exitCode).toBe(0);
+      const report = output.lines[0] ?? '';
+      // Two distinct counts under two distinct labels — never folded into one `not-test-file: 2`.
+      expect(report).toContain('  - not-test-file: 1');
+      expect(report).toContain('  - not-test-file (excluded by a configured include pattern): 1');
+      const individualSection = report.slice(report.indexOf('Excluded files:'), report.indexOf('Diagnostics (total):'));
+      expect(individualSection).toContain('looks-like-a-test.spec.ts (reason: not-test-file (excluded by a configured include pattern))');
+      expect(individualSection).not.toContain('ordinary-production-file.ts');
+    });
+  });
+
+  it('orders the report as run-shape+cost, then evidence detail, then listings, then diagnostics, then the closing guarantee — and never states the evidence-bundle count as a line separate from "Discovered test cases"', async () => {
+    const output = captureOutput();
+    const fileA: AuditFileResult = {
+      discovered: { repositoryRelativePath: 'a.test.ts', framework: 'vitest', frameworkEvidence: [] },
+      testCases: [testCaseWithModifiers('tc:v1:a-1', [])],
+      dynamicMetadata: [],
+      diagnostics: [],
+      evidence: [bundleFor('tc:v1:a-1')],
+    };
+    const audit: AuditResult = {
+      rootDir: '/workspace-order',
+      files: [fileA],
+      excluded: [{ repositoryRelativePath: 'skip.test.ts', reason: 'default-exclude', evidence: [] }],
+      diagnostics: [{ code: 'failure', message: 'info', severity: 'error' }],
+      totals: {
+        files: 1, excluded: 1, testCases: 1, dynamicMetadata: 0, diagnostics: 1,
+        ...zeroEvidenceTotals, evidenceBundles: 1, evidenceFragments: 1,
+      },
+      reportingOnly: true,
+    };
+
+    const exitCode = await runCli(['audit'], output.io, { audit: async () => audit });
+
+    expect(exitCode).toBe(0);
+    const report = output.lines[0] ?? '';
+
+    const filesDiscoveredIndex = report.indexOf('Files discovered:');
+    const modelIndex = report.indexOf('Model:');
+    const discoveredTestCasesIndex = report.indexOf('Discovered test cases:');
+    const estimatedCostIndex = report.indexOf('Estimated cost in USD');
+    const evidenceFragmentsIndex = report.indexOf('Evidence fragments:');
+    const discoveredFilesListIndex = report.indexOf('Discovered files:');
+    const excludedByReasonIndex = report.indexOf('Excluded files by reason:');
+    const diagnosticsTotalIndex = report.indexOf('Diagnostics (total):');
+    const diagnosticsListIndex = report.indexOf('Diagnostics:');
+    const closingIndex = report.indexOf('No network calls were made');
+
+    for (const index of [
+      filesDiscoveredIndex, modelIndex, discoveredTestCasesIndex, estimatedCostIndex,
+      evidenceFragmentsIndex, discoveredFilesListIndex, excludedByReasonIndex,
+      diagnosticsTotalIndex, diagnosticsListIndex, closingIndex,
+    ]) {
+      expect(index).toBeGreaterThan(-1);
+    }
+
+    // Tier 1->2: what it found, then what it would cost.
+    expect(modelIndex).toBeGreaterThan(filesDiscoveredIndex);
+    expect(discoveredTestCasesIndex).toBeGreaterThan(modelIndex);
+    expect(estimatedCostIndex).toBeGreaterThan(discoveredTestCasesIndex);
+    // Tier 2->3: the cost estimate, then the evidence detail behind it.
+    expect(evidenceFragmentsIndex).toBeGreaterThan(estimatedCostIndex);
+    // Tier 3->4: evidence detail, then the listings.
+    expect(discoveredFilesListIndex).toBeGreaterThan(evidenceFragmentsIndex);
+    expect(excludedByReasonIndex).toBeGreaterThan(discoveredFilesListIndex);
+    // Tier 4->5: listings, then diagnostics (count travels with its own list, not with the totals
+    // near the top — this task's own deliberate reordering).
+    expect(diagnosticsTotalIndex).toBeGreaterThan(excludedByReasonIndex);
+    expect(diagnosticsListIndex).toBeGreaterThan(diagnosticsTotalIndex);
+    // Tier 5->6: diagnostics, then the closing guarantee.
+    expect(closingIndex).toBeGreaterThan(diagnosticsListIndex);
+
+    // Problem 2's dedup: `evidenceBundles: 1` stays a real field on `totals` (unaffected `--json`
+    // shape), but must never surface as its own "Evidence bundles" text line now that it is the
+    // exact same number as "Discovered test cases" above.
+    expect(report).not.toContain('Evidence bundles');
   });
 
   it('accepts bare --json (no longer a usage error) and prints exactly the plain discovery JSON', async () => {
