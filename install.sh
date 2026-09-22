@@ -1,7 +1,7 @@
 #!/bin/sh
 # install.sh — installer for jev-test-auditor (jta)
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/typesafe-ai/jev-test-auditor/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/juanmaagd/jev-test-auditor/main/install.sh | sh
 
 set -e
 

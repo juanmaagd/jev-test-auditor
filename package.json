@@ -5,7 +5,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/typesafe-ai/jev-test-auditor.git"
+    "url": "https://github.com/juanmaagd/jev-test-auditor.git"
   },
   "type": "module",
   "types": "./dist/index.d.ts",

@@ -9,7 +9,7 @@ Requires Node.js **>= 22.13.0** (`node:sqlite` persistence without experimental 
 ### Automated install via curl
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/typesafe-ai/jev-test-auditor/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/juanmaagd/jev-test-auditor/main/install.sh | sh
 ```
 
 ### Install via npm / pnpm / bun
@@ -22,21 +22,59 @@ npm install -g jev-test-auditor
 npx jta audit
 ```
 
+## Setup: TypeSafe API Key
+
+Semantic evaluation with Jev (`jta audit --evaluate`) requires a **TypeSafe API key**.
+
+> [!IMPORTANT]
+> **Discovery, parsing, and dry-run estimates (`jta audit`, `jta audit --dry-run`) work 100% offline without any API key.**
+> However, to evaluate test semantics with Jev and generate offline HTML reports (`jta audit --evaluate --html ...`), a TypeSafe API key is required.
+
+### 1. Interactive configuration (Recommended for developers)
+
+Run `jta auth login`. It securely prompts for your key without echoing characters to the terminal, and saves it locally with owner-only permissions (`chmod 600`):
+
+```bash
+jta auth login
+```
+
+Check configuration status at any time:
+
+```bash
+jta auth status
+```
+
+To remove the stored key:
+
+```bash
+jta auth logout
+```
+
+### 2. Environment variable (Recommended for CI/CD)
+
+Set the `TYPESAFE_API_KEY` environment variable in your terminal session or CI secrets:
+
+```bash
+export TYPESAFE_API_KEY="your-typesafe-api-key"
+```
+
+When `TYPESAFE_API_KEY` is present, it automatically takes precedence over any locally stored key.
+
 ## Quick path
 
 From any project repository:
 
 ```bash
-# Inspect tests offline without executing project code
+# 1. Inspect tests offline without executing project code (no API key needed)
 jta audit
 
-# Preview billable calls and input-token/USD cost estimates
+# 2. Preview billable calls and input-token/USD cost estimates (no API key needed)
 jta audit --dry-run
 
-# Configure TypeSafe API key securely (hidden input prompt)
+# 3. Configure your TypeSafe API key (one-time setup)
 jta auth login
 
-# Run real semantic evaluation and open self-contained offline HTML report
+# 4. Run real semantic evaluation and open the self-contained offline HTML report
 jta audit --evaluate --html audit-report.html --open
 ```
 
