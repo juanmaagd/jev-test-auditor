@@ -72,7 +72,7 @@ Dependencies point strictly **inward**:
 
 - **Domain (`src/domain/`)**: Pure business logic, entities, rubrics, and port interfaces. Must **never** import from CLI, adapters, filesystem (`node:fs`), child processes, or external network libraries.
 - **Application (`src/application/`)**: Use cases and orchestration logic. Depends only on domain interfaces and ports.
-- **Adapters (`src/adapters/`)**: Concrete implementations of domain ports (e.g., SQLite persistence, Babel AST parser, TypeSafe HTTP gateway).
+- **Adapters (`src/adapters/`)**: Concrete implementations of domain ports (e.g., SQLite persistence, TypeScript compiler API parser, TypeSafe HTTP gateway).
 - **CLI (`src/cli/`)**: Command-line arguments parsing, terminal rendering, and dependency wiring.
 
 Architectural boundaries and forbidden imports are validated on every run by automated tests (`test/boundary.test.ts` and `test/benchmark-cli-boundary.test.ts`).

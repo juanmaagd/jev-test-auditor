@@ -8,7 +8,7 @@
 
 A foundational guarantee of `jev-test-auditor` is that **audited code is never executed**:
 
-- **Lexical and Structural Parsing Only**: Test files and referenced source files are parsed into Abstract Syntax Trees (ASTs) using `@babel/parser`. They are analyzed purely as static text and syntax structures.
+- **Lexical and Structural Parsing Only**: Test files and referenced source files are parsed into Abstract Syntax Trees (ASTs) with the TypeScript compiler API (`ts.createSourceFile`). They are analyzed purely as static text and syntax structures.
 - **No Imports or Evaluations**: The audit pipeline never uses `import()`, `require()`, `eval()`, `new Function()`, or any test runner engine (Jest, Vitest, Node test runner) on the audited codebase.
 - **No Project Scripts**: No `package.json` scripts, build steps, or setup hooks are run during audit discovery or extraction.
 - **Bounded Benchmark Isolation**: Real execution exists solely for the tool's internal benchmark fixture corpus (`test/fixtures/corpus/`) via the standalone `benchmark` CLI. This execution is confined to isolated subprocesses with timeout and memory bounds. Static boundary tests (`test/benchmark-cli-boundary.test.ts`) formally prove that the oracle runner and benchmark execution modules are completely unreachable from the `audit` CLI.

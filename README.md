@@ -183,7 +183,7 @@ Production wiring binds this to the real `process.stderr.write`/`process.stderr.
 - **`classifications`** carries the same per-test shape as before (dimension judgments, probabilities, findings, model, usage, evidence provenance) plus two additions: `cache` (`cached`/`fresh`, mirroring `cacheStatus`) and, when measured, `latency` (`latencyMs`/`attemptLatenciesMs`). `evidence` now also carries the full `denied`/`unresolved`/`omitted` decision lists (rule/specifier/reason), not only their counts — fragment *content* itself is still never included.
 - **`diagnostics`** and, when resuming, **`resume`** are unchanged from before.
 
-Schema validation has no runtime dependency: `docs/report-schema.json` is validated in this project's own test suite by a small hand-rolled structural validator (`src/domain/report-schema.ts`), never a third-party JSON Schema library — this package ships zero runtime dependencies as a deliberate posture.
+Schema validation has no extra runtime dependency: `docs/report-schema.json` is validated in this project's own test suite by a small hand-rolled structural validator (`src/domain/report-schema.ts`), never a third-party JSON Schema library. The package's runtime dependency is `typescript`, imported by `dist/` to parse source with the compiler API.
 
 ## Self-contained HTML report (`audit --evaluate --html <path>`)
 

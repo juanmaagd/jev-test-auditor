@@ -23,7 +23,7 @@ Select target cases from a completed benchmark run in the benchmark store (`--st
 
 1. **`disagreements`** (default): Cases where Jev's verdict diverged from deterministic oracle ground truth (e.g. descriptive flaw called healthy, or prescriptive test called misleading).
 2. **`regressions`**: Cases that passed in a baseline benchmark run but failed in the candidate run.
-3. **`stratified`**: Balanced sampling across all 7 rubric dimensions (`falsifiability`, `assertion-strength`, `refactor-resistance`, `error-path-coverage`, `determinism`, `independence`, `setup-minimalism`).
+3. **`stratified`**: Balanced sampling across all 7 rubric dimensions (`falsifiability`, `behavioral-focus`, `refactor-resistance`, `assertion-strength`, `test-double-quality`, `determinism-isolation`, `diagnostic-quality`), the ids in `RUBRIC_DIMENSION_IDS` (`src/domain/rubric.ts`).
 4. **`all`**: Comprehensive review of all cases in the run.
 
 Optional constraints:

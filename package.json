@@ -2,6 +2,7 @@
   "name": "jev-test-auditor",
   "version": "0.1.0",
   "description": "A local-first semantic test quality auditor.",
+  "author": "Juan Manuel Gomez Dagum <juanmanuelgomezomil@gmail.com>",
   "license": "MIT",
   "repository": {
     "type": "git",
