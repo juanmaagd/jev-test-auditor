@@ -84,7 +84,10 @@ describe('package metadata', () => {
         import: './dist/index.js',
       },
     });
-    expect(manifest.bin).toEqual({ 'jev-test-auditor': 'dist/cli/index.js' });
+    expect(manifest.bin).toEqual({
+      jta: 'dist/cli/index.js',
+      'jev-test-auditor': 'dist/cli/index.js',
+    });
   });
 
   it('uses cmd.exe without a shell for Windows .cmd bin scripts', () => {
@@ -130,7 +133,10 @@ describe('packed installed package', () => {
       expect(installedManifest.exports).toEqual({
         '.': { types: './dist/index.d.ts', import: './dist/index.js' },
       });
-      expect(installedManifest.bin).toEqual({ 'jev-test-auditor': 'dist/cli/index.js' });
+      expect(installedManifest.bin).toEqual({
+        jta: 'dist/cli/index.js',
+        'jev-test-auditor': 'dist/cli/index.js',
+      });
 
       const apiSmoke = execFileSync(process.execPath, [
         '--input-type=module',
@@ -155,6 +161,16 @@ describe('packed installed package', () => {
       );
       await writeFile(join(fixtureRoot, 'broken.test.ts'), 'const = ;');
       await writeFile(join(fixtureRoot, 'canary.spec.ts'), "import { writeFileSync } from 'node:fs'; writeFileSync('executed.marker', 'bad');");
+
+      const jtaBinPath = join(
+        consumerRoot,
+        'node_modules',
+        '.bin',
+        process.platform === 'win32' ? 'jta.cmd' : 'jta',
+      );
+      const jtaHelp = execInstalledBin(jtaBinPath, ['--help'], fixtureRoot);
+      expect(jtaHelp).toContain('Usage:');
+      expect(jtaHelp).toContain('jta audit');
 
       const binPath = join(
         consumerRoot,

@@ -1,12 +1,46 @@
-# jev-test-auditor
+# jev-test-auditor (`jta`)
 
-`jev-test-auditor` is a local-first CLI for auditing the semantic quality of existing JavaScript and TypeScript tests. The pipeline discovers supported test files, reads them without executing project code, extracts deterministic structural test understanding, and — for every extracted test case — selects a minimal, provenance-aware local evidence bundle (the test body plus the smallest useful helper and production fragments it references). By default nothing built here is sent anywhere: discovery, extraction, evidence selection, and the default `audit` summary are entirely offline and need no API key. Real Jev evaluation is opt-in only (`audit --evaluate`, see below) — nothing leaves this machine unless that flag is passed, and `--evaluate` also persists its results to a local SQLite database, reuses an unchanged test's prior judgment instead of paying for it again, dispatches through an adaptive scheduler that reduces concurrency under real provider throttling and observes request/token budgets, and can resume an interrupted run by its run id instead of starting over (see "Audit store", "Content-addressed caching", "Adaptive scheduling and resilience", and "Resume" below).
+`jev-test-auditor` (executable command: `jta`) is a local-first CLI for auditing the semantic quality of existing JavaScript and TypeScript tests. The pipeline discovers supported test files, reads them without executing project code, extracts deterministic structural test understanding, and — for every extracted test case — selects a minimal, provenance-aware local evidence bundle (the test body plus the smallest useful helper and production fragments it references). By default nothing built here is sent anywhere: discovery, extraction, evidence selection, and the default `audit` summary are entirely offline and need no API key. Real Jev evaluation is opt-in only (`audit --evaluate`, see below) — nothing leaves this machine unless that flag is passed, and `--evaluate` also persists its results to a local SQLite database, reuses an unchanged test's prior judgment instead of paying for it again, dispatches through an adaptive scheduler that reduces concurrency under real provider throttling and observes request/token budgets, and can resume an interrupted run by its run id instead of starting over (see "Audit store", "Content-addressed caching", "Adaptive scheduling and resilience", and "Resume" below).
+
+## Installation
+
+Requires Node.js **>= 22.13.0** (`node:sqlite` persistence without experimental flags).
+
+### Automated install via curl
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/typesafe-ai/jev-test-auditor/main/install.sh | sh
+```
+
+### Install via npm / pnpm / bun
+
+```bash
+# Install globally
+npm install -g jev-test-auditor
+
+# Or run directly on demand
+npx jta audit
+```
 
 ## Quick path
 
-Requires Node **>=22.13.0** — `audit --evaluate`'s local persistence (see "Audit store" below) uses the built-in `node:sqlite` module, unflagged only as of that release; it remains Stability 1.2 (release candidate).
+From any project repository:
 
-From the repository root:
+```bash
+# Inspect tests offline without executing project code
+jta audit
+
+# Preview billable calls and input-token/USD cost estimates
+jta audit --dry-run
+
+# Configure TypeSafe API key securely (hidden input prompt)
+jta auth login
+
+# Run real semantic evaluation and open self-contained offline HTML report
+jta audit --evaluate --html audit-report.html --open
+```
+
+From this repository's own development checkout:
 
 ```bash
 npm ci
@@ -18,14 +52,17 @@ node dist/cli/index.js --help
 node dist/cli/index.js audit
 ```
 
-The final command prints one human-readable, reporting-only summary — discovered/excluded files, evidence provenance, diagnostics, and the same no-network, no-write cost/call estimate `--dry-run` computes (see the `audit` and `audit --json` rows below). It does not execute tests or call an evaluator.
+The audit command prints one human-readable, reporting-only summary — discovered/excluded files, evidence provenance, diagnostics, and the same no-network, no-write cost/call estimate `--dry-run` computes (see the `audit` and `audit --json` rows below). It does not execute tests or call an evaluator.
 
-## Current CLI
+## CLI Commands
 
 ```text
-jev-test-auditor audit [options]
-jev-test-auditor auth <login|status|logout>
-jev-test-auditor --help
+jta audit [options]
+jta auth <login|status|logout>
+jta --help
+
+Alias:
+  jev-test-auditor <command>
 ```
 
 | Command / option | Behavior |

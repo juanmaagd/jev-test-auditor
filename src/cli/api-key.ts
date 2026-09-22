@@ -19,7 +19,7 @@ import {
 } from '../domain/auth.js';
 import { readStoredCredentials, resolveAuthStoragePaths } from '../adapters/auth-storage.js';
 
-export const NO_KEY_USAGE_MESSAGE = 'No TypeSafe API key is configured. Provide one with `jev-test-auditor auth login`, or set the TYPESAFE_API_KEY environment variable.';
+export const NO_KEY_USAGE_MESSAGE = 'No TypeSafe API key is configured. Provide one with `jta auth login`, or set the TYPESAFE_API_KEY environment variable.';
 
 /**
  * Resolves the API key a real provider call should use: `TYPESAFE_API_KEY`

@@ -37,6 +37,7 @@
     "vitest": "4.1.11"
   },
   "bin": {
+    "jta": "dist/cli/index.js",
     "jev-test-auditor": "dist/cli/index.js"
   },
   "dependencies": {

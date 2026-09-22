@@ -125,12 +125,15 @@ export interface CliDependencies {
   readonly readApiKeyFromPrompt?: () => Promise<string>;
 }
 
-const HELP = `jev-test-auditor — inspect semantic test quality
+const HELP = `jta (jev-test-auditor) — inspect semantic test quality
 
 Usage:
-  jev-test-auditor audit [options]
-  jev-test-auditor auth <login|status|logout>
-  jev-test-auditor --help
+  jta audit [options]
+  jta auth <login|status|logout>
+  jta --help
+
+Aliases:
+  jev-test-auditor <command>
 
 Commands:
   audit         Discover and extract test understanding without executing project code, then print
@@ -184,7 +187,7 @@ Options:
                       TypeSafe's Jev model for real judgment (costs money; nothing is sent without
                       this flag). Requires a TypeSafe API key from the TYPESAFE_API_KEY
                       environment variable (checked first, so CI keeps injecting GitHub secrets)
-                      or from 'jev-test-auditor auth login'; having neither is a usage error
+                      or from 'jta auth login'; having neither is a usage error
                       (exit 1, no network attempted) that names both ways to provide one. Prints
                       a terminal evaluation summary (status counts, skipped-by-reason, failed,
                       total usage input tokens,
@@ -927,14 +930,14 @@ async function runAuthLogout(io: CliIo): Promise<number> {
 async function runAuthCommand(args: readonly string[], io: CliIo, dependencies: CliDependencies): Promise<number> {
   const subcommand = args[0];
   if (subcommand === undefined) {
-    io.writeLine('Usage: jev-test-auditor auth <login|status|logout>');
+    io.writeLine('Usage: jta auth <login|status|logout>');
     return 1;
   }
   if (subcommand === 'login') {
     if (args.length > 1) {
       io.writeLine(
         'auth login does not accept the API key as an argument (it would be saved in shell history and visible in '
-        + 'the process list). Run `jev-test-auditor auth login` with no arguments and enter the key at the prompt, '
+        + 'the process list). Run `jta auth login` with no arguments and enter the key at the prompt, '
         + 'or pipe it on stdin.',
       );
       return 1;
