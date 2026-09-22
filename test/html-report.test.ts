@@ -158,6 +158,68 @@ describe('renderAuditReportHtml: document shape', () => {
     expect(html.toLowerCase()).toContain('provisional');
     expect(html.toLowerCase()).not.toContain('calibrated accuracy');
   });
+
+  it('paints the page with the warm editorial palette, and lights violet and ember only as data marks', () => {
+    const html = renderAuditReportHtml(minimalReport());
+    expect(html).toContain('#fdfcfc');
+    expect(html).toContain('#f5f3f1');
+    expect(html).toContain('#0447ff');
+    expect(html).toContain('#ff4704');
+    expect(html).not.toContain('#1e7e34');
+    expect(html).not.toContain('#c62828');
+    expect(html).not.toContain('#14161a');
+  });
+
+  it('shows test count, fresh Jev calls, rubric questions, and cost once, and leaves a healthy run without a matrix', () => {
+    const html = visibleHtml(renderAuditReportHtml(minimalReport()));
+    expect(html).toContain('Jev test audit report');
+    expect(html).toContain('sphere-quiet');
+    expect(html).toContain('Tests');
+    expect(html).toContain('Jev calls');
+    expect(html).toContain('Questions');
+    expect(html).toContain('14 per fresh call');
+    expect(html).toContain('$0.0000042');
+    expect(html).not.toContain('Dimension scores');
+    expect(html).not.toContain('Evaluated:');
+    expect(html).not.toContain('Cost this run');
+    expect(html).not.toContain('Noul matrix');
+    expect(html).not.toContain('class="mast-gaps"');
+    expect(html).not.toContain('Probabilities (0/1/2/3)');
+    expect(html).not.toContain('<h2>Diagnostics</h2>');
+  });
+
+  it('keeps the editorial header, names the gaps once, and limits the noul matrix to tests that are not healthy', () => {
+    const misleading = classification({
+      testCaseId: 'tc:v1:misleading' as TestCaseId,
+      name: 'aa misleading test',
+      status: 'misleading',
+      dimensions: [dimension({ level: 'misleading', score: 0 })],
+      findings: [],
+    });
+    const healthy = classification({ name: 'zz healthy test', status: 'healthy' });
+    const html = visibleHtml(renderAuditReportHtml(minimalReport({
+      totals: {
+        ...minimalReport().totals,
+        statusCounts: { healthy: 1, weak: 0, misleading: 1, 'needs-review': 0 },
+      },
+      classifications: [healthy, misleading],
+    })));
+    expect(html).toContain('Jev test audit report');
+    expect(html).toContain('sphere-alarm');
+    expect(html).toContain('mast-gaps-alarm');
+    expect(html).toContain('test needs a change');
+    expect(html).toContain('Noul matrix');
+    expect(html).toContain('0.91');
+    expect(html).toContain('Falsifiability');
+    expect(html).toContain('aa misleading test');
+    expect(html).not.toContain('zz healthy test');
+    expect(html).not.toContain('Gaps by dimension');
+    expect(html).not.toContain('class="gap-num"');
+    expect(html).toContain('<h4>Findings</h4>');
+    expect(html).toContain('No findings.');
+    expect(html).toContain('Probabilities (0/1/2/3)');
+    expect(html).toContain('Evidence provenance');
+  });
 });
 
 describe('renderAuditReportHtml: incomplete and resume disclosure', () => {
@@ -212,7 +274,8 @@ describe('renderAuditReportHtml: worst-first structure', () => {
     // that merely preserves array order would fail this test.
     const html = visibleHtml(renderAuditReportHtml(minimalReport({ classifications: [healthy, needsReview, weak, misleading] })));
 
-    const positions = [misleading, weak, needsReview, healthy].map((entry) => html.indexOf(entry.name));
+    expect(html).not.toContain(healthy.name);
+    const positions = [misleading, weak, needsReview].map((entry) => html.indexOf(entry.name));
     expect(positions.every((position) => position >= 0)).toBe(true);
     expect(positions).toEqual([...positions].sort((a, b) => a - b));
   });

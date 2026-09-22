@@ -42,14 +42,16 @@
  * mean sharing a report silently shares the source code it was derived from (see the Phase 6
  * feature document's "Open questions").
  *
- * **Structure: worst first.** `classifications` are re-sorted (a stable sort; never mutating the
- * caller's array) `misleading` → `weak` → `needs-review` → `healthy`, and a `not-evaluated` test
- * case (dispatched but never produced a judgment — see {@link AuditReportCacheStatusEntry}'s own
- * doc) gets its own small, visible block positioned BEFORE the ordinary classification list. A
- * reader opening this report is deciding what needs attention, and a failed dispatch is unknown,
- * not healthy — it must not sit below the fold under a page of healthy verdicts.
+ * **Structure: worst first.** The header is the editorial mast. One line under the title names how
+ * many judged tests need a change, and the sphere follows the worst of those counts. The noul
+ * matrix and the test-case list include only tests that are not healthy — healthy tests stay in
+ * the count and in the embedded JSON. Open a test case for its dimensions, findings, and evidence.
+ * Diagnostics render only when the run recorded some. A
+ * `not-evaluated` test case gets its own block before the classification list.
  */
 import type { OverallClassificationStatus } from './classification.js';
+import { JEV_ESTIMATE_SNAPSHOT } from './jev-pricing.js';
+import { RUBRIC_V1, RUBRIC_V2 } from './rubric.js';
 import type {
   AuditReport,
   AuditReportCacheStatusEntry,
@@ -118,12 +120,61 @@ const STATUS_SEVERITY: Readonly<Record<OverallClassificationStatus, number>> = {
   healthy: 3,
 };
 
-function statusBadge(status: OverallClassificationStatus): string {
-  return `<span class="badge ${STATUS_CLASS[status]}">${escapeHtml(STATUS_LABEL[status])}</span>`;
+function statusBadge(status: OverallClassificationStatus, count?: number): string {
+  const countHtml = count === undefined ? '' : `<span class="stat-count">${count}</span>`;
+  const dormant = count === 0 ? ' badge-dormant' : '';
+  return `<span class="badge ${STATUS_CLASS[status]}${dormant}">${escapeHtml(STATUS_LABEL[status])}${countHtml}</span>`;
 }
 
 function cacheBadge(status: 'cached' | 'fresh'): string {
   return `<span class="badge badge-cache-${status}">${status}</span>`;
+}
+
+/** The sphere is a product visual: sparks ignite only for the verdict the counts actually hold. */
+function sphereKind(report: AuditReport): 'sphere-alarm' | 'sphere-review' | 'sphere-wear' | 'sphere-quiet' {
+  const counts = report.totals.statusCounts;
+  if (counts.misleading > 0) return 'sphere-alarm';
+  if (counts['needs-review'] > 0) return 'sphere-review';
+  if (counts.weak > 0) return 'sphere-wear';
+  return 'sphere-quiet';
+}
+
+function judgedGaps(report: AuditReport): number {
+  const counts = report.totals.statusCounts;
+  return counts.misleading + counts.weak + counts['needs-review'];
+}
+
+/**
+ * One proportion rule, worst-first, left to right. Widths come from integer counts via flex-grow
+ * so the bar is deterministic and never interpolates a report string into CSS.
+ */
+function renderLedger(report: AuditReport): string {
+  const counts = report.totals.statusCounts;
+  const parts = [
+    { key: 'misleading', count: counts.misleading },
+    { key: 'weak', count: counts.weak },
+    { key: 'needs-review', count: counts['needs-review'] },
+    { key: 'healthy', count: counts.healthy },
+  ];
+  if (parts.every((part) => part.count === 0)) return '';
+  const segments = parts
+    .filter((part) => part.count > 0)
+    .map((part) => `<span class="ledger-seg ledger-${part.key}" style="flex-grow:${part.count}"></span>`)
+    .join('');
+  return `<div class="ledger" aria-hidden="true">${segments}</div>`;
+}
+
+function renderDataTable(headerCells: string, bodyRows: string, tableClass?: string): string {
+  const classAttr = tableClass === undefined ? '' : ` class="${tableClass}"`;
+  return [
+    '<div class="table-wrap">',
+    `<table${classAttr}>`,
+    `<thead><tr>${headerCells}</tr></thead>`,
+    '<tbody>',
+    bodyRows,
+    '</tbody></table>',
+    '</div>',
+  ].join('\n');
 }
 
 /**
@@ -152,11 +203,32 @@ function renderMetaRow(label: string, value: string): string {
   return `<div class="meta-row"><span class="meta-label">${escapeHtml(label)}</span><span class="meta-value">${value}</span></div>`;
 }
 
+function renderMastGaps(report: AuditReport): string {
+  const gaps = judgedGaps(report);
+  if (gaps === 0) return '';
+  const counts = report.totals.statusCounts;
+  const tone = counts.misleading > 0 ? 'alarm' : counts['needs-review'] > 0 ? 'review' : 'wear';
+  const sentence = gaps === 1 ? 'test needs a change' : 'tests need a change';
+  return `<p class="mast-gaps"><span class="mast-gaps-num mast-gaps-${tone}">${gaps}</span> ${sentence}</p>`;
+}
+
 function renderHeader(report: AuditReport): string {
   const { statusCounts } = report.totals;
   return [
-    '<header>',
+    '<header class="mast">',
+    '<div class="mast-copy">',
     '<h1>Jev test audit report</h1>',
+    renderMastGaps(report),
+    '<p class="disclosure">This tool never executed the audited repository’s code. Classification thresholds are provisional and uncalibrated — see README.md; nothing here is a claim of validated accuracy.</p>',
+    '</div>',
+    `<div class="sphere ${sphereKind(report)}" aria-hidden="true"><span class="sphere-core"></span></div>`,
+    renderLedger(report),
+    '<div class="status-summary">',
+    statusBadge('misleading', statusCounts.misleading),
+    statusBadge('weak', statusCounts.weak),
+    statusBadge('needs-review', statusCounts['needs-review']),
+    statusBadge('healthy', statusCounts.healthy),
+    '</div>',
     '<div class="meta">',
     renderMetaRow('Root', escapeHtml(report.rootDir)),
     ...(report.runId === undefined ? [] : [renderMetaRow('Run id', escapeHtml(report.runId))]),
@@ -165,13 +237,6 @@ function renderHeader(report: AuditReport): string {
     renderMetaRow('Model responded', report.totals.respondedModel === undefined ? '—' : escapeHtml(report.totals.respondedModel)),
     renderMetaRow('Store schema / rubric / policy versions', `${report.versions.storeSchema} / ${report.versions.rubric} / ${report.versions.policy}`),
     '</div>',
-    '<div class="status-summary">',
-    statusBadge('misleading'), ` ${statusCounts.misleading}&nbsp;&nbsp;`,
-    statusBadge('weak'), ` ${statusCounts.weak}&nbsp;&nbsp;`,
-    statusBadge('needs-review'), ` ${statusCounts['needs-review']}&nbsp;&nbsp;`,
-    statusBadge('healthy'), ` ${statusCounts.healthy}`,
-    '</div>',
-    '<p class="disclosure">This tool never executed the audited repository’s code. Classification thresholds are provisional and uncalibrated — see README.md; nothing here is a claim of validated accuracy.</p>',
     '</header>',
   ].join('\n');
 }
@@ -197,21 +262,138 @@ function renderResumeNote(report: AuditReport): string {
   ].join('\n');
 }
 
+/** Applicability plus quality, for a rubric this build still ships. Unknown versions stay blank rather than inventing a count. */
+function questionsPerCall(rubricVersion: number): number | undefined {
+  const rubric = rubricVersion === RUBRIC_V1.version ? RUBRIC_V1 : rubricVersion === RUBRIC_V2.version ? RUBRIC_V2 : undefined;
+  if (rubric === undefined) return undefined;
+  return rubric.dimensions.length * 2;
+}
+
+/**
+ * USD for this run's billed input tokens at the versioned Jev price. Output tokens are unbilled.
+ * The rate is a provider price, not a byte-to-token guess.
+ */
+function formatRunCost(inputTokens: number): string {
+  const usd = (inputTokens * JEV_ESTIMATE_SNAPSHOT.usdPerMillionInputTokens) / 1_000_000;
+  if (usd === 0) return '$0.00';
+  const decimals = usd >= 1 ? 2 : usd >= 0.01 ? 4 : 8;
+  const text = usd.toFixed(decimals).replace(/0+$/, '').replace(/\.$/, '');
+  return `$${text}`;
+}
+
+function renderFigure(value: string, label: string, note: string): string {
+  return [
+    '<div class="figure">',
+    `<span class="figure-value">${value}</span>`,
+    `<span class="figure-label">${escapeHtml(label)}</span>`,
+    `<span class="figure-note">${escapeHtml(note)}</span>`,
+    '</div>',
+  ].join('');
+}
+
+/** Rubric order first, then any label a classification used that this rubric does not name. */
+function matrixDimensionLabels(report: AuditReport): readonly string[] {
+  const rubric = report.versions.rubric === RUBRIC_V1.version ? RUBRIC_V1 : RUBRIC_V2;
+  const preferred = rubric.dimensions.map((dimension) => dimension.label);
+  const seen = new Set(preferred);
+  const extra: string[] = [];
+  for (const classification of report.classifications) {
+    for (const dimension of classification.dimensions) {
+      if (seen.has(dimension.dimensionLabel)) continue;
+      seen.add(dimension.dimensionLabel);
+      extra.push(dimension.dimensionLabel);
+    }
+  }
+  return [...preferred, ...extra];
+}
+
+const SHORT_DIMENSION_LABEL: Readonly<Record<string, string>> = {
+  'Falsifiability': 'Fals.',
+  'Behavioral focus': 'Behav.',
+  'Refactor resistance': 'Refac.',
+  'Assertion strength': 'Assert.',
+  'Test-double quality': 'Double',
+  'Determinism and isolation': 'Determ.',
+  'Diagnostic quality': 'Diagn.',
+};
+
+function shortDimensionLabel(label: string): string {
+  return SHORT_DIMENSION_LABEL[label] ?? (label.length > 8 ? `${label.slice(0, 7)}.` : label);
+}
+
+function noulCell(dimension: AuditReportClassification['dimensions'][number] | undefined): string {
+  if (dimension === undefined || dimension.applicabilityProbability === undefined) {
+    return '<span class="cell cell-empty">—</span>';
+  }
+  const probability = formatNumber(dimension.applicabilityProbability);
+  if (!dimension.applicable || dimension.status === 'not-applicable') {
+    return `<span class="cell cell-na" title="Not applicable">${probability}</span>`;
+  }
+  if (dimension.status === 'needs-review') {
+    return `<span class="cell cell-review" title="Needs review">${probability}</span>`;
+  }
+  const level = dimension.level ?? 'judged';
+  const levelClass = level === 'misleading' || level === 'weak' || level === 'acceptable' || level === 'strong'
+    ? ` cell-${level}`
+    : '';
+  return `<span class="cell${levelClass}" title="${escapeHtml(level)}">${probability}</span>`;
+}
+
+/** One row per test that is not healthy. Healthy rows are the count in the header, not a second copy. */
+function renderNoulMatrix(report: AuditReport): string {
+  const classifications = sortedClassifications(report.classifications).filter((classification) => classification.status !== 'healthy');
+  if (classifications.length === 0) return '';
+  const labels = matrixDimensionLabels(report);
+  const head = labels.map((label) => `<th title="${escapeHtml(label)}">${escapeHtml(shortDimensionLabel(label))}</th>`).join('');
+  const rows = classifications.map((classification) => {
+    const byLabel = new Map(classification.dimensions.map((dimension) => [dimension.dimensionLabel, dimension]));
+    const cells = labels.map((label) => `<td>${noulCell(byLabel.get(label))}</td>`).join('');
+    return [
+      '<tr>',
+      `<th scope="row" class="noul-name">${escapeHtml(classification.name)}<span class="noul-path">${escapeHtml(classification.repositoryRelativePath)}</span></th>`,
+      cells,
+      '</tr>',
+    ].join('');
+  }).join('\n');
+  return [
+    '<h3>Noul matrix</h3>',
+    '<p class="chart-note">Applicability of each dimension, from 0 to 1, for tests that need a change. The mark is the quality level.</p>',
+    '<p class="noul-key"><span class="cell cell-misleading">Misleading</span><span class="cell cell-weak">Weak</span><span class="cell cell-acceptable">Acceptable</span><span class="cell cell-strong">Strong</span><span class="cell cell-review">Needs review</span><span class="cell cell-na">Not applicable</span></p>',
+    '<div class="table-wrap">',
+    '<table class="noul">',
+    `<thead><tr><th class="noul-test"></th>${head}</tr></thead>`,
+    `<tbody>${rows}</tbody>`,
+    '</table>',
+    '</div>',
+  ].join('\n');
+}
+
 function renderSummarySection(report: AuditReport): string {
   const { totals, latency } = report;
+  const perCall = questionsPerCall(report.versions.rubric);
+  const questions = perCall === undefined ? undefined : totals.evaluated * perCall;
+  const questionsText = questions === undefined ? '—' : String(questions);
+  const questionsNote = perCall === undefined ? 'rubric question count unknown' : `${perCall} per fresh call`;
+  const cost = formatRunCost(totals.usage.inputTokens);
   const latencyLine = latency.measuredTestCases === 0
     ? 'No fresh dispatch’s latency was measured this run.'
     : `${latency.measuredTestCases} test case(s) measured — total ${formatNumber(latency.totalMs, 0)}ms, mean ${formatNumber(latency.meanMs, 1)}ms, min ${formatNumber(latency.minMs, 0)}ms, max ${formatNumber(latency.maxMs, 0)}ms.`;
   return [
     '<section id="jev-summary">',
     '<h2>Summary</h2>',
+    '<div class="figures">',
+    renderFigure(String(report.discovery.totals.testCases), 'Tests', 'discovered'),
+    renderFigure(String(totals.evaluated), 'Jev calls', 'fresh, billed'),
+    renderFigure(questionsText, 'Questions', questionsNote),
+    renderFigure(cost, 'Cost', `$${JEV_ESTIMATE_SNAPSHOT.usdPerMillionInputTokens} / 1M input tokens`),
+    '</div>',
+    renderNoulMatrix(report),
     '<ul class="summary-list">',
-    `<li>Evaluated: ${totals.evaluated}</li>`,
-    `<li>Cached: ${totals.cached}</li>`,
-    `<li>Failed: ${totals.failed}</li>`,
-    `<li>Skipped: ${totals.skipped.total} (skip: ${totals.skipped.byReason.skip}, todo: ${totals.skipped.byReason.todo}, evidence-unavailable: ${totals.skipped.byReason['evidence-unavailable']})</li>`,
-    `<li>Model mismatches: ${totals.modelMismatches}</li>`,
-    `<li>Usage this run: ${totals.usage.inputTokens} input token(s), ${totals.usage.outputTokens} output token(s)</li>`,
+    ...(totals.cached === 0 ? [] : [`<li>Cached: ${totals.cached}</li>`]),
+    ...(totals.failed === 0 ? [] : [`<li>Failed: ${totals.failed}</li>`]),
+    ...(totals.skipped.total === 0 ? [] : [`<li>Skipped: ${totals.skipped.total} (skip: ${totals.skipped.byReason.skip}, todo: ${totals.skipped.byReason.todo}, evidence-unavailable: ${totals.skipped.byReason['evidence-unavailable']})</li>`]),
+    ...(totals.modelMismatches === 0 ? [] : [`<li>Model mismatches: ${totals.modelMismatches}</li>`]),
+    ...(totals.usage.outputTokens === 0 ? [] : [`<li>Output tokens: ${totals.usage.outputTokens}, not billed</li>`]),
     `<li>Latency: ${latencyLine}</li>`,
     '</ul>',
     '</section>',
@@ -231,9 +413,7 @@ function renderNotEvaluatedSection(entries: readonly AuditReportCacheStatusEntry
     '<section id="jev-not-evaluated" class="banner banner-not-evaluated">',
     `<h2>Not evaluated (dispatched, but the request failed) — ${notEvaluated.length}</h2>`,
     '<p>These test cases were dispatched but never produced a judgment; see Diagnostics below for why.</p>',
-    '<table><thead><tr><th>Path</th><th>Name</th></tr></thead><tbody>',
-    rows,
-    '</tbody></table>',
+    renderDataTable('<th>Path</th><th>Name</th>', rows),
     '</section>',
   ].join('\n');
 }
@@ -258,18 +438,15 @@ function renderDiscoverySection(report: AuditReport): string {
   const { discovery } = report;
   const excludedTable = discovery.excluded.length === 0
     ? '<p>No files were excluded.</p>'
-    : [
-      '<table><thead><tr><th>Path</th><th>Reason</th></tr></thead><tbody>',
-      discovery.excluded.map(renderExcludedFileRow).join('\n'),
-      '</tbody></table>',
-    ].join('\n');
+    : renderDataTable('<th>Path</th><th>Reason</th>', discovery.excluded.map(renderExcludedFileRow).join('\n'));
   return [
     '<section id="jev-discovery">',
     '<h2>Discovery</h2>',
     `<p>${discovery.totals.files} file(s) discovered, ${discovery.totals.testCases} test case(s), ${discovery.totals.excluded} excluded, ${discovery.totals.unsupportedFrameworkFiles} unattributable-framework file(s).</p>`,
-    '<table><thead><tr><th>Path</th><th>Framework</th><th>Test cases</th><th>Dynamic metadata</th><th>Evidence bundles</th></tr></thead><tbody>',
-    discovery.files.map(renderDiscoveredFileRow).join('\n'),
-    '</tbody></table>',
+    renderDataTable(
+      '<th>Path</th><th>Framework</th><th>Test cases</th><th>Dynamic metadata</th><th>Evidence bundles</th>',
+      discovery.files.map(renderDiscoveredFileRow).join('\n'),
+    ),
     '<h3>Excluded</h3>',
     excludedTable,
     '</section>',
@@ -277,17 +454,16 @@ function renderDiscoverySection(report: AuditReport): string {
 }
 
 function renderDiagnosticsSection(report: AuditReport): string {
-  if (report.diagnostics.length === 0) {
-    return '<section id="jev-diagnostics"><h2>Diagnostics</h2><p>None.</p></section>';
-  }
+  if (report.diagnostics.length === 0) return '';
   const rows = report.diagnostics.map((diagnostic) => {
     const path = typeof diagnostic['path'] === 'string' ? diagnostic['path'] : undefined;
     const code = typeof diagnostic['code'] === 'string' ? diagnostic['code'] : '';
     const message = typeof diagnostic['message'] === 'string' ? diagnostic['message'] : '';
     const severity = typeof diagnostic['severity'] === 'string' ? diagnostic['severity'] : '';
+    const severityClass = severity === 'error' || severity === 'warning' ? ` class="sev sev-${severity}"` : '';
     return [
       '<tr>',
-      `<td>${escapeHtml(severity)}</td>`,
+      `<td${severityClass}>${escapeHtml(severity)}</td>`,
       `<td>${escapeHtml(code)}</td>`,
       `<td>${path === undefined ? '—' : escapeHtml(path)}</td>`,
       `<td>${escapeHtml(message)}</td>`,
@@ -297,9 +473,7 @@ function renderDiagnosticsSection(report: AuditReport): string {
   return [
     '<section id="jev-diagnostics">',
     '<h2>Diagnostics</h2>',
-    '<table><thead><tr><th>Severity</th><th>Code</th><th>Path</th><th>Message</th></tr></thead><tbody>',
-    rows,
-    '</tbody></table>',
+    renderDataTable('<th>Severity</th><th>Code</th><th>Path</th><th>Message</th>', rows),
     '</section>',
   ].join('\n');
 }
@@ -322,13 +496,11 @@ function renderDimensionsTable(dimensions: AuditReportClassification['dimensions
       '</tr>',
     ].join('');
   }).join('\n');
-  return [
-    '<table class="dimensions"><thead><tr>',
+  return renderDataTable(
     '<th>Dimension</th><th>Status</th><th>Applicability</th><th>Level</th><th>Score</th><th>Confidence</th><th>Reason</th><th>Probabilities (0/1/2/3)</th>',
-    '</tr></thead><tbody>',
     rows,
-    '</tbody></table>',
-  ].join('\n');
+    'dimensions',
+  );
 }
 
 function renderEvidenceProvenance(evidence: AuditReportEvidenceProvenance): string {
@@ -356,7 +528,9 @@ function renderEvidenceProvenance(evidence: AuditReportEvidenceProvenance): stri
 }
 
 function renderClassificationDetail(classification: AuditReportClassification, position: number): string {
-  const latencyText = classification.latency === undefined ? '' : ` — ${formatNumber(classification.latency.latencyMs, 0)}ms`;
+  const latencyText = classification.latency === undefined
+    ? ''
+    : `<span class="tc-latency">— ${formatNumber(classification.latency.latencyMs, 0)}ms</span>`;
   const findingsList = classification.findings.length === 0
     ? '<p>No findings.</p>'
     : [
@@ -365,14 +539,13 @@ function renderClassificationDetail(classification: AuditReportClassification, p
       '</ul>',
     ].join('\n');
   return [
-    `<details id="jev-tc-${position}">`,
+    `<details id="jev-tc-${position}" class="case">`,
     '<summary>',
     statusBadge(classification.status),
-    ' ',
     cacheBadge(classification.cache),
     latencyText,
-    ` <span class="tc-name">${escapeHtml(classification.name)}</span>`,
-    ` <span class="tc-path">${escapeHtml(classification.repositoryRelativePath)}</span>`,
+    `<span class="tc-name">${escapeHtml(classification.name)}</span>`,
+    `<span class="tc-path">${escapeHtml(classification.repositoryRelativePath)}</span>`,
     '</summary>',
     '<div class="tc-body">',
     renderMetaRow('Model requested / responded / matches pin', `${escapeHtml(classification.model.requested)} / ${escapeHtml(classification.model.responded)} / ${formatBoolean(classification.model.matchesPin)}`),
@@ -389,18 +562,25 @@ function renderClassificationDetail(classification: AuditReportClassification, p
 }
 
 function renderClassificationsSection(report: AuditReport): string {
-  const sorted = sortedClassifications(report.classifications);
+  const sorted = sortedClassifications(report.classifications).filter((classification) => classification.status !== 'healthy');
+  const healthy = report.totals.statusCounts.healthy;
+  const omitted = sorted.length === 0 || healthy === 0 ? '' : `<p class="omitted">${healthy} healthy test(s) are not listed.</p>`;
   if (sorted.length === 0) {
-    return '<section id="jev-classifications"><h2>Test cases</h2><p>No test case was evaluated this run.</p></section>';
+    const empty = report.classifications.length === 0
+      ? '<p>No test case was evaluated this run.</p>'
+      : '<p>No judged test needs a change.</p>';
+    return ['<section id="jev-classifications">', '<h2>Test cases</h2>', omitted, empty, '</section>'].join('\n');
   }
   return [
     '<section id="jev-classifications">',
     '<h2>Test cases</h2>',
+    omitted,
     '<div class="toolbar">',
     '<input type="text" id="jev-filter" placeholder="Filter by name, path, or status…" aria-label="Filter test cases">',
     '<button type="button" id="jev-expand-all">Expand all</button>',
     '<button type="button" id="jev-collapse-all">Collapse all</button>',
     '</div>',
+    '<p id="jev-filter-empty" hidden>No test case matches that filter.</p>',
     sorted.map((classification, index) => renderClassificationDetail(classification, index)).join('\n'),
     '</section>',
   ].join('\n');
@@ -412,70 +592,582 @@ function renderFooter(report: AuditReport): string {
 
 const PAGE_STYLE = `
 :root {
-  color-scheme: light dark;
-  --bg: #ffffff;
-  --fg: #1a1a1a;
-  --muted: #5f6368;
-  --border: #d7dbe0;
-  --surface: #f6f7f9;
-  --healthy: #1e7e34;
-  --weak: #b8860b;
-  --misleading: #c62828;
-  --needs-review: #455a64;
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #14161a;
-    --fg: #e8e9ec;
-    --muted: #a0a4ab;
-    --border: #33363c;
-    --surface: #1d2024;
-  }
+  color-scheme: light;
+  --eggshell: #fdfcfc;
+  --taupe: #f5f3f1;
+  --stone: #ebe8e4;
+  --ink: #000000;
+  --graphite: #44403b;
+  --smoke: #777169;
+  --ash: #a59f97;
+  --violet: #0447ff;
+  --ember: #ff4704;
+  --line: #e5e5e5;
+  --font-display: Waldenburg, Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-text: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
+  --shadow-whisper: rgba(0, 0, 0, 0.4) 0px 0px 1px 0px, rgba(0, 0, 0, 0.04) 0px 1px 1px 0px, rgba(0, 0, 0, 0.04) 0px 2px 4px 0px;
+  --focus: 2px solid var(--ink);
 }
 * { box-sizing: border-box; }
+html { scrollbar-color: var(--stone) var(--eggshell); }
+::selection { background: var(--stone); color: var(--ink); }
 body {
   margin: 0;
-  padding: 1.5rem;
-  max-width: 72rem;
-  margin-inline: auto;
-  background: var(--bg);
-  color: var(--fg);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background: var(--eggshell);
+  color: var(--ink);
+  font-family: var(--font-text);
+  font-weight: 400;
+  font-size: 16px;
   line-height: 1.5;
+  letter-spacing: 0.16px;
 }
-h1, h2, h3, h4 { line-height: 1.2; }
-table { border-collapse: collapse; width: 100%; margin: 0.5rem 0 1rem; font-size: 0.9rem; }
-th, td { border: 1px solid var(--border); padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
-th { background: var(--surface); }
-.meta { display: grid; grid-template-columns: max-content 1fr; gap: 0.15rem 1rem; margin: 0.75rem 0; font-size: 0.9rem; }
-.meta-row { display: contents; }
-.meta-label { color: var(--muted); }
-.status-summary { margin: 0.75rem 0; }
-.badge { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px; font-size: 0.8rem; font-weight: 600; color: #fff; }
-.status-healthy { background: var(--healthy); }
-.status-weak { background: var(--weak); }
-.status-misleading { background: var(--misleading); }
-.status-needs-review { background: var(--needs-review); }
-.badge-cache-cached { background: var(--muted); }
-.badge-cache-fresh { background: #37474f; }
-.disclosure { color: var(--muted); font-size: 0.85rem; }
-.banner { border: 1px solid var(--border); border-radius: 0.4rem; padding: 0.75rem 1rem; margin: 1rem 0; }
-.banner-incomplete { border-color: var(--misleading); background: color-mix(in srgb, var(--misleading) 10%, transparent); }
-.banner-resume { border-color: var(--needs-review); background: color-mix(in srgb, var(--needs-review) 10%, transparent); }
-.banner-not-evaluated { border-color: var(--misleading); }
-.summary-list { padding-left: 1.1rem; }
-.toolbar { display: flex; gap: 0.5rem; margin: 0.75rem 0; flex-wrap: wrap; }
-.toolbar input { flex: 1 1 16rem; padding: 0.35rem 0.5rem; }
-.toolbar button { padding: 0.35rem 0.75rem; }
-details { border: 1px solid var(--border); border-radius: 0.4rem; margin-bottom: 0.5rem; padding: 0.5rem 0.75rem; }
-summary { cursor: pointer; }
-.tc-name { font-weight: 600; }
-.tc-path { color: var(--muted); font-size: 0.85rem; }
-.tc-body { margin-top: 0.5rem; }
-.findings { padding-left: 1.1rem; }
-.evidence { margin-top: 0.75rem; font-size: 0.9rem; }
-.fragment-notice { color: var(--muted); font-size: 0.8rem; }
-footer { margin-top: 2rem; color: var(--muted); font-size: 0.8rem; }
+.page {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 64px 64px 96px;
+}
+h1, h2, h3, h4 { font-weight: 300; margin: 0; text-wrap: balance; }
+h1 {
+  font-family: var(--font-display);
+  font-size: 48px;
+  line-height: 1.08;
+  letter-spacing: -0.96px;
+  max-width: 11em;
+}
+h2 {
+  font-family: var(--font-display);
+  font-size: 32px;
+  line-height: 1.13;
+  letter-spacing: -0.64px;
+  margin-bottom: 20px;
+}
+h3 {
+  font-family: var(--font-text);
+  font-size: 20px;
+  font-weight: 500;
+  line-height: 1.35;
+  margin: 36px 0 12px;
+}
+h4 {
+  font-family: var(--font-text);
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 0.14px;
+  line-height: 1.4;
+  margin: 28px 0 10px;
+  color: var(--graphite);
+}
+p { margin: 0 0 16px; }
+.mast {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 200px;
+  grid-template-areas:
+    "copy sphere"
+    "ledger ledger"
+    "status status"
+    "meta meta";
+  column-gap: 48px;
+  row-gap: 28px;
+  align-items: center;
+  padding-bottom: 8px;
+}
+.mast-copy { grid-area: copy; }
+.mast-gaps {
+  margin: 16px 0 0;
+  font-size: 20px;
+  font-weight: 500;
+  letter-spacing: 0.2px;
+}
+.mast-gaps-num { font-variant-numeric: tabular-nums; }
+.mast-gaps-alarm { color: #ff4704; }
+.mast-gaps-wear { color: #44403b; }
+.mast-gaps-review { color: #0447ff; }
+.disclosure {
+  margin: 16px 0 0;
+  max-width: 42rem;
+  color: var(--smoke);
+  font-size: 16px;
+  line-height: 1.5;
+  letter-spacing: 0.16px;
+}
+.sphere {
+  grid-area: sphere;
+  justify-self: end;
+  width: 200px;
+  height: 200px;
+  position: relative;
+}
+.sphere-core {
+  position: absolute;
+  inset: -8%;
+  border-radius: 9999px;
+  filter: blur(10px);
+}
+.sphere-quiet .sphere-core {
+  background:
+    radial-gradient(circle at 40% 36%, var(--eggshell) 0%, rgba(253, 252, 252, 0) 28%),
+    radial-gradient(circle at 50% 50%, var(--stone) 0%, rgba(235, 232, 228, 0.35) 46%, rgba(253, 252, 252, 0) 72%);
+}
+.sphere-wear .sphere-core {
+  background:
+    radial-gradient(circle at 36% 34%, var(--ember) 0%, rgba(255, 71, 4, 0) 46%),
+    radial-gradient(circle at 62% 66%, var(--stone) 0%, rgba(253, 252, 252, 0) 68%);
+}
+.sphere-review .sphere-core {
+  background:
+    radial-gradient(circle at 34% 32%, var(--eggshell) 0%, rgba(253, 252, 252, 0) 18%),
+    radial-gradient(circle at 46% 42%, var(--violet) 0%, rgba(4, 71, 255, 0.45) 32%, rgba(4, 71, 255, 0) 62%),
+    radial-gradient(circle at 68% 70%, var(--stone) 0%, rgba(235, 232, 228, 0) 52%);
+}
+.sphere-alarm .sphere-core {
+  background:
+    radial-gradient(circle at 32% 30%, var(--ember) 0%, rgba(255, 71, 4, 0.45) 28%, rgba(255, 71, 4, 0) 56%),
+    radial-gradient(circle at 70% 66%, var(--violet) 0%, rgba(4, 71, 255, 0.55) 30%, rgba(4, 71, 255, 0) 60%),
+    radial-gradient(circle at 50% 78%, var(--taupe) 0%, rgba(245, 243, 241, 0) 44%);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .sphere-wear .sphere-core,
+  .sphere-review .sphere-core,
+  .sphere-alarm .sphere-core {
+    animation: sphere-drift 22s ease-in-out infinite alternate;
+  }
+}
+@keyframes sphere-drift {
+  from { transform: translate3d(-3%, -2%, 0) scale(1.02); }
+  to { transform: translate3d(3%, 2%, 0) scale(1.08); }
+}
+.ledger {
+  grid-area: ledger;
+  display: flex;
+  height: 12px;
+  border-radius: 9999px;
+  overflow: hidden;
+  background: var(--taupe);
+  box-shadow: inset 0 0 0 1px var(--stone);
+}
+.ledger-seg { flex-basis: 0; min-width: 4px; }
+.ledger-misleading { background: #ff4704; }
+.ledger-weak { background: #44403b; }
+.ledger-needs-review { background: #0447ff; }
+.ledger-healthy { background: #ebe8e4; }
+.status-summary {
+  grid-area: status;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+}
+.stat-count {
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+.status-misleading .stat-count { color: #ff4704; }
+.status-weak .stat-count { color: #44403b; }
+.status-needs-review .stat-count { color: #0447ff; }
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px 6px 10px;
+  border-radius: 9999px;
+  border: 1px solid var(--line);
+  background: var(--eggshell);
+  color: var(--ink);
+  font-family: var(--font-text);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.2;
+  letter-spacing: 0.14px;
+}
+.badge::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 9999px;
+  flex: none;
+  background: var(--stone);
+}
+.status-misleading::before { background: #ff4704; }
+.status-weak::before { background: #44403b; }
+.status-needs-review::before { background: #0447ff; }
+.status-healthy::before { background: #ebe8e4; box-shadow: inset 0 0 0 1px #d9d3cc; }
+.badge-dormant::before { background: var(--stone); box-shadow: none; }
+.badge-cache-cached::before { background: var(--ash); }
+.badge-cache-fresh::before { background: var(--ink); }
+.meta {
+  grid-area: meta;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 20px 32px;
+  margin: 8px 0 0;
+  padding-top: 28px;
+  border-top: 1px solid var(--stone);
+}
+.meta-row { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.meta-label {
+  color: var(--smoke);
+  font-size: 12px;
+  line-height: 1.4;
+  letter-spacing: 0.01em;
+}
+.meta-value {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.69;
+  letter-spacing: 0;
+  overflow-wrap: anywhere;
+}
+.banner {
+  border-radius: 20px;
+  padding: 28px 32px 28px 56px;
+  margin: 28px 0 0;
+  background: var(--taupe);
+  color: var(--ink);
+}
+.banner-incomplete {
+  background:
+    radial-gradient(circle at 32px 38px, #ff4704 0 5px, transparent 5.5px),
+    var(--taupe);
+}
+.banner-resume {
+  background:
+    radial-gradient(circle at 32px 38px, #0447ff 0 5px, transparent 5.5px),
+    var(--taupe);
+}
+.banner-not-evaluated {
+  background:
+    radial-gradient(circle at 32px 42px, #ff4704 0 5px, transparent 5.5px),
+    var(--taupe);
+}
+section.banner { margin-top: 72px; }
+.banner strong { font-weight: 500; }
+.banner p:last-child { margin-bottom: 0; }
+section { margin-top: 72px; }
+section > p { max-width: 68ch; color: var(--graphite); }
+.figures {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 28px 32px;
+  margin: 8px 0 8px;
+}
+.figure { min-width: 0; }
+.figure-value {
+  display: block;
+  font-family: var(--font-display);
+  font-weight: 300;
+  font-size: 36px;
+  line-height: 1.17;
+  letter-spacing: -0.72px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.figure-label {
+  display: block;
+  margin-top: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 0.14px;
+}
+.figure-note {
+  display: block;
+  margin-top: 4px;
+  color: var(--smoke);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.chart-note { margin-bottom: 8px; }
+.noul {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: separate;
+  border-spacing: 8px 8px;
+  margin: 0 0 28px;
+}
+.noul th, .noul td {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  vertical-align: middle;
+}
+.noul thead th {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--graphite);
+  text-align: center;
+  padding: 0 4px 4px;
+}
+.noul-key {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 12px;
+}
+.noul-key .cell { min-width: 0; font-family: var(--font-text); font-size: 12px; letter-spacing: 0.12px; }
+.noul-test { text-align: left; }
+.noul th.noul-name {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--eggshell);
+  text-align: left;
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 0.14px;
+  color: var(--ink);
+  padding-right: 16px;
+  max-width: 16rem;
+}
+.noul-path {
+  display: block;
+  margin-top: 2px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.4;
+  font-weight: 400;
+  letter-spacing: 0;
+  color: var(--smoke);
+}
+.cell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 4.6rem;
+  padding: 7px 10px;
+  border-radius: 9999px;
+  background: var(--taupe);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.2;
+  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+}
+.cell::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  flex: none;
+  background: var(--ink);
+}
+.cell-misleading::before { background: #ff4704; }
+.cell-weak::before { background: #44403b; }
+.cell-acceptable::before { background: transparent; box-shadow: inset 0 0 0 1.5px #000000; }
+.cell-strong::before { background: #000000; }
+.cell-review::before { background: #0447ff; }
+.cell-na { color: var(--smoke); }
+.cell-na::before { background: transparent; box-shadow: inset 0 0 0 1px var(--smoke); }
+.cell-empty { color: var(--smoke); }
+.cell-empty::before { background: transparent; }
+.omitted { color: var(--graphite); }
+.summary-list {
+  list-style: none;
+  margin: 0;
+  padding: 8px 32px;
+  background: var(--taupe);
+  border-radius: 20px;
+}
+.summary-list li {
+  padding: 16px 0;
+  border-bottom: 1px solid var(--stone);
+  font-size: 16px;
+  letter-spacing: 0.16px;
+}
+.summary-list li:last-child { border-bottom: 0; }
+.table-wrap { overflow-x: auto; margin: 8px 0 8px; }
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 14px;
+  line-height: 1.5;
+  letter-spacing: 0.14px;
+}
+th, td {
+  border: 0;
+  border-bottom: 1px solid var(--stone);
+  padding: 12px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+th {
+  font-weight: 500;
+  font-size: 12px;
+  color: var(--graphite);
+  background: transparent;
+}
+tr:last-child td { border-bottom: 0; }
+.dimensions td:nth-child(5),
+.dimensions td:nth-child(6),
+.dimensions td:nth-child(8) {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.69;
+  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+}
+.sev { font-weight: 500; }
+.sev-error {
+  background-image: radial-gradient(circle, #ff4704 0 4px, transparent 4.5px);
+  background-repeat: no-repeat;
+  background-position: left 0.45em;
+  padding-left: 22px;
+}
+.sev-warning {
+  background-image: radial-gradient(circle, #44403b 0 4px, transparent 4.5px);
+  background-repeat: no-repeat;
+  background-position: left 0.45em;
+  padding-left: 22px;
+}
+.toolbar {
+  display: flex;
+  gap: 8px;
+  margin: 0 0 16px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.toolbar input {
+  flex: 1 1 16rem;
+  min-width: 0;
+  padding: 10px 14px;
+  border-radius: 4px;
+  border: 1px solid var(--stone);
+  background: var(--eggshell);
+  color: var(--ink);
+  font: 400 14px/1.5 var(--font-text);
+  letter-spacing: 0.14px;
+  caret-color: var(--ink);
+}
+.toolbar input::placeholder { color: var(--smoke); }
+.toolbar button {
+  font: 500 14px/1.2 var(--font-text);
+  letter-spacing: 0.14px;
+  border-radius: 9999px;
+  padding: 10px 16px;
+  border: 1px solid var(--line);
+  cursor: pointer;
+}
+#jev-expand-all { background: var(--ink); color: var(--eggshell); }
+#jev-collapse-all { background: var(--eggshell); color: var(--ink); }
+#jev-expand-all:hover { background: var(--graphite); }
+#jev-collapse-all:hover { background: var(--taupe); }
+button:focus-visible,
+input:focus-visible,
+summary:focus-visible {
+  outline: var(--focus);
+  outline-offset: 3px;
+}
+#jev-filter-empty {
+  margin: 0 0 16px;
+  color: var(--graphite);
+}
+.case {
+  background: var(--taupe);
+  border-radius: 20px;
+  margin: 0 0 12px;
+  padding: 16px 24px 18px;
+}
+.case[open] {
+  background: var(--eggshell);
+  box-shadow: var(--shadow-whisper);
+}
+summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  cursor: pointer;
+  list-style: none;
+}
+summary::-webkit-details-marker { display: none; }
+summary::after {
+  content: "";
+  width: 7px;
+  height: 7px;
+  margin-left: auto;
+  border-right: 1.5px solid var(--ink);
+  border-bottom: 1.5px solid var(--ink);
+  transform: rotate(45deg) translateY(-2px);
+  flex: none;
+}
+.case[open] summary::after { transform: rotate(-135deg) translateY(-1px); }
+.tc-name { font-weight: 500; font-size: 16px; letter-spacing: 0.16px; }
+.tc-path {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.69;
+  letter-spacing: 0;
+  color: var(--smoke);
+  overflow-wrap: anywhere;
+}
+.tc-latency {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.69;
+  letter-spacing: 0;
+  color: var(--graphite);
+  font-variant-numeric: tabular-nums;
+}
+.tc-body { margin-top: 8px; }
+.tc-body > .meta-row { margin-top: 14px; }
+.findings, .evidence ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.findings li, .evidence li {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--stone);
+}
+.findings li:last-child, .evidence li:last-child { border-bottom: 0; }
+.evidence {
+  margin-top: 28px;
+  padding: 20px 24px;
+  background: var(--taupe);
+  border-radius: 16px;
+}
+.evidence strong { font-weight: 500; }
+.fragment-notice {
+  margin: 12px 0 0;
+  color: var(--smoke);
+  font-size: 14px;
+  letter-spacing: 0.14px;
+}
+footer {
+  margin-top: 96px;
+  padding-top: 24px;
+  border-top: 1px solid var(--stone);
+  color: var(--smoke);
+  font-size: 14px;
+  letter-spacing: 0.14px;
+}
+footer p { margin: 0; max-width: 62ch; }
+@media (max-width: 800px) {
+  .page { padding: 32px 20px 64px; }
+  h1 { font-size: 32px; letter-spacing: -0.64px; line-height: 1.13; }
+  .mast {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "copy"
+      "sphere"
+      "ledger"
+      "status"
+      "meta";
+    row-gap: 24px;
+  }
+  .sphere { justify-self: start; width: 140px; height: 140px; }
+  .meta { grid-template-columns: 1fr; }
+  .figures { grid-template-columns: 1fr 1fr; }
+  .figure-value { font-size: 22px; letter-spacing: -0.44px; line-height: 1.15; }
+  .noul th.noul-name { max-width: 9rem; }
+  .banner, .summary-list { padding-right: 20px; }
+  .summary-list { padding-left: 20px; }
+  .banner { padding-left: 48px; }
+}
+@media print {
+  .sphere-core, .mast-gaps-num, .ledger-seg, .badge::before, .banner { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .case { break-inside: avoid; }
+}
 `;
 
 /**
@@ -487,14 +1179,18 @@ footer { margin-top: 2rem; color: var(--muted); font-size: 0.8rem; }
 const PAGE_SCRIPT = `
 (function () {
   var filterInput = document.getElementById('jev-filter');
+  var emptyNote = document.getElementById('jev-filter-empty');
   var detailsEls = Array.prototype.slice.call(document.querySelectorAll('#jev-classifications details'));
   function applyFilter() {
     var needle = (filterInput && filterInput.value ? filterInput.value : '').toLowerCase();
+    var shown = 0;
     detailsEls.forEach(function (element) {
       var text = element.textContent ? element.textContent.toLowerCase() : '';
       var visible = needle.length === 0 || text.indexOf(needle) !== -1;
       element.style.display = visible ? '' : 'none';
+      if (visible) shown += 1;
     });
+    if (emptyNote) emptyNote.hidden = shown !== 0;
   }
   if (filterInput) filterInput.addEventListener('input', applyFilter);
   var expandAll = document.getElementById('jev-expand-all');
@@ -517,6 +1213,7 @@ export function renderAuditReportHtml(report: AuditReport): string {
     '<html lang="en">',
     renderHead(report),
     '<body>',
+    '<main class="page">',
     renderHeader(report),
     renderIncompleteBanner(report),
     renderResumeNote(report),
@@ -526,6 +1223,7 @@ export function renderAuditReportHtml(report: AuditReport): string {
     renderDiagnosticsSection(report),
     renderClassificationsSection(report),
     renderFooter(report),
+    '</main>',
     `<script type="application/json" id="jev-report-data">${reportJson}</script>`,
     `<script>${PAGE_SCRIPT}</script>`,
     '</body>',

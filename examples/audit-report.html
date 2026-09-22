@@ -1,0 +1,844 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jev test audit report — examples/billing-service</title>
+<style>
+:root {
+  color-scheme: light;
+  --eggshell: #fdfcfc;
+  --taupe: #f5f3f1;
+  --stone: #ebe8e4;
+  --ink: #000000;
+  --graphite: #44403b;
+  --smoke: #777169;
+  --ash: #a59f97;
+  --violet: #0447ff;
+  --ember: #ff4704;
+  --line: #e5e5e5;
+  --font-display: Waldenburg, Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-text: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
+  --shadow-whisper: rgba(0, 0, 0, 0.4) 0px 0px 1px 0px, rgba(0, 0, 0, 0.04) 0px 1px 1px 0px, rgba(0, 0, 0, 0.04) 0px 2px 4px 0px;
+  --focus: 2px solid var(--ink);
+}
+* { box-sizing: border-box; }
+html { scrollbar-color: var(--stone) var(--eggshell); }
+::selection { background: var(--stone); color: var(--ink); }
+body {
+  margin: 0;
+  background: var(--eggshell);
+  color: var(--ink);
+  font-family: var(--font-text);
+  font-weight: 400;
+  font-size: 16px;
+  line-height: 1.5;
+  letter-spacing: 0.16px;
+}
+.page {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 64px 64px 96px;
+}
+h1, h2, h3, h4 { font-weight: 300; margin: 0; text-wrap: balance; }
+h1 {
+  font-family: var(--font-display);
+  font-size: 48px;
+  line-height: 1.08;
+  letter-spacing: -0.96px;
+  max-width: 11em;
+}
+h2 {
+  font-family: var(--font-display);
+  font-size: 32px;
+  line-height: 1.13;
+  letter-spacing: -0.64px;
+  margin-bottom: 20px;
+}
+h3 {
+  font-family: var(--font-text);
+  font-size: 20px;
+  font-weight: 500;
+  line-height: 1.35;
+  margin: 36px 0 12px;
+}
+h4 {
+  font-family: var(--font-text);
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 0.14px;
+  line-height: 1.4;
+  margin: 28px 0 10px;
+  color: var(--graphite);
+}
+p { margin: 0 0 16px; }
+.mast {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 200px;
+  grid-template-areas:
+    "copy sphere"
+    "ledger ledger"
+    "status status"
+    "meta meta";
+  column-gap: 48px;
+  row-gap: 28px;
+  align-items: center;
+  padding-bottom: 8px;
+}
+.mast-copy { grid-area: copy; }
+.mast-gaps {
+  margin: 16px 0 0;
+  font-size: 20px;
+  font-weight: 500;
+  letter-spacing: 0.2px;
+}
+.mast-gaps-num { font-variant-numeric: tabular-nums; }
+.mast-gaps-alarm { color: #ff4704; }
+.mast-gaps-wear { color: #44403b; }
+.mast-gaps-review { color: #0447ff; }
+.disclosure {
+  margin: 16px 0 0;
+  max-width: 42rem;
+  color: var(--smoke);
+  font-size: 16px;
+  line-height: 1.5;
+  letter-spacing: 0.16px;
+}
+.sphere {
+  grid-area: sphere;
+  justify-self: end;
+  width: 200px;
+  height: 200px;
+  position: relative;
+}
+.sphere-core {
+  position: absolute;
+  inset: -8%;
+  border-radius: 9999px;
+  filter: blur(10px);
+}
+.sphere-quiet .sphere-core {
+  background:
+    radial-gradient(circle at 40% 36%, var(--eggshell) 0%, rgba(253, 252, 252, 0) 28%),
+    radial-gradient(circle at 50% 50%, var(--stone) 0%, rgba(235, 232, 228, 0.35) 46%, rgba(253, 252, 252, 0) 72%);
+}
+.sphere-wear .sphere-core {
+  background:
+    radial-gradient(circle at 36% 34%, var(--ember) 0%, rgba(255, 71, 4, 0) 46%),
+    radial-gradient(circle at 62% 66%, var(--stone) 0%, rgba(253, 252, 252, 0) 68%);
+}
+.sphere-review .sphere-core {
+  background:
+    radial-gradient(circle at 34% 32%, var(--eggshell) 0%, rgba(253, 252, 252, 0) 18%),
+    radial-gradient(circle at 46% 42%, var(--violet) 0%, rgba(4, 71, 255, 0.45) 32%, rgba(4, 71, 255, 0) 62%),
+    radial-gradient(circle at 68% 70%, var(--stone) 0%, rgba(235, 232, 228, 0) 52%);
+}
+.sphere-alarm .sphere-core {
+  background:
+    radial-gradient(circle at 32% 30%, var(--ember) 0%, rgba(255, 71, 4, 0.45) 28%, rgba(255, 71, 4, 0) 56%),
+    radial-gradient(circle at 70% 66%, var(--violet) 0%, rgba(4, 71, 255, 0.55) 30%, rgba(4, 71, 255, 0) 60%),
+    radial-gradient(circle at 50% 78%, var(--taupe) 0%, rgba(245, 243, 241, 0) 44%);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .sphere-wear .sphere-core,
+  .sphere-review .sphere-core,
+  .sphere-alarm .sphere-core {
+    animation: sphere-drift 22s ease-in-out infinite alternate;
+  }
+}
+@keyframes sphere-drift {
+  from { transform: translate3d(-3%, -2%, 0) scale(1.02); }
+  to { transform: translate3d(3%, 2%, 0) scale(1.08); }
+}
+.ledger {
+  grid-area: ledger;
+  display: flex;
+  height: 12px;
+  border-radius: 9999px;
+  overflow: hidden;
+  background: var(--taupe);
+  box-shadow: inset 0 0 0 1px var(--stone);
+}
+.ledger-seg { flex-basis: 0; min-width: 4px; }
+.ledger-misleading { background: #ff4704; }
+.ledger-weak { background: #44403b; }
+.ledger-needs-review { background: #0447ff; }
+.ledger-healthy { background: #ebe8e4; }
+.status-summary {
+  grid-area: status;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+}
+.stat-count {
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+.status-misleading .stat-count { color: #ff4704; }
+.status-weak .stat-count { color: #44403b; }
+.status-needs-review .stat-count { color: #0447ff; }
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px 6px 10px;
+  border-radius: 9999px;
+  border: 1px solid var(--line);
+  background: var(--eggshell);
+  color: var(--ink);
+  font-family: var(--font-text);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.2;
+  letter-spacing: 0.14px;
+}
+.badge::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 9999px;
+  flex: none;
+  background: var(--stone);
+}
+.status-misleading::before { background: #ff4704; }
+.status-weak::before { background: #44403b; }
+.status-needs-review::before { background: #0447ff; }
+.status-healthy::before { background: #ebe8e4; box-shadow: inset 0 0 0 1px #d9d3cc; }
+.badge-dormant::before { background: var(--stone); box-shadow: none; }
+.badge-cache-cached::before { background: var(--ash); }
+.badge-cache-fresh::before { background: var(--ink); }
+.meta {
+  grid-area: meta;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 20px 32px;
+  margin: 8px 0 0;
+  padding-top: 28px;
+  border-top: 1px solid var(--stone);
+}
+.meta-row { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.meta-label {
+  color: var(--smoke);
+  font-size: 12px;
+  line-height: 1.4;
+  letter-spacing: 0.01em;
+}
+.meta-value {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.69;
+  letter-spacing: 0;
+  overflow-wrap: anywhere;
+}
+.banner {
+  border-radius: 20px;
+  padding: 28px 32px 28px 56px;
+  margin: 28px 0 0;
+  background: var(--taupe);
+  color: var(--ink);
+}
+.banner-incomplete {
+  background:
+    radial-gradient(circle at 32px 38px, #ff4704 0 5px, transparent 5.5px),
+    var(--taupe);
+}
+.banner-resume {
+  background:
+    radial-gradient(circle at 32px 38px, #0447ff 0 5px, transparent 5.5px),
+    var(--taupe);
+}
+.banner-not-evaluated {
+  background:
+    radial-gradient(circle at 32px 42px, #ff4704 0 5px, transparent 5.5px),
+    var(--taupe);
+}
+section.banner { margin-top: 72px; }
+.banner strong { font-weight: 500; }
+.banner p:last-child { margin-bottom: 0; }
+section { margin-top: 72px; }
+section > p { max-width: 68ch; color: var(--graphite); }
+.figures {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 28px 32px;
+  margin: 8px 0 8px;
+}
+.figure { min-width: 0; }
+.figure-value {
+  display: block;
+  font-family: var(--font-display);
+  font-weight: 300;
+  font-size: 36px;
+  line-height: 1.17;
+  letter-spacing: -0.72px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.figure-label {
+  display: block;
+  margin-top: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 0.14px;
+}
+.figure-note {
+  display: block;
+  margin-top: 4px;
+  color: var(--smoke);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.chart-note { margin-bottom: 8px; }
+.noul {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: separate;
+  border-spacing: 8px 8px;
+  margin: 0 0 28px;
+}
+.noul th, .noul td {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  vertical-align: middle;
+}
+.noul thead th {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--graphite);
+  text-align: center;
+  padding: 0 4px 4px;
+}
+.noul-key {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 12px;
+}
+.noul-key .cell { min-width: 0; font-family: var(--font-text); font-size: 12px; letter-spacing: 0.12px; }
+.noul-test { text-align: left; }
+.noul th.noul-name {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--eggshell);
+  text-align: left;
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 0.14px;
+  color: var(--ink);
+  padding-right: 16px;
+  max-width: 16rem;
+}
+.noul-path {
+  display: block;
+  margin-top: 2px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.4;
+  font-weight: 400;
+  letter-spacing: 0;
+  color: var(--smoke);
+}
+.cell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 4.6rem;
+  padding: 7px 10px;
+  border-radius: 9999px;
+  background: var(--taupe);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.2;
+  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+}
+.cell::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  flex: none;
+  background: var(--ink);
+}
+.cell-misleading::before { background: #ff4704; }
+.cell-weak::before { background: #44403b; }
+.cell-acceptable::before { background: transparent; box-shadow: inset 0 0 0 1.5px #000000; }
+.cell-strong::before { background: #000000; }
+.cell-review::before { background: #0447ff; }
+.cell-na { color: var(--smoke); }
+.cell-na::before { background: transparent; box-shadow: inset 0 0 0 1px var(--smoke); }
+.cell-empty { color: var(--smoke); }
+.cell-empty::before { background: transparent; }
+.omitted { color: var(--graphite); }
+.summary-list {
+  list-style: none;
+  margin: 0;
+  padding: 8px 32px;
+  background: var(--taupe);
+  border-radius: 20px;
+}
+.summary-list li {
+  padding: 16px 0;
+  border-bottom: 1px solid var(--stone);
+  font-size: 16px;
+  letter-spacing: 0.16px;
+}
+.summary-list li:last-child { border-bottom: 0; }
+.table-wrap { overflow-x: auto; margin: 8px 0 8px; }
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 14px;
+  line-height: 1.5;
+  letter-spacing: 0.14px;
+}
+th, td {
+  border: 0;
+  border-bottom: 1px solid var(--stone);
+  padding: 12px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+th {
+  font-weight: 500;
+  font-size: 12px;
+  color: var(--graphite);
+  background: transparent;
+}
+tr:last-child td { border-bottom: 0; }
+.dimensions td:nth-child(5),
+.dimensions td:nth-child(6),
+.dimensions td:nth-child(8) {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.69;
+  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+}
+.sev { font-weight: 500; }
+.sev-error {
+  background-image: radial-gradient(circle, #ff4704 0 4px, transparent 4.5px);
+  background-repeat: no-repeat;
+  background-position: left 0.45em;
+  padding-left: 22px;
+}
+.sev-warning {
+  background-image: radial-gradient(circle, #44403b 0 4px, transparent 4.5px);
+  background-repeat: no-repeat;
+  background-position: left 0.45em;
+  padding-left: 22px;
+}
+.toolbar {
+  display: flex;
+  gap: 8px;
+  margin: 0 0 16px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.toolbar input {
+  flex: 1 1 16rem;
+  min-width: 0;
+  padding: 10px 14px;
+  border-radius: 4px;
+  border: 1px solid var(--stone);
+  background: var(--eggshell);
+  color: var(--ink);
+  font: 400 14px/1.5 var(--font-text);
+  letter-spacing: 0.14px;
+  caret-color: var(--ink);
+}
+.toolbar input::placeholder { color: var(--smoke); }
+.toolbar button {
+  font: 500 14px/1.2 var(--font-text);
+  letter-spacing: 0.14px;
+  border-radius: 9999px;
+  padding: 10px 16px;
+  border: 1px solid var(--line);
+  cursor: pointer;
+}
+#jev-expand-all { background: var(--ink); color: var(--eggshell); }
+#jev-collapse-all { background: var(--eggshell); color: var(--ink); }
+#jev-expand-all:hover { background: var(--graphite); }
+#jev-collapse-all:hover { background: var(--taupe); }
+button:focus-visible,
+input:focus-visible,
+summary:focus-visible {
+  outline: var(--focus);
+  outline-offset: 3px;
+}
+#jev-filter-empty {
+  margin: 0 0 16px;
+  color: var(--graphite);
+}
+.case {
+  background: var(--taupe);
+  border-radius: 20px;
+  margin: 0 0 12px;
+  padding: 16px 24px 18px;
+}
+.case[open] {
+  background: var(--eggshell);
+  box-shadow: var(--shadow-whisper);
+}
+summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  cursor: pointer;
+  list-style: none;
+}
+summary::-webkit-details-marker { display: none; }
+summary::after {
+  content: "";
+  width: 7px;
+  height: 7px;
+  margin-left: auto;
+  border-right: 1.5px solid var(--ink);
+  border-bottom: 1.5px solid var(--ink);
+  transform: rotate(45deg) translateY(-2px);
+  flex: none;
+}
+.case[open] summary::after { transform: rotate(-135deg) translateY(-1px); }
+.tc-name { font-weight: 500; font-size: 16px; letter-spacing: 0.16px; }
+.tc-path {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.69;
+  letter-spacing: 0;
+  color: var(--smoke);
+  overflow-wrap: anywhere;
+}
+.tc-latency {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.69;
+  letter-spacing: 0;
+  color: var(--graphite);
+  font-variant-numeric: tabular-nums;
+}
+.tc-body { margin-top: 8px; }
+.tc-body > .meta-row { margin-top: 14px; }
+.findings, .evidence ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.findings li, .evidence li {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--stone);
+}
+.findings li:last-child, .evidence li:last-child { border-bottom: 0; }
+.evidence {
+  margin-top: 28px;
+  padding: 20px 24px;
+  background: var(--taupe);
+  border-radius: 16px;
+}
+.evidence strong { font-weight: 500; }
+.fragment-notice {
+  margin: 12px 0 0;
+  color: var(--smoke);
+  font-size: 14px;
+  letter-spacing: 0.14px;
+}
+footer {
+  margin-top: 96px;
+  padding-top: 24px;
+  border-top: 1px solid var(--stone);
+  color: var(--smoke);
+  font-size: 14px;
+  letter-spacing: 0.14px;
+}
+footer p { margin: 0; max-width: 62ch; }
+@media (max-width: 800px) {
+  .page { padding: 32px 20px 64px; }
+  h1 { font-size: 32px; letter-spacing: -0.64px; line-height: 1.13; }
+  .mast {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "copy"
+      "sphere"
+      "ledger"
+      "status"
+      "meta";
+    row-gap: 24px;
+  }
+  .sphere { justify-self: start; width: 140px; height: 140px; }
+  .meta { grid-template-columns: 1fr; }
+  .figures { grid-template-columns: 1fr 1fr; }
+  .figure-value { font-size: 22px; letter-spacing: -0.44px; line-height: 1.15; }
+  .noul th.noul-name { max-width: 9rem; }
+  .banner, .summary-list { padding-right: 20px; }
+  .summary-list { padding-left: 20px; }
+  .banner { padding-left: 48px; }
+}
+@media print {
+  .sphere-core, .mast-gaps-num, .ledger-seg, .badge::before, .banner { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .case { break-inside: avoid; }
+}
+</style>
+</head>
+<body>
+<main class="page">
+<header class="mast">
+<div class="mast-copy">
+<h1>Jev test audit report</h1>
+<p class="mast-gaps"><span class="mast-gaps-num mast-gaps-alarm">3</span> tests need a change</p>
+<p class="disclosure">This tool never executed the audited repository’s code. Classification thresholds are provisional and uncalibrated — see README.md; nothing here is a claim of validated accuracy.</p>
+</div>
+<div class="sphere sphere-alarm" aria-hidden="true"><span class="sphere-core"></span></div>
+<div class="ledger" aria-hidden="true"><span class="ledger-seg ledger-misleading" style="flex-grow:1"></span><span class="ledger-seg ledger-weak" style="flex-grow:1"></span><span class="ledger-seg ledger-needs-review" style="flex-grow:1"></span><span class="ledger-seg ledger-healthy" style="flex-grow:2"></span></div>
+<div class="status-summary">
+<span class="badge status-misleading">Misleading<span class="stat-count">1</span></span>
+<span class="badge status-weak">Weak<span class="stat-count">1</span></span>
+<span class="badge status-needs-review">Needs review<span class="stat-count">1</span></span>
+<span class="badge status-healthy">Healthy<span class="stat-count">2</span></span>
+</div>
+<div class="meta">
+<div class="meta-row"><span class="meta-label">Root</span><span class="meta-value">examples/billing-service</span></div>
+<div class="meta-row"><span class="meta-label">Run id</span><span class="meta-value">run:v1:example</span></div>
+<div class="meta-row"><span class="meta-label">Report version</span><span class="meta-value">1</span></div>
+<div class="meta-row"><span class="meta-label">Model requested</span><span class="meta-value">jev-1.13.0</span></div>
+<div class="meta-row"><span class="meta-label">Model responded</span><span class="meta-value">jev-1.13.0</span></div>
+<div class="meta-row"><span class="meta-label">Store schema / rubric / policy versions</span><span class="meta-value">3 / 2 / 2</span></div>
+</div>
+</header>
+
+
+<section id="jev-summary">
+<h2>Summary</h2>
+<div class="figures">
+<div class="figure"><span class="figure-value">6</span><span class="figure-label">Tests</span><span class="figure-note">discovered</span></div>
+<div class="figure"><span class="figure-value">4</span><span class="figure-label">Jev calls</span><span class="figure-note">fresh, billed</span></div>
+<div class="figure"><span class="figure-value">56</span><span class="figure-label">Questions</span><span class="figure-note">14 per fresh call</span></div>
+<div class="figure"><span class="figure-value">$0.00077364</span><span class="figure-label">Cost</span><span class="figure-note">$0.042 / 1M input tokens</span></div>
+</div>
+<h3>Noul matrix</h3>
+<p class="chart-note">Applicability of each dimension, from 0 to 1, for tests that need a change. The mark is the quality level.</p>
+<p class="noul-key"><span class="cell cell-misleading">Misleading</span><span class="cell cell-weak">Weak</span><span class="cell cell-acceptable">Acceptable</span><span class="cell cell-strong">Strong</span><span class="cell cell-review">Needs review</span><span class="cell cell-na">Not applicable</span></p>
+<div class="table-wrap">
+<table class="noul">
+<thead><tr><th class="noul-test"></th><th title="Falsifiability">Fals.</th><th title="Behavioral focus">Behav.</th><th title="Refactor resistance">Refac.</th><th title="Assertion strength">Assert.</th><th title="Test-double quality">Double</th><th title="Determinism and isolation">Determ.</th><th title="Diagnostic quality">Diagn.</th></tr></thead>
+<tbody><tr><th scope="row" class="noul-name">never double charges<span class="noul-path">src/billing.test.ts</span></th><td><span class="cell cell-na" title="Not applicable">0.22</span></td><td><span class="cell cell-weak" title="weak">0.91</span></td><td><span class="cell cell-acceptable" title="acceptable">0.84</span></td><td><span class="cell cell-na" title="Not applicable">0.18</span></td><td><span class="cell cell-weak" title="weak">0.77</span></td><td><span class="cell cell-acceptable" title="acceptable">0.63</span></td><td><span class="cell cell-na" title="Not applicable">0.41</span></td></tr>
+<tr><th scope="row" class="noul-name">formats the invoice total<span class="noul-path">src/invoice.test.ts</span></th><td><span class="cell cell-misleading" title="misleading">0.58</span></td><td><span class="cell cell-weak" title="weak">0.86</span></td><td><span class="cell cell-acceptable" title="acceptable">0.93</span></td><td><span class="cell cell-weak" title="weak">0.71</span></td><td><span class="cell cell-weak" title="weak">0.66</span></td><td><span class="cell cell-strong" title="strong">0.97</span></td><td><span class="cell cell-na" title="Not applicable">0.35</span></td></tr>
+<tr><th scope="row" class="noul-name">retries a declined charge<span class="noul-path">src/billing.test.ts</span></th><td><span class="cell cell-weak" title="weak">0.81</span></td><td><span class="cell cell-weak" title="weak">0.74</span></td><td><span class="cell cell-acceptable" title="acceptable">0.88</span></td><td><span class="cell cell-weak" title="weak">0.69</span></td><td><span class="cell cell-review" title="Needs review">0.52</span></td><td><span class="cell cell-strong" title="strong">0.95</span></td><td><span class="cell cell-weak" title="weak">0.80</span></td></tr></tbody>
+</table>
+</div>
+<ul class="summary-list">
+<li>Cached: 1</li>
+<li>Failed: 1</li>
+<li>Output tokens: 720, not billed</li>
+<li>Latency: 4 test case(s) measured — total 3360ms, mean 840ms, min 410ms, max 1280ms.</li>
+</ul>
+</section>
+<section id="jev-not-evaluated" class="banner banner-not-evaluated">
+<h2>Not evaluated (dispatched, but the request failed) — 1</h2>
+<p>These test cases were dispatched but never produced a judgment; see Diagnostics below for why.</p>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Path</th><th>Name</th></tr></thead>
+<tbody>
+<tr><td>src/refund.test.ts</td><td>rejects a negative amount</td></tr>
+</tbody></table>
+</div>
+</section>
+<section id="jev-discovery">
+<h2>Discovery</h2>
+<p>2 file(s) discovered, 6 test case(s), 1 excluded, 1 unattributable-framework file(s).</p>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Path</th><th>Framework</th><th>Test cases</th><th>Dynamic metadata</th><th>Evidence bundles</th></tr></thead>
+<tbody>
+<tr><td>src/billing.test.ts</td><td>vitest</td><td>4</td><td>0</td><td>4</td></tr>
+<tr><td>src/invoice.test.ts</td><td>jest</td><td>2</td><td>1</td><td>2</td></tr>
+</tbody></table>
+</div>
+<h3>Excluded</h3>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Path</th><th>Reason</th></tr></thead>
+<tbody>
+<tr><td>e2e/checkout.spec.ts</td><td>unsupported-framework</td></tr>
+</tbody></table>
+</div>
+</section>
+<section id="jev-diagnostics">
+<h2>Diagnostics</h2>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Severity</th><th>Code</th><th>Path</th><th>Message</th></tr></thead>
+<tbody>
+<tr><td class="sev sev-error">error</td><td>evaluation-failed</td><td>src/refund.test.ts</td><td>Provider timed out while judging rejects a negative amount.</td></tr>
+</tbody></table>
+</div>
+</section>
+<section id="jev-classifications">
+<h2>Test cases</h2>
+<p class="omitted">2 healthy test(s) are not listed.</p>
+<div class="toolbar">
+<input type="text" id="jev-filter" placeholder="Filter by name, path, or status…" aria-label="Filter test cases">
+<button type="button" id="jev-expand-all">Expand all</button>
+<button type="button" id="jev-collapse-all">Collapse all</button>
+</div>
+<p id="jev-filter-empty" hidden>No test case matches that filter.</p>
+<details id="jev-tc-0" class="case">
+<summary>
+<span class="badge status-misleading">Misleading</span>
+<span class="badge badge-cache-fresh">fresh</span>
+<span class="tc-latency">— 840ms</span>
+<span class="tc-name">never double charges</span>
+<span class="tc-path">src/billing.test.ts</span>
+</summary>
+<div class="tc-body">
+<div class="meta-row"><span class="meta-label">Model requested / responded / matches pin</span><span class="meta-value">jev-1.13.0 / jev-1.13.0 / yes</span></div>
+<div class="meta-row"><span class="meta-label">Policy / rubric version</span><span class="meta-value">2 / 2</span></div>
+<div class="meta-row"><span class="meta-label">Usage</span><span class="meta-value">4605 input token(s), 180 output token(s)</span></div>
+<h4>Dimensions</h4>
+<div class="table-wrap">
+<table class="dimensions">
+<thead><tr><th>Dimension</th><th>Status</th><th>Applicability</th><th>Level</th><th>Score</th><th>Confidence</th><th>Reason</th><th>Probabilities (0/1/2/3)</th></tr></thead>
+<tbody>
+<tr><td>Falsifiability</td><td>not-applicable</td><td>not applicable</td><td>—</td><td>—</td><td>—</td><td>—</td><td>0: 0.05, 1: 0.10, 2: 0.15, 3: 0.70</td></tr>
+<tr><td>Behavioral focus</td><td>judged</td><td>0.91</td><td>weak</td><td>1</td><td>0.80</td><td>—</td><td>0: 0.05, 1: 0.10, 2: 0.15, 3: 0.70</td></tr>
+<tr><td>Refactor resistance</td><td>judged</td><td>0.84</td><td>acceptable</td><td>2</td><td>0.80</td><td>—</td><td>0: 0.05, 1: 0.10, 2: 0.15, 3: 0.70</td></tr>
+<tr><td>Assertion strength</td><td>not-applicable</td><td>not applicable</td><td>—</td><td>—</td><td>—</td><td>—</td><td>0: 0.05, 1: 0.10, 2: 0.15, 3: 0.70</td></tr>
+<tr><td>Test-double quality</td><td>judged</td><td>0.77</td><td>weak</td><td>1</td><td>0.80</td><td>—</td><td>0: 0.05, 1: 0.10, 2: 0.15, 3: 0.70</td></tr>
+<tr><td>Determinism and isolation</td><td>judged</td><td>0.63</td><td>acceptable</td><td>2</td><td>0.80</td><td>—</td><td>0: 0.05, 1: 0.10, 2: 0.15, 3: 0.70</td></tr>
+<tr><td>Diagnostic quality</td><td>not-applicable</td><td>not applicable</td><td>—</td><td>—</td><td>—</td><td>—</td><td>0: 0.05, 1: 0.10, 2: 0.15, 3: 0.70</td></tr>
+</tbody></table>
+</div>
+<h4>Findings</h4>
+<ul class="findings">
+<li>Falsifiability: misleading</li>
+</ul>
+<div class="evidence">
+<strong>Evidence provenance</strong>
+<ul>
+<li>Fragments: 2 (0 truncated)</li>
+
+
+
+</ul>
+<p class="fragment-notice">Fragment source content is never included in this report — only these provenance decisions and counts.</p>
+</div>
+</div>
+</details>
+<details id="jev-tc-1" class="case">
+<summary>
+<span class="badge status-weak">Weak</span>
+<span class="badge badge-cache-fresh">fresh</span>
+<span class="tc-latency">— 840ms</span>
+<span class="tc-name">formats the invoice total</span>
+<span class="tc-path">src/invoice.test.ts</span>
+</summary>
+<div class="tc-body">
+<div class="meta-row"><span class="meta-label">Model requested / responded / matches pin</span><span class="meta-value">jev-1.13.0 / jev-1.13.0 / yes</span></div>
+<div class="meta-row"><span class="meta-label">Policy / rubric version</span><span class="meta-value">2 / 2</span></div>
+<div class="meta-row"><span class="meta-label">Usage</span><span class="meta-value">4605 input token(s), 180 output token(s)</span></div>
+<h4>Dimensions</h4>
+<div class="table-wrap">
+<table class="dimensions">
+<thead><tr><th>Dimension</th><th>Status</th><th>Applicability</th><th>Level</th><th>Score</th><th>Confidence</th><th>Reason</th><th>Probabilities (0/1/2/3)</th></tr></thead>
+<tbody>
+<tr><td>Falsifiability</td><td>judged</td><td>0.58</td><td>misleading</td><td>0</td><td>0.80</td><td>—</td><td>0: 0.05, 1: 0.10, 2: 0.15, 3: 0.70</td></tr>
+<tr><td>Behavioral focus</td><td>judged</td><td>0.86</td><td>weak</td><td>1</td><td>0.80</td><td>—</td><td>0: 0.05, 1: 0.10, 2: 0.15, 3: 0.70</td></tr>
+<tr><td>Refactor resistance</td><td>judged</td><td>0.93</td><td>acceptable</td><td>2</td><td>0.80</td><td>—</td><td>0: 0.05, 1: 0.10, 2: 0.15, 3: 0.70</td></tr>
+<tr><td>Assertion strength</td><td>judged</td><td>0.71</td><td>weak</td><td>1</td><td>0.80</td><td>—</td><td>0: 0.05, 1: 0.10, 2: 0.15, 3: 0.70</td></tr>
+<tr><td>Test-double quality</td><td>judged</td><td>0.66</td><td>weak</td><td>1</td><td>0.80</td><td>—</td><td>0: 0.05, 1: 0.10, 2: 0.15, 3: 0.70</td></tr>
+<tr><td>Determinism and isolation</td><td>judged</td><td>0.97</td><td>strong</td><td>3</td><td>0.80</td><td>—</td><td>0: 0.05, 1: 0.10, 2: 0.15, 3: 0.70</td></tr>
+<tr><td>Diagnostic quality</td><td>not-applicable</td><td>not applicable</td><td>—</td><td>—</td><td>—</td><td>—</td><td>0: 0.05, 1: 0.10, 2: 0.15, 3: 0.70</td></tr>
+</tbody></table>
+</div>
+<h4>Findings</h4>
+<ul class="findings">
+<li>Falsifiability: weak</li>
+</ul>
+<div class="evidence">
+<strong>Evidence provenance</strong>
+<ul>
+<li>Fragments: 2 (0 truncated)</li>
+
+
+
+</ul>
+<p class="fragment-notice">Fragment source content is never included in this report — only these provenance decisions and counts.</p>
+</div>
+</div>
+</details>
+<details id="jev-tc-2" class="case">
+<summary>
+<span class="badge status-needs-review">Needs review</span>
+<span class="badge badge-cache-fresh">fresh</span>
+<span class="tc-latency">— 840ms</span>
+<span class="tc-name">retries a declined charge</span>
+<span class="tc-path">src/billing.test.ts</span>
+</summary>
+<div class="tc-body">
+<div class="meta-row"><span class="meta-label">Model requested / responded / matches pin</span><span class="meta-value">jev-1.13.0 / jev-1.13.0 / yes</span></div>
+<div class="meta-row"><span class="meta-label">Policy / rubric version</span><span class="meta-value">2 / 2</span></div>
+<div class="meta-row"><span class="meta-label">Usage</span><span class="meta-value">4605 input token(s), 180 output token(s)</span></div>
+<h4>Dimensions</h4>
+<div class="table-wrap">
+<table class="dimensions">
+<thead><tr><th>Dimension</th><th>Status</th><th>Applicability</th><th>Level</th><th>Score</th><th>Confidence</th><th>Reason</th><th>Probabilities (0/1/2/3)</th></tr></thead>
+<tbody>
+<tr><td>Falsifiability</td><td>judged</td><td>0.81</td><td>weak</td><td>1</td><td>0.80</td><td>—</td><td>0: 0.05, 1: 0.10, 2: 0.15, 3: 0.70</td></tr>
+<tr><td>Behavioral focus</td><td>judged</td><td>0.74</td><td>weak</td><td>1</td><td>0.80</td><td>—</td><td>0: 0.05, 1: 0.10, 2: 0.15, 3: 0.70</td></tr>
+<tr><td>Refactor resistance</td><td>judged</td><td>0.88</td><td>acceptable</td><td>2</td><td>0.80</td><td>—</td><td>0: 0.05, 1: 0.10, 2: 0.15, 3: 0.70</td></tr>
+<tr><td>Assertion strength</td><td>judged</td><td>0.69</td><td>weak</td><td>1</td><td>0.80</td><td>—</td><td>0: 0.05, 1: 0.10, 2: 0.15, 3: 0.70</td></tr>
+<tr><td>Test-double quality</td><td>needs-review</td><td>0.52</td><td>—</td><td>—</td><td>0.80</td><td>—</td><td>0: 0.05, 1: 0.10, 2: 0.15, 3: 0.70</td></tr>
+<tr><td>Determinism and isolation</td><td>judged</td><td>0.95</td><td>strong</td><td>3</td><td>0.80</td><td>—</td><td>0: 0.05, 1: 0.10, 2: 0.15, 3: 0.70</td></tr>
+<tr><td>Diagnostic quality</td><td>judged</td><td>0.80</td><td>weak</td><td>1</td><td>0.80</td><td>—</td><td>0: 0.05, 1: 0.10, 2: 0.15, 3: 0.70</td></tr>
+</tbody></table>
+</div>
+<h4>Findings</h4>
+<ul class="findings">
+<li>Falsifiability: weak</li>
+</ul>
+<div class="evidence">
+<strong>Evidence provenance</strong>
+<ul>
+<li>Fragments: 2 (0 truncated)</li>
+
+
+
+</ul>
+<p class="fragment-notice">Fragment source content is never included in this report — only these provenance decisions and counts.</p>
+</div>
+</div>
+</details>
+</section>
+<footer><p>Generated by jev-test-auditor from report version 1. Reporting-only: nothing here executed the audited repository’s code.</p></footer>
+</main>
+<script type="application/json" id="jev-report-data">{"reportVersion":1,"rootDir":"examples/billing-service","runId":"run:v1:example","reportingOnly":true,"complete":true,"versions":{"storeSchema":3,"rubric":2,"policy":2},"modelRequested":"jev-1.13.0","discovery":{"files":[{"path":"src/billing.test.ts","framework":"vitest","testCaseCount":4,"dynamicMetadataCount":0,"evidenceBundleCount":4},{"path":"src/invoice.test.ts","framework":"jest","testCaseCount":2,"dynamicMetadataCount":1,"evidenceBundleCount":2}],"excluded":[{"path":"e2e/checkout.spec.ts","reason":"unsupported-framework"}],"totals":{"files":2,"excluded":1,"testCases":6,"dynamicMetadata":1,"diagnostics":1,"unsupportedFrameworkFiles":1,"evidenceBundles":6,"evidenceFragments":12,"evidenceTruncatedFragments":0,"evidenceOmitted":0,"evidenceDenied":0,"evidenceUnresolved":0}},"totals":{"evaluated":4,"cached":1,"failed":1,"skipped":{"total":0,"byReason":{"skip":0,"todo":0,"evidence-unavailable":0}},"usage":{"inputTokens":18420,"outputTokens":720},"statusCounts":{"healthy":2,"weak":1,"misleading":1,"needs-review":1},"respondedModel":"jev-1.13.0","modelMismatches":0},"latency":{"measuredTestCases":4,"totalMs":3360,"meanMs":840,"minMs":410,"maxMs":1280},"cacheStatus":[{"testCaseId":"tc:v1:failed","repositoryRelativePath":"src/refund.test.ts","name":"rejects a negative amount","status":"not-evaluated"}],"classifications":[{"testCaseId":"tc:v1:never double charges","repositoryRelativePath":"src/billing.test.ts","name":"never double charges","status":"misleading","dimensions":[{"dimensionId":"falsifiability","dimensionLabel":"Falsifiability","applicable":false,"applicabilityProbability":0.22,"status":"not-applicable","probabilities":{"0":0.05,"1":0.1,"2":0.15,"3":0.7},"deficientMass":0.6,"acceptableMass":0.4,"criticalMass":0.4},{"dimensionId":"behavioral-focus","dimensionLabel":"Behavioral focus","applicable":true,"applicabilityProbability":0.91,"status":"judged","level":"weak","score":1,"confidence":0.8,"probabilities":{"0":0.05,"1":0.1,"2":0.15,"3":0.7},"deficientMass":0.6,"acceptableMass":0.4,"criticalMass":0.05},{"dimensionId":"refactor-resistance","dimensionLabel":"Refactor resistance","applicable":true,"applicabilityProbability":0.84,"status":"judged","level":"acceptable","score":2,"confidence":0.8,"probabilities":{"0":0.05,"1":0.1,"2":0.15,"3":0.7},"deficientMass":0.08,"acceptableMass":0.92,"criticalMass":0.05},{"dimensionId":"assertion-strength","dimensionLabel":"Assertion strength","applicable":false,"applicabilityProbability":0.18,"status":"not-applicable","probabilities":{"0":0.05,"1":0.1,"2":0.15,"3":0.7},"deficientMass":0.6,"acceptableMass":0.4,"criticalMass":0.4},{"dimensionId":"test-double-quality","dimensionLabel":"Test-double quality","applicable":true,"applicabilityProbability":0.77,"status":"judged","level":"weak","score":1,"confidence":0.8,"probabilities":{"0":0.05,"1":0.1,"2":0.15,"3":0.7},"deficientMass":0.6,"acceptableMass":0.4,"criticalMass":0.05},{"dimensionId":"determinism-isolation","dimensionLabel":"Determinism and isolation","applicable":true,"applicabilityProbability":0.63,"status":"judged","level":"acceptable","score":2,"confidence":0.8,"probabilities":{"0":0.05,"1":0.1,"2":0.15,"3":0.7},"deficientMass":0.08,"acceptableMass":0.92,"criticalMass":0.05},{"dimensionId":"diagnostic-quality","dimensionLabel":"Diagnostic quality","applicable":false,"applicabilityProbability":0.41,"status":"not-applicable","probabilities":{"0":0.05,"1":0.1,"2":0.15,"3":0.7},"deficientMass":0.6,"acceptableMass":0.4,"criticalMass":0.4}],"findings":[{"testCaseId":"tc:v1:never double charges","repositoryRelativePath":"src/billing.test.ts","name":"never double charges","dimensionId":"falsifiability","dimensionLabel":"Falsifiability","level":"misleading","score":0,"confidence":0.8,"applicabilityProbability":0.9,"status":"judged","probabilities":{"0":0.05,"1":0.1,"2":0.15,"3":0.7},"deficientMass":0.4,"acceptableMass":0.6,"criticalMass":0.1}],"policyVersion":2,"rubricVersion":2,"model":{"requested":"jev-1.13.0","responded":"jev-1.13.0","matchesPin":true},"usage":{"inputTokens":4605,"outputTokens":180},"cache":"fresh","latency":{"latencyMs":840,"attemptLatenciesMs":[840]},"evidence":{"fragments":2,"truncatedFragments":0,"denied":[],"unresolved":[],"omitted":[]}},{"testCaseId":"tc:v1:formats the invoice total","repositoryRelativePath":"src/invoice.test.ts","name":"formats the invoice total","status":"weak","dimensions":[{"dimensionId":"falsifiability","dimensionLabel":"Falsifiability","applicable":true,"applicabilityProbability":0.58,"status":"judged","level":"misleading","score":0,"confidence":0.8,"probabilities":{"0":0.05,"1":0.1,"2":0.15,"3":0.7},"deficientMass":0.6,"acceptableMass":0.4,"criticalMass":0.4},{"dimensionId":"behavioral-focus","dimensionLabel":"Behavioral focus","applicable":true,"applicabilityProbability":0.86,"status":"judged","level":"weak","score":1,"confidence":0.8,"probabilities":{"0":0.05,"1":0.1,"2":0.15,"3":0.7},"deficientMass":0.6,"acceptableMass":0.4,"criticalMass":0.05},{"dimensionId":"refactor-resistance","dimensionLabel":"Refactor resistance","applicable":true,"applicabilityProbability":0.93,"status":"judged","level":"acceptable","score":2,"confidence":0.8,"probabilities":{"0":0.05,"1":0.1,"2":0.15,"3":0.7},"deficientMass":0.08,"acceptableMass":0.92,"criticalMass":0.05},{"dimensionId":"assertion-strength","dimensionLabel":"Assertion strength","applicable":true,"applicabilityProbability":0.71,"status":"judged","level":"weak","score":1,"confidence":0.8,"probabilities":{"0":0.05,"1":0.1,"2":0.15,"3":0.7},"deficientMass":0.6,"acceptableMass":0.4,"criticalMass":0.05},{"dimensionId":"test-double-quality","dimensionLabel":"Test-double quality","applicable":true,"applicabilityProbability":0.66,"status":"judged","level":"weak","score":1,"confidence":0.8,"probabilities":{"0":0.05,"1":0.1,"2":0.15,"3":0.7},"deficientMass":0.6,"acceptableMass":0.4,"criticalMass":0.05},{"dimensionId":"determinism-isolation","dimensionLabel":"Determinism and isolation","applicable":true,"applicabilityProbability":0.97,"status":"judged","level":"strong","score":3,"confidence":0.8,"probabilities":{"0":0.05,"1":0.1,"2":0.15,"3":0.7},"deficientMass":0.08,"acceptableMass":0.92,"criticalMass":0.05},{"dimensionId":"diagnostic-quality","dimensionLabel":"Diagnostic quality","applicable":false,"applicabilityProbability":0.35,"status":"not-applicable","probabilities":{"0":0.05,"1":0.1,"2":0.15,"3":0.7},"deficientMass":0.6,"acceptableMass":0.4,"criticalMass":0.4}],"findings":[{"testCaseId":"tc:v1:formats the invoice total","repositoryRelativePath":"src/invoice.test.ts","name":"formats the invoice total","dimensionId":"falsifiability","dimensionLabel":"Falsifiability","level":"weak","score":0,"confidence":0.8,"applicabilityProbability":0.9,"status":"judged","probabilities":{"0":0.05,"1":0.1,"2":0.15,"3":0.7},"deficientMass":0.4,"acceptableMass":0.6,"criticalMass":0.1}],"policyVersion":2,"rubricVersion":2,"model":{"requested":"jev-1.13.0","responded":"jev-1.13.0","matchesPin":true},"usage":{"inputTokens":4605,"outputTokens":180},"cache":"fresh","latency":{"latencyMs":840,"attemptLatenciesMs":[840]},"evidence":{"fragments":2,"truncatedFragments":0,"denied":[],"unresolved":[],"omitted":[]}},{"testCaseId":"tc:v1:retries a declined charge","repositoryRelativePath":"src/billing.test.ts","name":"retries a declined charge","status":"needs-review","dimensions":[{"dimensionId":"falsifiability","dimensionLabel":"Falsifiability","applicable":true,"applicabilityProbability":0.81,"status":"judged","level":"weak","score":1,"confidence":0.8,"probabilities":{"0":0.05,"1":0.1,"2":0.15,"3":0.7},"deficientMass":0.6,"acceptableMass":0.4,"criticalMass":0.05},{"dimensionId":"behavioral-focus","dimensionLabel":"Behavioral focus","applicable":true,"applicabilityProbability":0.74,"status":"judged","level":"weak","score":1,"confidence":0.8,"probabilities":{"0":0.05,"1":0.1,"2":0.15,"3":0.7},"deficientMass":0.6,"acceptableMass":0.4,"criticalMass":0.05},{"dimensionId":"refactor-resistance","dimensionLabel":"Refactor resistance","applicable":true,"applicabilityProbability":0.88,"status":"judged","level":"acceptable","score":2,"confidence":0.8,"probabilities":{"0":0.05,"1":0.1,"2":0.15,"3":0.7},"deficientMass":0.08,"acceptableMass":0.92,"criticalMass":0.05},{"dimensionId":"assertion-strength","dimensionLabel":"Assertion strength","applicable":true,"applicabilityProbability":0.69,"status":"judged","level":"weak","score":1,"confidence":0.8,"probabilities":{"0":0.05,"1":0.1,"2":0.15,"3":0.7},"deficientMass":0.6,"acceptableMass":0.4,"criticalMass":0.05},{"dimensionId":"test-double-quality","dimensionLabel":"Test-double quality","applicable":true,"applicabilityProbability":0.52,"status":"needs-review","confidence":0.8,"probabilities":{"0":0.05,"1":0.1,"2":0.15,"3":0.7},"deficientMass":0.08,"acceptableMass":0.92,"criticalMass":0.05},{"dimensionId":"determinism-isolation","dimensionLabel":"Determinism and isolation","applicable":true,"applicabilityProbability":0.95,"status":"judged","level":"strong","score":3,"confidence":0.8,"probabilities":{"0":0.05,"1":0.1,"2":0.15,"3":0.7},"deficientMass":0.08,"acceptableMass":0.92,"criticalMass":0.05},{"dimensionId":"diagnostic-quality","dimensionLabel":"Diagnostic quality","applicable":true,"applicabilityProbability":0.8,"status":"judged","level":"weak","score":1,"confidence":0.8,"probabilities":{"0":0.05,"1":0.1,"2":0.15,"3":0.7},"deficientMass":0.6,"acceptableMass":0.4,"criticalMass":0.05}],"findings":[{"testCaseId":"tc:v1:retries a declined charge","repositoryRelativePath":"src/billing.test.ts","name":"retries a declined charge","dimensionId":"falsifiability","dimensionLabel":"Falsifiability","level":"weak","score":1,"confidence":0.8,"applicabilityProbability":0.9,"status":"judged","probabilities":{"0":0.05,"1":0.1,"2":0.15,"3":0.7},"deficientMass":0.4,"acceptableMass":0.6,"criticalMass":0.1}],"policyVersion":2,"rubricVersion":2,"model":{"requested":"jev-1.13.0","responded":"jev-1.13.0","matchesPin":true},"usage":{"inputTokens":4605,"outputTokens":180},"cache":"fresh","latency":{"latencyMs":840,"attemptLatenciesMs":[840]},"evidence":{"fragments":2,"truncatedFragments":0,"denied":[],"unresolved":[],"omitted":[]}},{"testCaseId":"tc:v1:charges the saved card","repositoryRelativePath":"src/billing.test.ts","name":"charges the saved card","status":"healthy","dimensions":[{"dimensionId":"falsifiability","dimensionLabel":"Falsifiability","applicable":true,"applicabilityProbability":0.96,"status":"judged","level":"weak","score":1,"confidence":0.8,"probabilities":{"0":0.05,"1":0.1,"2":0.15,"3":0.7},"deficientMass":0.6,"acceptableMass":0.4,"criticalMass":0.05},{"dimensionId":"behavioral-focus","dimensionLabel":"Behavioral focus","applicable":true,"applicabilityProbability":0.92,"status":"judged","level":"acceptable","score":2,"confidence":0.8,"probabilities":{"0":0.05,"1":0.1,"2":0.15,"3":0.7},"deficientMass":0.08,"acceptableMass":0.92,"criticalMass":0.05},{"dimensionId":"refactor-resistance","dimensionLabel":"Refactor resistance","applicable":true,"applicabilityProbability":0.98,"status":"judged","level":"strong","score":3,"confidence":0.8,"probabilities":{"0":0.05,"1":0.1,"2":0.15,"3":0.7},"deficientMass":0.08,"acceptableMass":0.92,"criticalMass":0.05},{"dimensionId":"assertion-strength","dimensionLabel":"Assertion strength","applicable":true,"applicabilityProbability":0.9,"status":"judged","level":"acceptable","score":2,"confidence":0.8,"probabilities":{"0":0.05,"1":0.1,"2":0.15,"3":0.7},"deficientMass":0.08,"acceptableMass":0.92,"criticalMass":0.05},{"dimensionId":"test-double-quality","dimensionLabel":"Test-double quality","applicable":true,"applicabilityProbability":0.87,"status":"judged","level":"acceptable","score":2,"confidence":0.8,"probabilities":{"0":0.05,"1":0.1,"2":0.15,"3":0.7},"deficientMass":0.08,"acceptableMass":0.92,"criticalMass":0.05},{"dimensionId":"determinism-isolation","dimensionLabel":"Determinism and isolation","applicable":true,"applicabilityProbability":0.99,"status":"judged","level":"strong","score":3,"confidence":0.8,"probabilities":{"0":0.05,"1":0.1,"2":0.15,"3":0.7},"deficientMass":0.08,"acceptableMass":0.92,"criticalMass":0.05},{"dimensionId":"diagnostic-quality","dimensionLabel":"Diagnostic quality","applicable":true,"applicabilityProbability":0.73,"status":"judged","level":"weak","score":1,"confidence":0.8,"probabilities":{"0":0.05,"1":0.1,"2":0.15,"3":0.7},"deficientMass":0.6,"acceptableMass":0.4,"criticalMass":0.05}],"findings":[],"policyVersion":2,"rubricVersion":2,"model":{"requested":"jev-1.13.0","responded":"jev-1.13.0","matchesPin":true},"usage":{"inputTokens":4100,"outputTokens":180},"cache":"cached","evidence":{"fragments":2,"truncatedFragments":0,"denied":[],"unresolved":[],"omitted":[]}},{"testCaseId":"tc:v1:records the ledger entry","repositoryRelativePath":"src/invoice.test.ts","name":"records the ledger entry","status":"healthy","dimensions":[{"dimensionId":"falsifiability","dimensionLabel":"Falsifiability","applicable":true,"applicabilityProbability":0.9,"status":"judged","level":"acceptable","score":2,"confidence":0.8,"probabilities":{"0":0.05,"1":0.1,"2":0.15,"3":0.7},"deficientMass":0.08,"acceptableMass":0.92,"criticalMass":0.05},{"dimensionId":"behavioral-focus","dimensionLabel":"Behavioral focus","applicable":true,"applicabilityProbability":0.85,"status":"judged","level":"acceptable","score":2,"confidence":0.8,"probabilities":{"0":0.05,"1":0.1,"2":0.15,"3":0.7},"deficientMass":0.08,"acceptableMass":0.92,"criticalMass":0.05},{"dimensionId":"refactor-resistance","dimensionLabel":"Refactor resistance","applicable":true,"applicabilityProbability":0.94,"status":"judged","level":"strong","score":3,"confidence":0.8,"probabilities":{"0":0.05,"1":0.1,"2":0.15,"3":0.7},"deficientMass":0.08,"acceptableMass":0.92,"criticalMass":0.05},{"dimensionId":"assertion-strength","dimensionLabel":"Assertion strength","applicable":true,"applicabilityProbability":0.97,"status":"judged","level":"strong","score":3,"confidence":0.8,"probabilities":{"0":0.05,"1":0.1,"2":0.15,"3":0.7},"deficientMass":0.08,"acceptableMass":0.92,"criticalMass":0.05},{"dimensionId":"test-double-quality","dimensionLabel":"Test-double quality","applicable":true,"applicabilityProbability":0.91,"status":"judged","level":"strong","score":3,"confidence":0.8,"probabilities":{"0":0.05,"1":0.1,"2":0.15,"3":0.7},"deficientMass":0.08,"acceptableMass":0.92,"criticalMass":0.05},{"dimensionId":"determinism-isolation","dimensionLabel":"Determinism and isolation","applicable":true,"applicabilityProbability":0.96,"status":"judged","level":"strong","score":3,"confidence":0.8,"probabilities":{"0":0.05,"1":0.1,"2":0.15,"3":0.7},"deficientMass":0.08,"acceptableMass":0.92,"criticalMass":0.05},{"dimensionId":"diagnostic-quality","dimensionLabel":"Diagnostic quality","applicable":true,"applicabilityProbability":0.88,"status":"judged","level":"acceptable","score":2,"confidence":0.8,"probabilities":{"0":0.05,"1":0.1,"2":0.15,"3":0.7},"deficientMass":0.08,"acceptableMass":0.92,"criticalMass":0.05}],"findings":[],"policyVersion":2,"rubricVersion":2,"model":{"requested":"jev-1.13.0","responded":"jev-1.13.0","matchesPin":true},"usage":{"inputTokens":4605,"outputTokens":180},"cache":"fresh","latency":{"latencyMs":840,"attemptLatenciesMs":[840]},"evidence":{"fragments":2,"truncatedFragments":0,"denied":[],"unresolved":[],"omitted":[]}}],"diagnostics":[{"code":"evaluation-failed","message":"Provider timed out while judging rejects a negative amount.","severity":"error","path":"src/refund.test.ts"}]}</script>
+<script>
+(function () {
+  var filterInput = document.getElementById('jev-filter');
+  var emptyNote = document.getElementById('jev-filter-empty');
+  var detailsEls = Array.prototype.slice.call(document.querySelectorAll('#jev-classifications details'));
+  function applyFilter() {
+    var needle = (filterInput && filterInput.value ? filterInput.value : '').toLowerCase();
+    var shown = 0;
+    detailsEls.forEach(function (element) {
+      var text = element.textContent ? element.textContent.toLowerCase() : '';
+      var visible = needle.length === 0 || text.indexOf(needle) !== -1;
+      element.style.display = visible ? '' : 'none';
+      if (visible) shown += 1;
+    });
+    if (emptyNote) emptyNote.hidden = shown !== 0;
+  }
+  if (filterInput) filterInput.addEventListener('input', applyFilter);
+  var expandAll = document.getElementById('jev-expand-all');
+  var collapseAll = document.getElementById('jev-collapse-all');
+  if (expandAll) expandAll.addEventListener('click', function () { detailsEls.forEach(function (element) { element.open = true; }); });
+  if (collapseAll) collapseAll.addEventListener('click', function () { detailsEls.forEach(function (element) { element.open = false; }); });
+})();
+</script>
+</body>
+</html>

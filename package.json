@@ -23,6 +23,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "vitest run",
+    "report:example": "UPDATE_REPORT_EXAMPLE=1 vitest run test/html-report-example.test.ts",
     "test:watch": "vitest"
   },
   "engines": {
