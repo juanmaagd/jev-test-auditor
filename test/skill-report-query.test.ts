@@ -448,19 +448,50 @@ describe('report-query.mjs: worklist', () => {
 // -------------------------------------------------------------------------------------------
 
 describe('report-query.mjs: file <path>', () => {
-  it('returns every judged test in that file with per-dimension level and status', () => {
+  it('--full returns every judged test in that file with per-dimension level and status', () => {
     const report = exampleAuditReport();
-    const result = run(['file', 'src/billing.test.ts', '-'], { input: JSON.stringify(report) });
+    const result = run(['file', 'src/billing.test.ts', '--full', '-'], { input: JSON.stringify(report) });
     expect(result.status).toBe(0);
     interface FileResult {
       readonly path: string;
+      readonly mode: string;
       readonly tests: Paginated<{ readonly name: string; readonly status: string; readonly dimensions: readonly { readonly dimensionId: string; readonly status: string; readonly level: string | undefined }[] }>;
     }
     const fileResult = parse<FileResult>(result.stdout);
     expect(fileResult.path).toBe('src/billing.test.ts');
+    expect(fileResult.mode).toBe('full');
     const expectedCount = report.classifications.filter((c) => c.repositoryRelativePath === 'src/billing.test.ts').length;
     expect(fileResult.tests.total).toBe(expectedCount);
     expect(fileResult.tests.items[0]!.dimensions).toHaveLength(7);
+  });
+
+  it('defaults to compact mode: only tests with a judged weak/misleading dimension, only those dimensions, needs-review dimensions as ids only', () => {
+    const classifications = [
+      classification('m', 'src/a.test.ts', 'misleading', [dimension({ index: 0, level: 'misleading' })], 'test m'),
+      classification('w', 'src/a.test.ts', 'weak', [
+        dimension({ index: 0, level: 'weak' }),
+        dimension({ index: 1, needsReview: true, reason: 'missing-answer' }),
+      ], 'test w'),
+      classification('h', 'src/a.test.ts', 'healthy', [dimension({ index: 0, level: 'strong' })], 'test h'),
+      classification('r', 'src/a.test.ts', 'needs-review', [dimension({ index: 0, needsReview: true, reason: 'boundary-straddle' })], 'test r'),
+    ];
+    const result = run(['file', 'src/a.test.ts', '-'], { input: JSON.stringify(reportFrom(classifications)) });
+    expect(result.status).toBe(0);
+    interface CompactFileResult {
+      readonly path: string;
+      readonly mode: string;
+      readonly tests: Paginated<{ readonly name: string; readonly status: string; readonly dimensions: readonly { readonly dimensionId: string; readonly level: string }[]; readonly needsReview: readonly string[] }>;
+    }
+    const fileResult = parse<CompactFileResult>(result.stdout);
+    expect(fileResult.mode).toBe('compact');
+    // Healthy and needs-review-only tests are dropped entirely.
+    expect(fileResult.tests.items.map((test) => test.name)).toEqual(['test m', 'test w']);
+    expect(fileResult.tests.items[0]).toEqual({
+      name: 'test m', status: 'misleading', dimensions: [{ dimensionId: 'falsifiability', level: 'misleading' }], needsReview: [],
+    });
+    expect(fileResult.tests.items[1]).toEqual({
+      name: 'test w', status: 'weak', dimensions: [{ dimensionId: 'falsifiability', level: 'weak' }], needsReview: ['behavioral-focus'],
+    });
   });
 
   it('exits 1 with a clear message when no judged test matches that file', () => {

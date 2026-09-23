@@ -19,7 +19,7 @@
  * Subcommands:
  *   summary  [reportPath|-] [options]                    - headline needs-change/needs-review/status/dimension aggregate
  *   worklist [reportPath|-] [options]                     - needs-change tests (files) + needs-review reasons (needsReview)
- *   file <path> [reportPath|-] [options]                  - every judged test in one file, per-dimension level+status
+ *   file <path> [reportPath|-] [--full] [options]          - compact by default: weak/misleading tests + their bad dimensions only (--full: every judged test, every dimension)
  *   test <name-substring|testCaseId> [reportPath|-] [opt] - matching tests with full per-dimension detail
  *   folders  [reportPath|-] [options]                     - ranked folder aggregate (reuses summary math)
  *   dimensions [reportPath|-] [options]                   - ranked dimension aggregate, worst-first
@@ -71,7 +71,7 @@ const USAGE = [
   'Subcommands:',
   '  summary    [reportPath|-]  headline needs-change/needs-review/status/dimension aggregate',
   '  worklist   [reportPath|-]  needs-change tests (files) + needs-review reasons (needsReview)',
-  '  file       <path> [reportPath|-]  every judged test in one file, per-dimension level+status',
+  '  file       <path> [reportPath|-] [--full]  compact fix-brief detail by default; --full for every judged test/dimension',
   '  test       <name-substring|testCaseId> [reportPath|-]  matching tests, full per-dimension detail',
   '  folders    [reportPath|-]  ranked folder aggregate',
   '  dimensions [reportPath|-]  ranked dimension aggregate, worst-first',
@@ -113,6 +113,10 @@ function parseArgs(argv) {
     }
     if (argument === '--include-needs-review') {
       options.includeNeedsReview = true;
+      continue;
+    }
+    if (argument === '--full') {
+      options.full = true;
       continue;
     }
     const key = VALUE_FLAG_KEYS[argument];
@@ -492,6 +496,44 @@ function cmdWorklist(positionals, options) {
   };
 }
 
+/** `--full`: every judged test, every dimension, unchanged historical shape. */
+function fullFileItems(matches) {
+  return matches.map((classification) => ({
+    name: classification.name,
+    status: classification.status,
+    dimensions: classification.dimensions.map((dimension) => ({
+      dimensionId: dimension.dimensionId,
+      dimensionLabel: dimension.dimensionLabel,
+      status: dimension.status,
+      level: dimension.level ?? null,
+    })),
+  }));
+}
+
+/**
+ * Default (compact) mode: a fix brief needs the tests that ACTUALLY carry a judged weak/misleading
+ * dimension, and for those only the offending dimensions — never every dimension of every judged
+ * test, which is what made this subcommand too heavy for a fix brief (see this file's own doc and
+ * `odd/tasks/report-needs-change-semantics.md`). A healthy test, or a needs-review-only test with no
+ * weak/misleading dimension, is dropped entirely: neither needs a change. A needs-review dimension on
+ * an otherwise-included test is still worth knowing about, so it is kept — but as an id only, never
+ * its full detail, since compactness is the whole point.
+ */
+function compactFileItems(matches) {
+  const items = [];
+  for (const classification of matches) {
+    const dimensions = (classification.dimensions ?? [])
+      .filter((dimension) => dimension.status === 'judged' && (dimension.level === 'misleading' || dimension.level === 'weak'))
+      .map((dimension) => ({ dimensionId: dimension.dimensionId, level: dimension.level }));
+    if (dimensions.length === 0) continue;
+    const needsReview = (classification.dimensions ?? [])
+      .filter((dimension) => dimension.status === 'needs-review')
+      .map((dimension) => dimension.dimensionId);
+    items.push({ name: classification.name, status: classification.status, dimensions, needsReview });
+  }
+  return items;
+}
+
 function cmdFile(positionals, options) {
   const filePath = positionals[0];
   if (filePath === undefined) throw new UsageError('file requires a <path> argument');
@@ -499,19 +541,9 @@ function cmdFile(positionals, options) {
   const matches = report.classifications.filter((classification) => classification.repositoryRelativePath === filePath);
   if (matches.length === 0) throw new UsageError(`No judged tests found for file "${filePath}"`);
   const { limit, offset } = limitOffset(options, DEFAULT_FILE_TESTS_LIMIT);
-  const items = matches
-    .map((classification) => ({
-      name: classification.name,
-      status: classification.status,
-      dimensions: classification.dimensions.map((dimension) => ({
-        dimensionId: dimension.dimensionId,
-        dimensionLabel: dimension.dimensionLabel,
-        status: dimension.status,
-        level: dimension.level ?? null,
-      })),
-    }))
+  const items = (options.full ? fullFileItems(matches) : compactFileItems(matches))
     .sort((left, right) => left.name.localeCompare(right.name));
-  return { path: filePath, tests: paginate(items, limit, offset) };
+  return { path: filePath, mode: options.full ? 'full' : 'compact', tests: paginate(items, limit, offset) };
 }
 
 function cmdTest(positionals, options) {
