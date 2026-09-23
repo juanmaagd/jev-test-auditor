@@ -2625,7 +2625,9 @@ describe('cache-aware --dry-run (Phase 5, task P5-5)', () => {
 
   it(
     'a warm dry run reports exactly the test cases already cached from a prior --evaluate as hits and the rest as billable, '
-    + 'and leaves the store byte-identical (same size, same hash) with no new sidecar file',
+    + 'and leaves the store\'s own bytes byte-identical (same size, same hash) — T1: the read-only lookup now opens with '
+    + 'mode=ro rather than immutable=1, so it may create/refresh a -wal/-shm sidecar (WAL coordination metadata, never '
+    + 'written data; see openSqliteAuditStoreForLookup\'s own doc) — this test no longer asserts against that',
     async () => {
       const root = await fixture(twoTestFixtureFiles);
       const storePaths = resolveAuditStorePaths();
@@ -2647,7 +2649,6 @@ describe('cache-aware --dry-run (Phase 5, task P5-5)', () => {
 
       const beforeBytes = await readFile(storePaths.databaseFile);
       const beforeHash = createHash('sha256').update(beforeBytes).digest('hex');
-      const sidecarsBefore = [`${storePaths.databaseFile}-wal`, `${storePaths.databaseFile}-shm`].filter((path) => existsSync(path));
 
       const output = captureOutput();
       const exitCode = await runCli(['audit', '--rootDir', root, '--dry-run', '--json'], output.io);
@@ -2673,8 +2674,6 @@ describe('cache-aware --dry-run (Phase 5, task P5-5)', () => {
       const afterHash = createHash('sha256').update(afterBytes).digest('hex');
       expect(afterHash).toBe(beforeHash);
       expect(afterBytes.byteLength).toBe(beforeBytes.byteLength);
-      const sidecarsAfter = [`${storePaths.databaseFile}-wal`, `${storePaths.databaseFile}-shm`].filter((path) => existsSync(path));
-      expect(sidecarsAfter).toEqual(sidecarsBefore);
     },
   );
 

@@ -1421,7 +1421,9 @@ describe('openSqliteAuditStoreForLookup', () => {
 
   it(
     'reads a real completed judgment through the exact same lookup rule as the live store, '
-    + 'without creating a -wal/-shm sidecar and without changing the main file\'s bytes',
+    + 'without changing the main file\'s bytes — T1: mode=ro may leave a -wal/-shm sidecar behind '
+    + '(WAL coordination metadata, not written data; see openSqliteAuditStoreForLookup\'s own doc), '
+    + 'which this test deliberately no longer asserts against',
     async () => {
       const databaseFile = await tempDatabaseFile();
       const store = await createSqliteAuditStore({ databaseFile });
@@ -1448,51 +1450,60 @@ describe('openSqliteAuditStoreForLookup', () => {
       expect(hit).toEqual({ classification: sampleClassification(testCaseId) });
       expect(miss).toBeUndefined();
 
+      // The main file's own bytes are the guarantee that matters: this reader still never writes,
+      // creates, or migrates a single byte of actual data — only a `-wal`/`-shm` sidecar may appear
+      // (WAL coordination metadata a read-only connection cannot clean up on close), which is a
+      // real but harmless filesystem side effect, not a violation of the "never writes" contract.
       const afterBytes = await readFile(databaseFile);
       const afterHash = createHash('sha256').update(afterBytes).digest('hex');
       expect(afterHash).toBe(beforeHash);
       expect(afterBytes.byteLength).toBe(beforeBytes.byteLength);
-      await expect(stat(`${databaseFile}-wal`)).rejects.toThrow();
-      await expect(stat(`${databaseFile}-shm`)).rejects.toThrow();
     },
   );
 
-  it('a row still sitting only in an uncheckpointed WAL sidecar (the store never closed cleanly) is invisible to the read-only reader — documented limitation, not a bug: a subsequent real --evaluate opens the store normally and sees it', async () => {
-    const databaseFile = await tempDatabaseFile();
-    // Bootstrap and close once first, so the schema itself (and nothing else) is checkpointed into
-    // the main file — otherwise the schema would ALSO still be sitting only in the WAL below, and
-    // the read-only reader would degrade to "not consulted" (schema-outdated) rather than ever
-    // reaching this row's own miss, which is a distinct outcome from the one this test claims to
-    // prove. (Caught by this task's own refactor of `openSqliteAuditStoreForLookup`'s return shape:
-    // the original version of this test used `lookup?.lookup(...)` — with `lookup` itself possibly
-    // `undefined` for exactly this reason — so it passed vacuously regardless of which case actually
-    // occurred; `expect(hit).toBeUndefined()` could never tell "unavailable" apart from "available
-    // but a genuine miss".)
-    await (await createSqliteAuditStore({ databaseFile })).close();
+  it(
+    'sees a row still sitting only in an uncheckpointed WAL sidecar (the store never closed cleanly, '
+    + 'wal_autocheckpoint disabled) — T1: the old immutable=1 reader could not see this at all, and '
+    + 'crashed outright against a WAL file actively being written elsewhere ("database disk image is '
+    + 'malformed"); mode=ro participates in WAL locking/indexing like any ordinary reader, so it reads '
+    + 'the current committed state and never throws',
+    async () => {
+      const databaseFile = await tempDatabaseFile();
+      // Bootstrap and close once first, so the schema itself (and nothing else) is checkpointed into
+      // the main file — otherwise the schema would ALSO still be sitting only in the WAL below, and
+      // the read-only reader would degrade to "not consulted" (schema-outdated) rather than ever
+      // reaching this row's own hit, which is a distinct outcome from the one this test claims to
+      // prove.
+      await (await createSqliteAuditStore({ databaseFile })).close();
 
-    const store = await createSqliteAuditStore({ databaseFile });
-    const runId = await store.beginRun('/repo');
-    const testCaseId = 'tc:v1:uncheckpointed' as TestCaseId;
-    await store.recordWorkItem(runId, {
-      state: 'completed',
-      identity: { testCaseId, repositoryRelativePath: 'a.test.ts', name: 'adds numbers' },
-      cacheKey: 'ck-uncheckpointed',
-      evaluation: sampleEvaluation(),
-      classification: sampleClassification(testCaseId),
-    });
-    // Deliberately never closed — simulates a store still open elsewhere / not yet checkpointed.
+      // A real concurrent `--evaluate` run: WAL mode (set by `createSqliteAuditStore` itself), kept
+      // open and never closed — a single small transaction stays well under SQLite's default
+      // 1000-page auto-checkpoint threshold, so this write sits ONLY in the `-wal` sidecar, never
+      // touching the main file, for as long as `store` stays open below.
+      const store = await createSqliteAuditStore({ databaseFile });
+      const runId = await store.beginRun('/repo');
+      const testCaseId = 'tc:v1:uncheckpointed' as TestCaseId;
+      await store.recordWorkItem(runId, {
+        state: 'completed',
+        identity: { testCaseId, repositoryRelativePath: 'a.test.ts', name: 'adds numbers' },
+        cacheKey: 'ck-uncheckpointed',
+        evaluation: sampleEvaluation(),
+        classification: sampleClassification(testCaseId),
+      });
+      // Deliberately never closed — simulates a store still open elsewhere / not yet checkpointed.
 
-    try {
-      const result = await openSqliteAuditStoreForLookup({ databaseFile });
-      if (!result.available) throw new Error(`expected the store to be available for lookup (schema already checkpointed), got reason: ${result.reason}`);
-      const hit = await result.lookup.lookup('ck-uncheckpointed');
-      await result.lookup.close();
+      try {
+        const result = await openSqliteAuditStoreForLookup({ databaseFile });
+        if (!result.available) throw new Error(`expected the store to be available for lookup (schema already checkpointed), got reason: ${result.reason}`);
+        const hit = await result.lookup.lookup('ck-uncheckpointed');
+        await result.lookup.close();
 
-      expect(hit).toBeUndefined();
-    } finally {
-      await store.close();
-    }
-  });
+        expect(hit).toEqual({ classification: sampleClassification(testCaseId) });
+      } finally {
+        await store.close();
+      }
+    },
+  );
 
   it('surfaces AuditStoreSchemaVersionError for a store newer than this build supports — the same error a subsequent --evaluate would also refuse with', async () => {
     const databaseFile = await tempDatabaseFile();
