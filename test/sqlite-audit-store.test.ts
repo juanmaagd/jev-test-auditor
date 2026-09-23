@@ -1593,11 +1593,10 @@ describe('openSqliteAuditStoreForLookup', () => {
   );
 
   it(
-    'sees a row still sitting only in an uncheckpointed WAL sidecar (the store never closed cleanly, '
-    + 'wal_autocheckpoint disabled) — T1: the old immutable=1 reader could not see this at all, and '
-    + 'crashed outright against a WAL file actively being written elsewhere ("database disk image is '
-    + 'malformed"); mode=ro participates in WAL locking/indexing like any ordinary reader, so it reads '
-    + 'the current committed state and never throws',
+    'sees a row still sitting only in an uncheckpointed WAL sidecar (the store never closed cleanly) '
+    + '— T1: the old immutable=1 reader could not see this at all, and a genuinely concurrent writer '
+    + 'could make it crash outright ("database disk image is malformed"); mode=ro participates in WAL '
+    + 'locking/indexing like any ordinary reader, so it reads the current committed state and never throws',
     async () => {
       const databaseFile = await tempDatabaseFile();
       // Bootstrap and close once first, so the schema itself (and nothing else) is checkpointed into
