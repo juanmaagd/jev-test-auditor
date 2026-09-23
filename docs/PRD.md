@@ -56,7 +56,7 @@ The operator supplies commands and policy. Individual test labeling, approval, a
 - Playwright, Cypress, browser/device automation, and deployed E2E testing.
 - Missing-test or production-coverage analysis.
 - General source-code review.
-- Automatic test rewriting or deletion.
+- Automatic test rewriting or deletion by the CLI. The auditor only reports. The user-facing agent skill (`skills/jev-test-audit`) may propose and apply test fixes through the user's own agent, and only after the user approves them.
 - CI blocking based on findings.
 - Human labeling as part of evaluation runs.
 - Support for languages outside JavaScript and TypeScript.
