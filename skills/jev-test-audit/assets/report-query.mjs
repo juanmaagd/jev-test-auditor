@@ -417,7 +417,14 @@ function cmdSummary(positionals, options) {
   };
 }
 
-/** `files`: non-healthy tests grouped by file (their misleading/weak dimensions — a finding never carries a `reason`, only a needs-review dimension does). `needsReview`: the previously-dead `reason` codes, one entry per needs-review finding, grouped by file. */
+/**
+ * Both groups read `classification.dimensions` directly (never `findings`) — the same source
+ * `summary`/`dimensions`/`file`/`test` already read, so there is exactly one place a dimension's
+ * level/status/reason comes from. `files`: non-healthy tests grouped by file, with their judged
+ * misleading/weak dimensions (a judged dimension never carries a `reason` — only a needs-review
+ * dimension does). `needsReview`: the previously-dead `reason` codes, one entry per needs-review
+ * dimension, grouped by file.
+ */
 function cmdWorklist(positionals, options) {
   const report = readAndParseReport(positionals[0], options);
   const filtered = filterClassifications(report.classifications, {
@@ -441,9 +448,9 @@ function cmdWorklist(positionals, options) {
       .map((entry) => ({
         name: entry.name,
         status: entry.status,
-        dimensions: (entry.findings ?? [])
-          .filter((finding) => finding.level === 'misleading' || finding.level === 'weak')
-          .map((finding) => ({ dimensionId: finding.dimensionId, level: finding.level })),
+        dimensions: (entry.dimensions ?? [])
+          .filter((dimension) => dimension.status === 'judged' && (dimension.level === 'misleading' || dimension.level === 'weak'))
+          .map((dimension) => ({ dimensionId: dimension.dimensionId, level: dimension.level })),
       }))
       .sort((left, right) => left.name.localeCompare(right.name)),
   }));
@@ -451,10 +458,10 @@ function cmdWorklist(positionals, options) {
 
   const needsReviewByFile = new Map();
   for (const classification of filtered) {
-    for (const finding of classification.findings ?? []) {
-      if (finding.status !== 'needs-review') continue;
+    for (const dimension of classification.dimensions ?? []) {
+      if (dimension.status !== 'needs-review') continue;
       const list = needsReviewByFile.get(classification.repositoryRelativePath) ?? [];
-      list.push({ name: classification.name, dimensionId: finding.dimensionId, reason: finding.reason ?? null });
+      list.push({ name: classification.name, dimensionId: dimension.dimensionId, reason: dimension.reason ?? null });
       needsReviewByFile.set(classification.repositoryRelativePath, list);
     }
   }
@@ -583,8 +590,13 @@ function buildFolderBatches(candidates, maxTests) {
   const fileEntries = [...byFile.entries()].map(([path, entries]) => ({ path, entries, count: entries.length }));
 
   const candidateKeys = fileEntries.map((file) => depthTwoFolderKey(file.path));
+  // Counts TESTS, not files, per candidate key — matching what `summarizeTopFolders` counts, so
+  // the same folder isn't reported as "src/area" there and merely "src" here.
   const candidateSizes = new Map();
-  for (const key of candidateKeys) candidateSizes.set(key, (candidateSizes.get(key) ?? 0) + 1);
+  fileEntries.forEach((file, index) => {
+    const key = candidateKeys[index];
+    candidateSizes.set(key, (candidateSizes.get(key) ?? 0) + file.count);
+  });
 
   const byFolder = new Map();
   fileEntries.forEach((file, index) => {

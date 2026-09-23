@@ -26,9 +26,14 @@ below. You are fixing tests, not the feature they cover.
 
 ## Dimension guide
 
-Read only the section(s) in `../references/dimensions.md` for the dimensions flagged above (by
-`dimensionId`) — what that dimension checks, what misleading/weak means concretely, and typical
-fixes. Do not read the whole guide for one finding.
+`{{DIMENSION_GUIDANCE}}`
+
+<!--
+  Orchestrator: paste ONLY the section(s) of references/dimensions.md matching this file's
+  flagged dimensionId(s) above — what each checks, what misleading/weak means concretely, typical
+  fixes. Never a relative path or the whole guide: this brief runs in the audited project, not in
+  the skill's own directory, so a path here would not resolve.
+-->
 
 ## Test command
 

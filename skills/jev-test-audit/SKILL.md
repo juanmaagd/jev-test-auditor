@@ -33,10 +33,10 @@ Load when the user asks to review, explain, or act on `jev-test-auditor`/`jta` r
 
 ## Execution Steps
 
-1. Run `report-query.mjs summary`. No report yet: follow the Decision Gate above.
+1. Run `report-query.mjs summary --root <project>` (same `.jta/latest.json` that `jta report --last --json` reads). No report yet: follow the Decision Gate above.
 2. Explain needs-change count/share with its denominator; run `dimensions`/`folders` for the worst ones, explained via `references/dimensions.md`.
 3. Run `batches --by file` (or `--by folder [--max-tests N]`). Present the plan, ask which batches to fix, then stop and wait.
-4. Per approved file: run `file <path>`, inline it into `assets/fixer-brief.md`'s findings placeholder, dispatch one fix subagent per file. Respect the concurrency cap.
+4. Per approved file: run `file <path>`, inline it into `assets/fixer-brief.md`'s findings placeholder and paste the matching `references/dimensions.md` section(s) into its dimension-guidance placeholder, dispatch one fix subagent per file. Respect the concurrency cap.
 5. Collect each result; run the project's test command yourself over touched files and report honestly.
 6. Offer a consented re-audit (`jta audit --evaluate`), then `diff <beforeRunId> <afterRunId>` to compare.
 
