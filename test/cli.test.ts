@@ -2337,11 +2337,17 @@ describe('resume wiring (Phase 5, task P5-4)', () => {
     async () => {
       const root = await fixture(twoTestFixtureFiles);
 
-      // Baseline: a completely separate database, never touched by the interrupted/resumed pair
-      // below, so a warm cache can never make the final comparison vacuous.
+      // Baseline: a completely separate database AND a completely separate root (same fixture
+      // content, its own fresh temp directory — feature "persisted-run-reports", task T1: a real
+      // `--evaluate` run now persists its own canonical report to `<rootDir>/.jta/`, so reusing
+      // `root` here would make the baseline run's own discovery see the interrupted/resumed pair's
+      // `.jta/` directory as an extra excluded entry, or vice versa — never touched by the
+      // interrupted/resumed pair below, so neither a warm cache nor a stray `.jta/` from an earlier
+      // run can make the final comparison vacuous.
+      const baselineRoot = await fixture(twoTestFixtureFiles);
       const baselineDb = await tempDbFile();
       const baselineOutput = captureOutput();
-      const baselineExit = await runCli(['audit', '--rootDir', root, '--evaluate', '--json'], baselineOutput.io, {
+      const baselineExit = await runCli(['audit', '--rootDir', baselineRoot, '--evaluate', '--json'], baselineOutput.io, {
         createEvaluationPort: () => deterministicEvaluationPort(),
         createStorePort: () => createSqliteAuditStore({ databaseFile: baselineDb }),
       });
@@ -2408,12 +2414,14 @@ describe('resume wiring (Phase 5, task P5-4)', () => {
       expect(typeof baselineReport['runId']).toBe('string');
       expect(baselineReport['runId']).not.toBe(runId);
       // Same final report as an uninterrupted run over the same fixture — everything except the
-      // resume-specific metadata this task deliberately adds, and each run's own distinct persisted
-      // identity, matches byte-for-byte (compared as parsed objects here to isolate those two
-      // intentional, documented differences).
+      // resume-specific metadata this task deliberately adds, each run's own distinct persisted
+      // identity, and each run's own distinct temp root path, matches byte-for-byte (compared as
+      // parsed objects here to isolate those intentional, documented differences).
       delete resumedReport['resume'];
       delete resumedReport['runId'];
+      delete resumedReport['rootDir'];
       delete baselineReport['runId'];
+      delete baselineReport['rootDir'];
       expect(resumedReport).toEqual(baselineReport);
     },
   );
@@ -3617,5 +3625,472 @@ describe('--html and --open (Phase 6, task P6-4)', () => {
         }
       },
     );
+  });
+});
+
+/**
+ * Persisted run reports (feature "persisted-run-reports", `odd/tasks/persisted-run-reports.md`,
+ * task T1): every `--evaluate` run writes the canonical report to `<rootDir>/.jta/`, exercised end
+ * to end through the real `runCli` pipeline exactly like "terminal progress during a run" above.
+ * `fakeStorePort().beginRun` returns a fixed run id, so the exact persisted filename is known ahead
+ * of time.
+ */
+describe('persisted run reports (.jta/) — feature "persisted-run-reports", task T1', () => {
+  const mathFixtureFiles = {
+    'math.test.ts': "import { expect, test } from 'vitest';\ntest('adds', () => { expect(1 + 1).toBe(2); });\n",
+  };
+  const FIXED_RUN_ID = 'jta-persist-run-1';
+
+  function fakeEvaluationPort(): AuditEvaluationPort {
+    return {
+      async evaluate(request) {
+        return {
+          evaluation: {
+            requestedModel: 'jev-1.13.0', respondedModel: 'jev-1.13.0', modelMatchesPin: true,
+            answers: {}, usage: { inputTokens: 10, outputTokens: 1 }, attempts: 1,
+          },
+          classification: {
+            testCaseId: request.testCase.id,
+            repositoryRelativePath: request.testCase.repositoryRelativePath,
+            name: request.testCase.name,
+            status: 'healthy',
+            dimensions: [],
+            findings: [],
+            policyVersion: 2,
+            rubricVersion: 2,
+            model: { requested: 'jev-1.13.0', responded: 'jev-1.13.0', matchesPin: true },
+            usage: { inputTokens: 10, outputTokens: 1 },
+          },
+        };
+      },
+    };
+  }
+
+  function fakeStorePort(): AuditStorePort {
+    return {
+      beginRun: async () => FIXED_RUN_ID,
+      canonicalizeRootDir: async (rootDir) => rootDir,
+      recordWorkItem: async () => undefined,
+      lookup: async () => undefined,
+      finishRun: async () => undefined,
+      loadRunState: async () => undefined,
+      close: async () => undefined,
+    };
+  }
+
+  it('writes .jta/reports/<runId>.json and .jta/latest.json byte-identical to --evaluate --json stdout', async () => {
+    const root = await fixture(mathFixtureFiles);
+    const output = captureOutput();
+
+    const exitCode = await runCli(['audit', '--rootDir', root, '--evaluate', '--json'], output.io, {
+      createEvaluationPort: () => fakeEvaluationPort(),
+      createStorePort: () => fakeStorePort(),
+    });
+
+    expect(exitCode).toBe(0);
+    expect(output.lines).toHaveLength(1);
+    const stdoutJson = output.lines[0]!;
+    expect(() => JSON.parse(stdoutJson)).not.toThrow();
+
+    const runReportContent = await readFile(join(root, '.jta', 'reports', `${FIXED_RUN_ID}.json`), 'utf8');
+    const latestContent = await readFile(join(root, '.jta', 'latest.json'), 'utf8');
+    expect(runReportContent).toBe(stdoutJson);
+    expect(latestContent).toBe(stdoutJson);
+  });
+
+  it('persists even without --json or --html', async () => {
+    const root = await fixture(mathFixtureFiles);
+    const output = captureOutput();
+
+    const exitCode = await runCli(['audit', '--rootDir', root, '--evaluate'], output.io, {
+      createEvaluationPort: () => fakeEvaluationPort(),
+      createStorePort: () => fakeStorePort(),
+    });
+
+    expect(exitCode).toBe(0);
+    const runReportContent = await readFile(join(root, '.jta', 'reports', `${FIXED_RUN_ID}.json`), 'utf8');
+    const parsed = JSON.parse(runReportContent) as { runId?: string; reportVersion?: number };
+    expect(parsed.runId).toBe(FIXED_RUN_ID);
+    expect(parsed.reportVersion).toBe(1);
+  });
+
+  it('creates .jta/.gitignore containing "*" so the folder never gets committed', async () => {
+    const root = await fixture(mathFixtureFiles);
+    const output = captureOutput();
+
+    await runCli(['audit', '--rootDir', root, '--evaluate'], output.io, {
+      createEvaluationPort: () => fakeEvaluationPort(),
+      createStorePort: () => fakeStorePort(),
+    });
+
+    const gitignore = await readFile(join(root, '.jta', '.gitignore'), 'utf8');
+    expect(gitignore).toBe('*\n');
+  });
+
+  it(
+    'a persistence write failure prints one stderr line and never changes the exit code or stdout',
+    async () => {
+      const root = await fixture(mathFixtureFiles);
+      // A regular file where .jta needs to become a directory makes the write fail.
+      await writeFile(join(root, '.jta'), 'blocking file');
+      const output = captureOutput();
+      const stderrChunks: string[] = [];
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
+        stderrChunks.push(String(chunk));
+        return true;
+      });
+
+      try {
+        const exitCode = await runCli(['audit', '--rootDir', root, '--evaluate', '--json'], output.io, {
+          createEvaluationPort: () => fakeEvaluationPort(),
+          createStorePort: () => fakeStorePort(),
+        });
+
+        expect(exitCode).toBe(0);
+        expect(output.lines).toHaveLength(1);
+        expect(() => JSON.parse(output.lines[0]!)).not.toThrow();
+        expect(stderrChunks.join('')).toContain('Unable to persist the run report');
+      } finally {
+        stderrSpy.mockRestore();
+      }
+    },
+  );
+
+  it('skips persistence silently (no .jta/ created) when the run has no store-assigned run id', async () => {
+    const root = await fixture(mathFixtureFiles);
+    const output = captureOutput();
+    const audit: AuditResult = {
+      rootDir: root,
+      files: [],
+      excluded: [],
+      diagnostics: [],
+      totals: { files: 0, excluded: 0, testCases: 0, dynamicMetadata: 0, diagnostics: 0, ...zeroEvidenceTotals },
+      reportingOnly: true,
+      evaluation: {
+        classifications: [],
+        totals: {
+          evaluated: 0, cached: 0, failed: 0,
+          skipped: { total: 0, byReason: { skip: 0, todo: 0, 'evidence-unavailable': 0 } },
+          usage: { inputTokens: 0, outputTokens: 0 },
+          statusCounts: { healthy: 0, weak: 0, misleading: 0, 'needs-review': 0 },
+          respondedModel: undefined,
+          modelMismatches: 0,
+        },
+        cacheStatusByTestCaseId: new Map(),
+        latencyByTestCaseId: new Map(),
+      },
+      // No `runId` — this AuditResult never went through a store.
+    };
+
+    const exitCode = await runCli(['audit', '--evaluate', '--json'], output.io, { audit: async () => audit });
+
+    expect(exitCode).toBe(0);
+    await expect(access(join(root, '.jta'))).rejects.toThrow();
+  });
+});
+
+/**
+ * `jta report` (feature "persisted-run-reports", `odd/tasks/persisted-run-reports.md`, task T2):
+ * a read-only command that reads back what task T1 persisted to `<rootDir>/.jta/` — no API key, no
+ * network, no store access. Exercised end to end through the real `runCli` pipeline, seeding
+ * `.jta/` first with a real `audit --evaluate` call (mirroring "persisted run reports" above), then
+ * exercising `report` against it.
+ */
+describe('jta report — feature "persisted-run-reports", task T2', () => {
+  it('documents jta report, --last, --run <runId>, and .jta/ in --help', async () => {
+    const output = captureOutput();
+
+    const exitCode = await runCli(['--help'], output.io);
+
+    expect(exitCode).toBe(0);
+    const help = output.lines[0]!;
+    expect(help).toContain('jta report');
+    expect(help).toContain('--last');
+    expect(help).toContain('--run <runId>');
+    expect(help).toContain('.jta');
+  });
+
+  const mathFixtureFiles = {
+    'math.test.ts': "import { expect, test } from 'vitest';\ntest('adds', () => { expect(1 + 1).toBe(2); });\n",
+  };
+  const FIXED_RUN_ID = 'jta-report-run-1';
+
+  function fakeEvaluationPort(): AuditEvaluationPort {
+    return {
+      async evaluate(request) {
+        return {
+          evaluation: {
+            requestedModel: 'jev-1.13.0', respondedModel: 'jev-1.13.0', modelMatchesPin: true,
+            answers: {}, usage: { inputTokens: 10, outputTokens: 1 }, attempts: 1,
+          },
+          classification: {
+            testCaseId: request.testCase.id,
+            repositoryRelativePath: request.testCase.repositoryRelativePath,
+            name: request.testCase.name,
+            status: 'healthy',
+            dimensions: [],
+            findings: [],
+            policyVersion: 2,
+            rubricVersion: 2,
+            model: { requested: 'jev-1.13.0', responded: 'jev-1.13.0', matchesPin: true },
+            usage: { inputTokens: 10, outputTokens: 1 },
+          },
+        };
+      },
+    };
+  }
+
+  function fakeStorePort(runId: string): AuditStorePort {
+    return {
+      beginRun: async () => runId,
+      canonicalizeRootDir: async (rootDir) => rootDir,
+      recordWorkItem: async () => undefined,
+      lookup: async () => undefined,
+      finishRun: async () => undefined,
+      loadRunState: async () => undefined,
+      close: async () => undefined,
+    };
+  }
+
+  /** Seeds `.jta/` under `root` with exactly one real, persisted run, and returns the exact canonical JSON stdout printed for it. */
+  async function seedRun(root: string, runId: string = FIXED_RUN_ID): Promise<string> {
+    const seedOutput = captureOutput();
+    const exitCode = await runCli(['audit', '--rootDir', root, '--evaluate', '--json'], seedOutput.io, {
+      createEvaluationPort: () => fakeEvaluationPort(),
+      createStorePort: () => fakeStorePort(runId),
+    });
+    if (exitCode !== 0) throw new Error('seedRun: seeding audit --evaluate failed');
+    return seedOutput.lines[0]!;
+  }
+
+  describe('no persisted reports yet', () => {
+    it('exits 1 with a message suggesting "jta audit --evaluate" when .jta/ does not exist at all', async () => {
+      const root = await fixture({});
+      const output = captureOutput();
+
+      const exitCode = await runCli(['report', '--rootDir', root], output.io);
+
+      expect(exitCode).toBe(1);
+      expect(output.lines[0]).toContain('jta audit --evaluate');
+    });
+  });
+
+  describe('--json', () => {
+    it('prints the stored JSON exactly (byte-identical to the original --evaluate --json stdout)', async () => {
+      const root = await fixture(mathFixtureFiles);
+      const seededJson = await seedRun(root);
+      const output = captureOutput();
+
+      const exitCode = await runCli(['report', '--rootDir', root, '--json'], output.io);
+
+      expect(exitCode).toBe(0);
+      expect(output.lines).toEqual([seededJson]);
+    });
+  });
+
+  describe('default output (human summary)', () => {
+    it('includes the run id and the needs-a-change share and denominator; omits the folder list entirely when nothing needs a change', async () => {
+      const root = await fixture(mathFixtureFiles);
+      await seedRun(root);
+      const output = captureOutput();
+
+      const exitCode = await runCli(['report', '--rootDir', root], output.io);
+
+      expect(exitCode).toBe(0);
+      const text = output.lines.join('\n');
+      expect(text).toContain(FIXED_RUN_ID);
+      expect(text).toContain('0/1');
+      // The seeded fixture's one test case is classified 'healthy' — no folder needs a change, so
+      // the "Top folders" section must not appear at all (never a vacuous empty list).
+      expect(text).not.toContain('Top folders');
+    });
+
+    it('lists the worst folder by tests needing a change when at least one dimension is misleading', async () => {
+      const root = await fixture(mathFixtureFiles);
+      const seedOutput = captureOutput();
+      const exitCode = await runCli(['audit', '--rootDir', root, '--evaluate'], seedOutput.io, {
+        createEvaluationPort: () => ({
+          async evaluate(request) {
+            return {
+              evaluation: {
+                requestedModel: 'jev-1.13.0', respondedModel: 'jev-1.13.0', modelMatchesPin: true,
+                answers: {}, usage: { inputTokens: 10, outputTokens: 1 }, attempts: 1,
+              },
+              classification: {
+                testCaseId: request.testCase.id,
+                repositoryRelativePath: request.testCase.repositoryRelativePath,
+                name: request.testCase.name,
+                status: 'misleading',
+                dimensions: [{
+                  dimensionId: 'assertion-strength', dimensionLabel: 'Assertion strength',
+                  applicable: true, applicabilityProbability: 0.9,
+                  status: 'judged', level: 'misleading', score: 0,
+                  confidence: 0.9, reason: undefined,
+                  probabilities: { '0': 0.9, '1': 0.05, '2': 0.03, '3': 0.02 },
+                  deficientMass: 0.9, acceptableMass: 0.05, criticalMass: 0.9,
+                }],
+                findings: [],
+                policyVersion: 2,
+                rubricVersion: 2,
+                model: { requested: 'jev-1.13.0', responded: 'jev-1.13.0', matchesPin: true },
+                usage: { inputTokens: 10, outputTokens: 1 },
+              },
+            };
+          },
+        }),
+        createStorePort: () => fakeStorePort(FIXED_RUN_ID),
+      });
+      if (exitCode !== 0) throw new Error('seeding failed');
+
+      const output = captureOutput();
+      const reportExit = await runCli(['report', '--rootDir', root], output.io);
+
+      expect(reportExit).toBe(0);
+      const text = output.lines.join('\n');
+      expect(text).toContain('1/1');
+      expect(text).toContain('Top folders needing a change:');
+      expect(text).toContain('1/1 need a change');
+    });
+  });
+
+  describe('--run <runId>', () => {
+    it('reads back the exact named run, not just the latest one', async () => {
+      const root = await fixture(mathFixtureFiles);
+      await seedRun(root, 'run-older');
+      const newerJson = await seedRun(root, 'run-newer');
+      const output = captureOutput();
+
+      const exitCode = await runCli(['report', '--rootDir', root, '--run', 'run-older', '--json'], output.io);
+      expect(exitCode).toBe(0);
+      expect(output.lines[0]).not.toEqual(newerJson);
+      expect(JSON.parse(output.lines[0]!).runId).toBe('run-older');
+
+      const latestOutput = captureOutput();
+      const latestExit = await runCli(['report', '--rootDir', root, '--json'], latestOutput.io);
+      expect(latestExit).toBe(0);
+      expect(latestOutput.lines[0]).toEqual(newerJson);
+    });
+
+    it('exits 1 and lists available run ids for an unknown run id', async () => {
+      const root = await fixture(mathFixtureFiles);
+      await seedRun(root, 'run-known');
+      const output = captureOutput();
+
+      const exitCode = await runCli(['report', '--rootDir', root, '--run', 'run-does-not-exist'], output.io);
+
+      expect(exitCode).toBe(1);
+      expect(output.lines[0]).toContain('run-does-not-exist');
+      expect(output.lines[0]).toContain('run-known');
+    });
+
+    it('rejects a path-traversal run id the same as any other unknown run id, never escaping .jta/reports/', async () => {
+      const root = await fixture(mathFixtureFiles);
+      await seedRun(root, 'run-known');
+      const output = captureOutput();
+
+      const exitCode = await runCli(['report', '--rootDir', root, '--run', '../../../etc/passwd'], output.io);
+
+      expect(exitCode).toBe(1);
+    });
+  });
+
+  describe('--html [path]', () => {
+    it('renders the persisted report to report.html in the invocation directory by default', async () => {
+      const root = await fixture(mathFixtureFiles);
+      await seedRun(root);
+      const invocationDir = await mkdtemp(join(tmpdir(), 'jev-report-html-default-'));
+      temporaryRoots.push(invocationDir);
+      const output = captureOutput();
+
+      const exitCode = await runCli(['report', '--rootDir', root, '--html'], output.io, { cwd: () => invocationDir });
+
+      expect(exitCode).toBe(0);
+      const html = await readFile(join(invocationDir, 'report.html'), 'utf8');
+      expect(html).toContain('id="jev-hero"');
+    });
+
+    it('renders the persisted report to an explicit path, and --open launches the seam', async () => {
+      const root = await fixture(mathFixtureFiles);
+      await seedRun(root);
+      const dir = await mkdtemp(join(tmpdir(), 'jev-report-html-explicit-'));
+      temporaryRoots.push(dir);
+      const target = join(dir, 'out.html');
+      const opened: string[] = [];
+      const output = captureOutput();
+
+      const exitCode = await runCli(['report', '--rootDir', root, '--html', target, '--open'], output.io, {
+        openHtmlReport: async (path) => { opened.push(path); return { opened: true }; },
+      });
+
+      expect(exitCode).toBe(0);
+      await expect(access(target)).resolves.toBeUndefined();
+      expect(opened).toEqual([target]);
+    });
+  });
+
+  describe('flag parsing and rejections', () => {
+    it('rejects --last combined with --run', async () => {
+      const output = captureOutput();
+      const exitCode = await runCli(['report', '--last', '--run', 'x'], output.io);
+      expect(exitCode).toBe(1);
+      expect(output.lines[0]).toContain('--last');
+      expect(output.lines[0]).toContain('--run');
+    });
+
+    it('rejects --json combined with --html', async () => {
+      const output = captureOutput();
+      const exitCode = await runCli(['report', '--json', '--html', 'x.html'], output.io);
+      expect(exitCode).toBe(1);
+      expect(output.lines[0]).toContain('--json');
+      expect(output.lines[0]).toContain('--html');
+    });
+
+    it('rejects --open without --html', async () => {
+      const output = captureOutput();
+      const exitCode = await runCli(['report', '--open'], output.io);
+      expect(exitCode).toBe(1);
+      expect(output.lines[0]).toContain('--open requires --html');
+    });
+  });
+
+  describe('unreadable or invalid persisted JSON', () => {
+    it('exits 1 with a clear message for invalid JSON', async () => {
+      const root = await fixture(mathFixtureFiles);
+      await mkdir(join(root, '.jta'), { recursive: true });
+      await writeFile(join(root, '.jta', 'latest.json'), 'not valid json{{{');
+      const output = captureOutput();
+
+      const exitCode = await runCli(['report', '--rootDir', root], output.io);
+
+      expect(exitCode).toBe(1);
+      expect(output.lines[0]!.toLowerCase()).toContain('json');
+    });
+
+    it('exits 1 with a clear message for schema-invalid JSON (valid JSON, wrong shape)', async () => {
+      const root = await fixture(mathFixtureFiles);
+      await mkdir(join(root, '.jta'), { recursive: true });
+      await writeFile(join(root, '.jta', 'latest.json'), JSON.stringify({ notAReport: true }));
+      const output = captureOutput();
+
+      const exitCode = await runCli(['report', '--rootDir', root], output.io);
+
+      expect(exitCode).toBe(1);
+      expect(output.lines[0]!.toLowerCase()).toContain('schema');
+    });
+  });
+
+  describe('--rootDir', () => {
+    it('reads .jta/ from --rootDir, not the invocation directory', async () => {
+      const root = await fixture(mathFixtureFiles);
+      const seededJson = await seedRun(root);
+      const invocationDir = await mkdtemp(join(tmpdir(), 'jev-report-rootdir-'));
+      temporaryRoots.push(invocationDir);
+      const output = captureOutput();
+
+      const exitCode = await runCli(['report', '--rootDir', root, '--json'], output.io, { cwd: () => invocationDir });
+
+      expect(exitCode).toBe(0);
+      expect(output.lines[0]).toEqual(seededJson);
+    });
   });
 });

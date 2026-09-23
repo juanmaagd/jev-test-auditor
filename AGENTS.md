@@ -4,7 +4,8 @@
 
 - `jev-test-auditor` audits the semantic quality of existing JavaScript and TypeScript tests.
 - Tests are the only finding targets; production code is narrow supporting evidence only.
-- V1 supports Jest and Vitest. Do not add E2E, automatic rewrites, general source review, or human labeling.
+- V1 supports Jest and Vitest. Do not add E2E, automatic rewrites in the CLI, general source review, or human labeling.
+- The CLI is reporting-only. Test fixes belong to the user-facing agent skill (`skills/jev-test-audit`), run by the user's agent, and only after the user approves them.
 - Keep one package and one process. Avoid speculative plugin APIs and premature abstractions.
 
 ## Architecture

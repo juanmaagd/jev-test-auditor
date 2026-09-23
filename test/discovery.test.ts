@@ -87,6 +87,30 @@ describe('repository-local test discovery', () => {
     ]));
   });
 
+  /**
+   * `.jta/` (feature "persisted-run-reports") is where `audit --evaluate` persists its own canonical
+   * report JSON, inside the audited project's own root — see `src/adapters/persisted-report-store.ts`.
+   * Without a default exclusion, a second `--evaluate` run over the same rootDir would discover its
+   * own prior run's persisted JSON files and report them as ordinary excluded files
+   * (`unsupported-extension`), growing every subsequent run. `.jta` joins `.git`/`node_modules`/etc.
+   * as a default-excluded directory segment, exactly like them.
+   */
+  it('excludes .jta/ (this tool\'s own persisted-run-reports directory) by default, so a repeat --evaluate run over the same rootDir never discovers its own prior output', async () => {
+    const root = await fixture({
+      'included.test.ts': '',
+      '.jta/latest.json': '{}',
+      '.jta/reports/run-1.json': '{}',
+      '.jta/.gitignore': '*\n',
+    });
+
+    const result = await discoverTestFiles({ rootDir: root });
+
+    expect(includedPaths(result)).toEqual(['included.test.ts']);
+    expect(result.excluded).toEqual(expect.arrayContaining([
+      expect.objectContaining({ repositoryRelativePath: '.jta', reason: 'default-exclude' }),
+    ]));
+  });
+
   it('excludes E2E path and static framework signals without executing the file', async () => {
     const root = await fixture({
       'e2e/login.test.ts': 'throw new Error("must not execute");',

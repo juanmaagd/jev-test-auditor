@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { realpathSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getResolvedConfiguration } from '../application/configure.js';
 import { computeDryRunCacheHits, runAudit } from '../application/audit.js';
@@ -59,11 +59,19 @@ import {
 import { CLASSIFICATION_POLICY_V2 } from '../domain/classification.js';
 import type { ConfigurationOverrides } from '../domain/config.js';
 import type { ExcludedTestFile } from '../domain/discovery.js';
-import { buildAuditReport, type AuditReportContext } from '../domain/report.js';
+import { buildAuditReport, type AuditReport, type AuditReportContext } from '../domain/report.js';
 import { renderAuditReportHtml } from '../domain/html-report.js';
+import { summarizeReport } from '../domain/report-overview.js';
+import { REPORT_JSON_SCHEMA, validateAgainstSchema } from '../domain/report-schema.js';
 import { createTerminalProgressReporter } from '../adapters/terminal-progress-reporter.js';
 import { checkHtmlReportPath, writeHtmlReport } from '../adapters/html-report-writer.js';
 import { openHtmlReportWithViewer, type OpenHtmlReportResult } from '../adapters/html-report-opener.js';
+import {
+  loadLatestPersistedReport,
+  loadPersistedReportByRunId,
+  persistAuditReport,
+  type LoadPersistedReportResult,
+} from '../adapters/persisted-report-store.js';
 
 export interface CliIo {
   writeLine(message: string): void;
@@ -136,6 +144,7 @@ const HELP = `jta (jev-test-auditor) — inspect semantic test quality
 
 Usage:
   jta audit [options]
+  jta report [--last | --run <runId>] [--json | --html [path]] [--open] [--rootDir <path>]
   jta auth <login|status|logout>
   jta --help
 
@@ -148,7 +157,22 @@ Commands:
                 the same no-network, no-write cost/call estimate --dry-run computes (discovered/
                 evaluable/skipped test cases, exact initial Jev call count, cache status, and
                 approximate input-token/USD ranges). See --json below to print the underlying
-                discovery data as one JSON line instead.
+                discovery data as one JSON line instead. Every "audit --evaluate" run also persists
+                its canonical report to <rootDir>/.jta/ — see "jta report" below.
+  report        Read-only: prints or re-renders a run's canonical report already persisted to
+                <rootDir>/.jta/ by a prior "audit --evaluate" run (see "Persisted run reports" in
+                README.md) — no API key, no network, no audit store access, and it never runs a new
+                evaluation. Selects WHICH run with --last (the default) or --run <runId>; selects the
+                OUTPUT with --json (the exact stored JSON), --html [path] (renders the same
+                fixed-size offline overview "audit --evaluate --html" does, at [path] or report.html
+                in the current directory by default; --open opens it once written), or neither (a
+                short human summary: run id and recorded time, the headline "needs a change" share
+                and its denominator, and the worst folders by tests needing a change). --rootDir
+                <path> reads <rootDir>/.jta/ instead of the current directory. Exits 1 with a clear
+                message when no report has ever been persisted there yet (suggesting "jta audit
+                --evaluate"), when --run names a run id that does not exist (listing the ids that
+                do), or when the stored JSON is unreadable or fails the same schema
+                "audit --evaluate --json" itself publishes.
   auth login    Store a TypeSafe API key locally for this tool. Reads from an interactive,
                 no-echo prompt when stdin is a TTY; reads one trimmed line from stdin
                 otherwise (so automation/CI can pipe a key in). NEVER accepts the key as a
@@ -241,7 +265,9 @@ Options:
                       script are embedded, with no CDN, no external stylesheet or font, and no
                       network access at render or view time. Evidence fragment source content is
                       never included — only provenance decisions and counts, exactly like the JSON
-                      report. Without this flag, no file is written. An existing regular file at
+                      report. Without this flag, no HTML file is written (every --evaluate run still
+                      persists its canonical report to <rootDir>/.jta/ regardless — see "jta report"
+                      above and "Persisted run reports" in README.md). An existing regular file at
                       that path is overwritten; an existing directory there, or a path whose parent
                       directory does not exist, is a usage error (exit 1) before any evaluation
                       work is dispatched. Requires --evaluate. Cannot be combined with --dry-run or
@@ -852,6 +878,190 @@ function parseAuditOptions(args: readonly string[]): ParsedAuditOptions | { read
 // shared verbatim with `src/cli/benchmark.ts`'s own `--store` sampling — see that module's own doc
 // for why it lives outside this file specifically.
 
+/**
+ * `jta report` (feature "persisted-run-reports", `odd/tasks/persisted-run-reports.md`, task T2):
+ * a read-only command over what task T1 already persisted to `<rootDir>/.jta/` — never re-evaluates,
+ * never touches an API key, the network, or the audit store. `--last` (the default) and `--run
+ * <runId>` select WHICH run; `--json`/`--html [path]` select the output shape, defaulting to a short
+ * human summary when neither is given.
+ */
+interface ParsedReportOptions {
+  readonly rootDir?: string;
+  /** The specific run id to load; absent means `--last` (the default either way). */
+  readonly run?: string;
+  readonly json: boolean;
+  readonly html?: string;
+  readonly open: boolean;
+}
+
+function parseReportOptions(args: readonly string[]): ParsedReportOptions | { readonly error: string } | { readonly help: true } {
+  let rootDir: string | undefined;
+  let run: string | undefined;
+  let last = false;
+  let json = false;
+  let html: string | undefined;
+  let open = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === '--help') return { help: true };
+    if (argument === '--last') {
+      last = true;
+      continue;
+    }
+    if (argument === '--run') {
+      const runId = args[index + 1];
+      if (runId === undefined || runId.startsWith('--')) return { error: '--run requires a run id' };
+      run = runId;
+      index += 1;
+      continue;
+    }
+    if (argument === '--json') {
+      json = true;
+      continue;
+    }
+    if (argument === '--html') {
+      const path = args[index + 1];
+      if (path === undefined || path.startsWith('--')) {
+        html = DEFAULT_HTML_REPORT_FILENAME;
+        continue;
+      }
+      html = path;
+      index += 1;
+      continue;
+    }
+    if (argument === '--open') {
+      open = true;
+      continue;
+    }
+    if (argument === '--rootDir' || argument === '--root-dir') {
+      const dir = args[index + 1];
+      if (dir === undefined || dir.startsWith('--')) return { error: `${argument} requires a path` };
+      rootDir = dir;
+      index += 1;
+      continue;
+    }
+    return { error: `Unknown option: ${argument ?? ''}` };
+  }
+  if (last && run !== undefined) return { error: '--last cannot be combined with --run (report --last | --run <runId>)' };
+  if (json && html !== undefined) return { error: '--json cannot be combined with --html (report --json | --html [path])' };
+  if (open && html === undefined) return { error: '--open requires --html (report --html [path] --open)' };
+  return {
+    ...(rootDir === undefined ? {} : { rootDir }),
+    ...(run === undefined ? {} : { run }),
+    json,
+    ...(html === undefined ? {} : { html }),
+    open,
+  };
+}
+
+/**
+ * Short human-readable default (`jta report`, neither `--json` nor `--html`): the run's own identity
+ * and recorded time, the headline "needs a change" share and its denominator (reusing
+ * `summarizeReport`, the same aggregation the HTML overview renders from — `src/domain/report-overview.ts`),
+ * and up to 5 worst folders by tests needing a change (from the same `folderHeatmap` the overview's
+ * own heatmap section renders, excluding its trailing merged `'Other'` row here — a folder-by-folder
+ * top list, not that section's full capped grid).
+ */
+function reportSummaryText(report: AuditReport, recordedAt: Date): string {
+  const overview = summarizeReport(report);
+  const { needsChange } = overview;
+  const needsChangeLine = needsChange.judgedTotal === 0
+    ? 'Needs a change: n/a (no judged test cases)'
+    : `Needs a change: ${needsChange.count}/${needsChange.judgedTotal} (${(needsChange.share * 100).toFixed(1)}%)`;
+  const topFolders = overview.folderHeatmap.rows
+    .filter((row) => !row.isOther && row.needsChangeCount > 0)
+    .slice(0, 5)
+    .map((row) => `  - ${row.folder}: ${row.needsChangeCount}/${row.judgedTotal} need a change`);
+
+  return [
+    `Run ${report.runId ?? '(unknown run id)'} — recorded ${recordedAt.toISOString()}`,
+    `Root: ${report.rootDir}`,
+    needsChangeLine,
+    ...(topFolders.length === 0 ? [] : ['Top folders needing a change:', ...topFolders]),
+  ].join('\n');
+}
+
+/** One line naming every currently persisted run id, or that none exist — the "unknown run id" error's own detail. */
+function availableRunIdsLine(availableRunIds: readonly string[]): string {
+  return availableRunIds.length === 0 ? 'No other persisted run ids are available.' : `Available run ids: ${availableRunIds.join(', ')}`;
+}
+
+async function runReportCommand(args: readonly string[], io: CliIo, dependencies: CliDependencies): Promise<number> {
+  const parsed = parseReportOptions(args);
+  if ('help' in parsed) {
+    io.writeLine(HELP);
+    return 0;
+  }
+  if ('error' in parsed) {
+    io.writeLine(parsed.error);
+    return 1;
+  }
+
+  const cwd = dependencies.cwd?.() ?? process.cwd();
+  const rootDir = parsed.rootDir === undefined ? cwd : resolve(cwd, parsed.rootDir);
+
+  const loadResult: LoadPersistedReportResult = parsed.run === undefined
+    ? await loadLatestPersistedReport(rootDir)
+    : await loadPersistedReportByRunId(rootDir, parsed.run);
+
+  if (!loadResult.found) {
+    if (loadResult.reason === 'no-reports') {
+      io.writeLine(`No persisted run reports found under ${join(rootDir, '.jta')}. Run "jta audit --evaluate" first.`);
+      return 1;
+    }
+    io.writeLine(`Unknown run id "${parsed.run ?? ''}". ${availableRunIdsLine(loadResult.availableRunIds)}`);
+    return 1;
+  }
+
+  let parsedJson: unknown;
+  try {
+    parsedJson = JSON.parse(loadResult.raw);
+  } catch (error) {
+    io.writeLine(`Unable to read the persisted report: invalid JSON (${error instanceof Error ? error.message : String(error)}).`);
+    return 1;
+  }
+
+  const validation = validateAgainstSchema(REPORT_JSON_SCHEMA, parsedJson);
+  if (!validation.valid) {
+    io.writeLine(`Unable to read the persisted report: it does not match the expected report schema (${validation.errors.join('; ')}).`);
+    return 1;
+  }
+  const report = parsedJson as AuditReport;
+
+  if (parsed.html !== undefined) {
+    const htmlPath = resolve(cwd, parsed.html);
+    const problem = await checkHtmlReportPath(htmlPath);
+    if (problem !== undefined) {
+      io.writeLine(`Unable to write the HTML report: ${problem.message}`);
+      return 1;
+    }
+    const html = renderAuditReportHtml(report);
+    const writeResult = await writeHtmlReport(htmlPath, html);
+    if (!writeResult.written) {
+      io.writeLine(`Unable to write the HTML report: ${writeResult.message}`);
+      return 1;
+    }
+    process.stderr.write(`HTML report written to ${htmlPath}${writeResult.overwrote ? ' (overwriting an existing file)' : ''}.\n`);
+
+    if (parsed.open) {
+      const openReport = dependencies.openHtmlReport ?? ((path: string) => openHtmlReportWithViewer(path));
+      const openResult = await openReport(htmlPath);
+      if (!openResult.opened) {
+        process.stderr.write(`Unable to open the HTML report automatically: ${openResult.reason}. The report remains at ${htmlPath}.\n`);
+      }
+    }
+    return 0;
+  }
+
+  if (parsed.json) {
+    io.writeLine(loadResult.raw);
+    return 0;
+  }
+
+  io.writeLine(reportSummaryText(report, loadResult.recordedAt));
+  return 0;
+}
+
 async function runAuthLogin(io: CliIo, dependencies: CliDependencies): Promise<number> {
   io.writeLine('Enter your TypeSafe API key. Input is hidden on an interactive terminal; otherwise one line is read from stdin.');
 
@@ -980,6 +1190,10 @@ export async function runCli(
 
   if (args[0] === 'auth') {
     return runAuthCommand(args.slice(1), io, dependencies);
+  }
+
+  if (args[0] === 'report') {
+    return runReportCommand(args.slice(1), io, dependencies);
   }
 
   if (args[0] !== 'audit') {
@@ -1181,7 +1395,26 @@ export async function runCli(
     }
 
     if (parsed.evaluate) {
-      io.writeLine(parsed.json ? evaluateJsonLine(result) : evaluateTextReport(result));
+      const reportJson = evaluateJsonLine(result);
+      io.writeLine(parsed.json ? reportJson : evaluateTextReport(result));
+
+      // Persisted run reports (feature "persisted-run-reports", `odd/tasks/persisted-run-reports.md`,
+      // task T1): every `--evaluate` run writes the exact same canonical JSON `--evaluate --json`
+      // would print — `reportJson` above, never re-derived — to `<rootDir>/.jta/reports/<runId>.json`
+      // and `<rootDir>/.jta/latest.json`, regardless of whether `--json`/`--html` were also given (see
+      // `src/adapters/persisted-report-store.ts`'s own doc for the layout, self-ignoring `.gitignore`,
+      // and retention). `result.runId` is absent only when this run never had a store attached at all
+      // (never true for production `--evaluate` wiring, which always constructs one before reaching
+      // here — see the store-construction block above; only reachable via the `dependencies.audit`
+      // test seam) — persistence is silently skipped then, since there is no run identity to name a
+      // file after. A write failure is never fatal to the audit itself: one stderr line, the exit code
+      // and stdout both stay exactly as they already were.
+      if (result.runId !== undefined) {
+        const persistResult = await persistAuditReport(result.rootDir, result.runId, reportJson);
+        if (!persistResult.persisted) {
+          process.stderr.write(`Unable to persist the run report to .jta/: ${persistResult.reason}\n`);
+        }
+      }
 
       // Phase 6, task P6-4. Deliberately unreached when `result.resume?.nothingOutstanding` was
       // `true` above (no report exists to render in that case — see this task's own decision,
