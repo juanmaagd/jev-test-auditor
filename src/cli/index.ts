@@ -976,7 +976,10 @@ function reportSummaryText(report: AuditReport, recordedAt: Date): string {
   const topFolders = overview.folderHeatmap.rows
     .filter((row) => !row.isOther && row.needsChangeCount > 0)
     .slice(0, 5)
-    .map((row) => `  - ${row.folder}: ${row.needsChangeCount}/${row.judgedTotal} need a change`);
+    // A remainder row (`row.isRemainder`) is the leftover slice of a folder that ALSO split into
+    // its own deeper rows (e.g. "backend/src/modules/tickets" alongside ".../tickets/eval") — the
+    // suffix keeps a reader from mistaking it for the whole folder's count.
+    .map((row) => `  - ${row.folder}${row.isRemainder ? ' (other files)' : ''}: ${row.needsChangeCount}/${row.judgedTotal} need a change`);
 
   return [
     `Run ${report.runId ?? '(unknown run id)'} — recorded ${recordedAt.toISOString()}`,

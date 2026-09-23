@@ -268,10 +268,17 @@ function nextFolderBoundary(dirs, fromIndex) {
  * under `HEATMAP_MIN_GROUP_SIZE` folds back into `prefix`'s own row instead of becoming its own.
  * Returns leaf groups only — `{ folder, items }[]` — every input item in exactly one group.
  */
+/**
+ * `isRemainder` mirrors `AdaptiveFolderGroup.isRemainder`, src/domain/report-overview.ts: `true`
+ * exactly when this row is the LEFTOVER slice of a folder that ALSO split into its own deeper child
+ * rows (e.g. tests directly in `backend/src/modules/tickets` when `.../tickets/eval` also became its
+ * own row) — never for a folder that stayed one row outright. `folder` is deliberately left
+ * unsuffixed here too; callers decide how to label a remainder row for a human reader.
+ */
 function adaptiveFolderGroups(items, prefix, prefixDepth, grandTotal) {
   const total = items.reduce((sum, item) => sum + item.count, 0);
   if (total === 0) return [];
-  if (total / grandTotal < FOLDER_DOMINANT_SHARE) return [{ folder: prefix, items }];
+  if (total / grandTotal < FOLDER_DOMINANT_SHARE) return [{ folder: prefix, items, isRemainder: false }];
 
   const buckets = new Map();
   const leftover = [];
@@ -288,16 +295,17 @@ function adaptiveFolderGroups(items, prefix, prefixDepth, grandTotal) {
     else bucket.push(item);
   }
 
-  const groups = [];
+  const childGroups = [];
   for (const [key, bucketItems] of buckets) {
     const bucketTotal = bucketItems.reduce((sum, item) => sum + item.count, 0);
     if (bucketTotal < HEATMAP_MIN_GROUP_SIZE) {
       leftover.push(...bucketItems);
       continue;
     }
-    groups.push(...adaptiveFolderGroups(bucketItems, key, key.split('/').length, grandTotal));
+    childGroups.push(...adaptiveFolderGroups(bucketItems, key, key.split('/').length, grandTotal));
   }
-  if (leftover.length > 0) groups.push({ folder: prefix, items: leftover });
+  const groups = childGroups;
+  if (leftover.length > 0) groups.push({ folder: prefix, items: leftover, isRemainder: childGroups.length > 0 });
   return groups;
 }
 
@@ -384,7 +392,7 @@ function summarizeTopFolders(classifications) {
 
   const folders = new Map();
   for (const group of groups) {
-    const tally = { needsChange: 0, total: 0 };
+    const tally = { needsChange: 0, total: 0, isRemainder: group.isRemainder };
     for (const item of group.items) {
       tally.total += 1;
       if (item.classification.status === 'misleading' || item.classification.status === 'weak') tally.needsChange += 1;
@@ -404,6 +412,7 @@ function summarizeTopFolders(classifications) {
     judgedTotal: tally.total,
     share: safeShare(tally.needsChange, tally.total),
     isOther: false,
+    isRemainder: tally.isRemainder,
   }));
 
   if (overflow.length > 0) {
@@ -418,6 +427,7 @@ function summarizeTopFolders(classifications) {
       judgedTotal: merged.total,
       share: safeShare(merged.needsChange, merged.total),
       isOther: true,
+      isRemainder: false,
     });
   }
 
@@ -689,16 +699,20 @@ function buildFolderBatches(candidates, maxTests) {
   const groups = adaptiveFolderGroups(items, '.', 0, totalTests);
 
   const byFolder = new Map();
-  for (const group of groups) byFolder.set(group.folder, group.items.map((item) => item.file));
+  for (const group of groups) byFolder.set(group.folder, { files: group.items.map((item) => item.file), isRemainder: group.isRemainder });
 
   const batches = [];
-  for (const [folderKey, files] of byFolder.entries()) {
+  for (const [folderKey, { files, isRemainder }] of byFolder.entries()) {
     files.sort((left, right) => right.count - left.count || left.path.localeCompare(right.path));
+    // A remainder folder's own leftover files (e.g. "backend/src/modules/tickets" alongside its own
+    // ".../tickets/eval" batch) are labeled "(other files)" so this batch is never mistaken for the
+    // whole folder — see `isRemainder`, mirrored from `adaptiveFolderGroups`/`summarizeTopFolders`.
+    const label = isRemainder ? `${folderKey} (other files)` : folderKey;
     const chunks = maxTests === undefined ? [files] : greedyChunk(files, maxTests);
     chunks.forEach((chunkFiles, index) => {
       const entries = chunkFiles.flatMap((file) => file.entries);
-      const key = chunks.length > 1 ? `${folderKey} (part ${index + 1})` : folderKey;
-      batches.push({ key, files: chunkFiles.map((file) => file.path), testCount: entries.length, worstDimensions: worstDimensionsFor(entries) });
+      const key = chunks.length > 1 ? `${label} (part ${index + 1})` : label;
+      batches.push({ key, files: chunkFiles.map((file) => file.path), testCount: entries.length, worstDimensions: worstDimensionsFor(entries), isRemainder });
     });
   }
   batches.sort((left, right) => right.testCount - left.testCount || left.key.localeCompare(right.key));

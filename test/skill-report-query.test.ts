@@ -325,7 +325,7 @@ describe('report-query.mjs: summary parity with summarizeReport', () => {
       readonly needsReview: { readonly count: number; readonly denominator: number; readonly share: number };
       readonly statusCounts: Record<string, number>;
       readonly dimensions: readonly { readonly dimensionId: string; readonly dimensionLabel: string; readonly total: number; readonly badCount: number; readonly badShare: number }[];
-      readonly topFolders: Paginated<{ readonly folder: string; readonly needsChangeCount: number; readonly judgedTotal: number; readonly isOther: boolean }>;
+      readonly topFolders: Paginated<{ readonly folder: string; readonly needsChangeCount: number; readonly judgedTotal: number; readonly isOther: boolean; readonly isRemainder: boolean }>;
       readonly topFiles: Paginated<{ readonly path: string; readonly needsChangeCount: number; readonly judgedTotal: number }>;
     }
     const summary = parse<Summary>(result.stdout);
@@ -354,8 +354,8 @@ describe('report-query.mjs: summary parity with summarizeReport', () => {
       expect(found!.badShare).toBeCloseTo(dim.deficientShare, 12);
     }
 
-    const expectedFolders = overview.folderHeatmap.rows.map((row) => ({ folder: row.folder, needsChangeCount: row.needsChangeCount, judgedTotal: row.judgedTotal, isOther: row.isOther }));
-    expect(summary.topFolders.items.map(({ folder, needsChangeCount, judgedTotal, isOther }) => ({ folder, needsChangeCount, judgedTotal, isOther }))).toEqual(expectedFolders);
+    const expectedFolders = overview.folderHeatmap.rows.map((row) => ({ folder: row.folder, needsChangeCount: row.needsChangeCount, judgedTotal: row.judgedTotal, isOther: row.isOther, isRemainder: row.isRemainder }));
+    expect(summary.topFolders.items.map(({ folder, needsChangeCount, judgedTotal, isOther, isRemainder }) => ({ folder, needsChangeCount, judgedTotal, isOther, isRemainder }))).toEqual(expectedFolders);
     expect(summary.topFolders.total).toBe(overview.folderHeatmap.rows.length);
 
     const expectedFiles = overview.topFiles.map((file) => ({ path: file.path, needsChangeCount: file.needsChangeCount, judgedTotal: file.judgedTotal }));
@@ -544,12 +544,35 @@ describe('report-query.mjs: folders', () => {
 
     const result = run(['folders', '-'], { input: JSON.stringify(report) });
     expect(result.status).toBe(0);
-    interface FoldersResult { readonly folders: Paginated<{ readonly folder: string; readonly needsChangeCount: number; readonly judgedTotal: number; readonly isOther: boolean }> }
+    interface FoldersResult { readonly folders: Paginated<{ readonly folder: string; readonly needsChangeCount: number; readonly judgedTotal: number; readonly isOther: boolean; readonly isRemainder: boolean }> }
     const foldersResult = parse<FoldersResult>(result.stdout);
 
-    const expected = overview.folderHeatmap.rows.map((row) => ({ folder: row.folder, needsChangeCount: row.needsChangeCount, judgedTotal: row.judgedTotal, isOther: row.isOther }));
-    expect(foldersResult.folders.items.map(({ folder, needsChangeCount, judgedTotal, isOther }) => ({ folder, needsChangeCount, judgedTotal, isOther }))).toEqual(expected);
+    const expected = overview.folderHeatmap.rows.map((row) => ({ folder: row.folder, needsChangeCount: row.needsChangeCount, judgedTotal: row.judgedTotal, isOther: row.isOther, isRemainder: row.isRemainder }));
+    expect(foldersResult.folders.items.map(({ folder, needsChangeCount, judgedTotal, isOther, isRemainder }) => ({ folder, needsChangeCount, judgedTotal, isOther, isRemainder }))).toEqual(expected);
     expect(foldersResult.folders.items.some((row) => row.isOther)).toBe(true);
+  });
+
+  it('marks a split folder\'s own leftover row isRemainder:true, keeping "folder" a clean, unsuffixed path', () => {
+    const classifications = [
+      ...['eval', 'services', 'extraction'].flatMap((sub) => Array.from({ length: 5 }, (_, index) =>
+        classification(`${sub}${index}`, `backend/src/modules/tickets/${sub}/${sub}-${index}.test.ts`, 'weak', [dimension({ level: 'weak' })]))),
+      ...Array.from({ length: 4 }, (_, index) =>
+        classification(`direct${index}`, `backend/src/modules/tickets/direct-${index}.test.ts`, 'weak', [dimension({ level: 'weak' })])),
+    ];
+    const report = reportFrom(classifications);
+    const result = run(['folders', '-'], { input: JSON.stringify(report) });
+    expect(result.status).toBe(0);
+    interface FoldersResult { readonly folders: Paginated<{ readonly folder: string; readonly isRemainder: boolean; readonly judgedTotal: number }> }
+    const foldersResult = parse<FoldersResult>(result.stdout);
+
+    const evalRow = foldersResult.folders.items.find((row) => row.folder === 'backend/src/modules/tickets/eval');
+    expect(evalRow).toBeDefined();
+    expect(evalRow!.isRemainder).toBe(false);
+
+    const remainderRow = foldersResult.folders.items.find((row) => row.folder === 'backend/src/modules/tickets');
+    expect(remainderRow).toBeDefined();
+    expect(remainderRow!.isRemainder).toBe(true);
+    expect(remainderRow!.judgedTotal).toBe(4);
   });
 });
 
@@ -615,6 +638,28 @@ describe('report-query.mjs: batches', () => {
     interface BatchesResult { readonly batches: Paginated<{ readonly testCount: number }> }
     const batchesResult = parse<BatchesResult>(result.stdout);
     expect(batchesResult.batches.items[0]!.testCount).toBe(2);
+  });
+
+  it('--by folder labels a split folder\'s own leftover batch "(other files)" and marks it isRemainder', () => {
+    const classifications = [
+      ...['eval', 'services', 'extraction'].flatMap((sub) => Array.from({ length: 5 }, (_, index) =>
+        classification(`${sub}${index}`, `backend/src/modules/tickets/${sub}/${sub}-${index}.test.ts`, 'weak', [dimension({ level: 'weak' })]))),
+      ...Array.from({ length: 4 }, (_, index) =>
+        classification(`direct${index}`, `backend/src/modules/tickets/direct-${index}.test.ts`, 'weak', [dimension({ level: 'weak' })])),
+    ];
+    const result = run(['batches', '--by', 'folder', '-'], { input: JSON.stringify(reportFrom(classifications)) });
+    expect(result.status).toBe(0);
+    interface BatchesResult { readonly batches: Paginated<{ readonly key: string; readonly testCount: number; readonly isRemainder: boolean }> }
+    const batchesResult = parse<BatchesResult>(result.stdout);
+
+    const evalBatch = batchesResult.batches.items.find((batch) => batch.key === 'backend/src/modules/tickets/eval');
+    expect(evalBatch).toBeDefined();
+    expect(evalBatch!.isRemainder).toBe(false);
+
+    const remainderBatch = batchesResult.batches.items.find((batch) => batch.key === 'backend/src/modules/tickets (other files)');
+    expect(remainderBatch).toBeDefined();
+    expect(remainderBatch!.isRemainder).toBe(true);
+    expect(remainderBatch!.testCount).toBe(4);
   });
 });
 

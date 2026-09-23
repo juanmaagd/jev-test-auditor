@@ -326,6 +326,7 @@ describe('summarizeReport: folder x dimension heatmap', () => {
     expect(row).toBeDefined();
     expect(row!.judgedTotal).toBe(3);
     expect(row!.needsChangeCount).toBe(2);
+    expect(row!.isRemainder).toBe(false); // this folder never split into child rows
     const cell = row!.cells.find((entry) => entry.dimensionId === 'falsifiability');
     expect(cell).toEqual({ dimensionId: 'falsifiability', dimensionLabel: 'Falsifiability', badCount: 2, applicableCount: 3, share: 2 / 3 });
   });
@@ -410,6 +411,28 @@ describe('summarizeReport: folder x dimension heatmap', () => {
     // Every test is accounted for somewhere — the drill-down never silently drops a test.
     const total = overview.folderHeatmap.rows.reduce((sum, row) => sum + row.judgedTotal, 0);
     expect(total).toBe(classifications.length);
+  });
+
+  it('marks a split folder\'s own leftover row as isRemainder, distinct from its child rows, without touching the plain "folder" path', () => {
+    const classifications = [
+      ...['eval', 'services', 'extraction'].flatMap((sub) => Array.from({ length: 5 }, (_, index) =>
+        withPathAndStatus(`backend/src/modules/tickets/${sub}/${sub}-${index}.test.ts`, `${sub}-${index}`, 'weak', { level: 'weak' }))),
+      // Tests directly in "tickets", with no further real segment — these are the remainder.
+      ...Array.from({ length: 4 }, (_, index) =>
+        withPathAndStatus(`backend/src/modules/tickets/direct-${index}.test.ts`, `direct-${index}`, 'weak', { level: 'weak' })),
+    ];
+    const report = minimalReport({ classifications });
+    const overview = summarizeReport(report);
+    const rows = overview.folderHeatmap.rows;
+
+    const evalRow = rows.find((row) => row.folder === 'backend/src/modules/tickets/eval');
+    expect(evalRow).toBeDefined();
+    expect(evalRow!.isRemainder).toBe(false);
+
+    const remainderRow = rows.find((row) => row.folder === 'backend/src/modules/tickets');
+    expect(remainderRow).toBeDefined();
+    expect(remainderRow!.isRemainder).toBe(true);
+    expect(remainderRow!.judgedTotal).toBe(4);
   });
 
   it('caps rows at the limit, folding the remaining folders into one "Other" row summing their counts', () => {

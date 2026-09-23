@@ -414,6 +414,26 @@ describe('renderAuditReportHtml: folder x dimension heatmap', () => {
     expect(html).toContain('25–49%');
     expect(html).toContain('≥ 50% hotspot');
   });
+
+  it('labels a split folder\'s own leftover row "(other files)" so it is never mistaken for the whole folder', () => {
+    const direct = Array.from({ length: 4 }, (_, index) => classification({
+      testCaseId: `tc:v1:direct-${index}` as TestCaseId,
+      repositoryRelativePath: `backend/src/modules/tickets/direct-${index}.test.ts`,
+      status: 'weak',
+      dimensions: [dimension({ level: 'weak' })],
+    }));
+    const evalTests = Array.from({ length: 5 }, (_, index) => classification({
+      testCaseId: `tc:v1:eval-${index}` as TestCaseId,
+      repositoryRelativePath: `backend/src/modules/tickets/eval/eval-${index}.test.ts`,
+      status: 'weak',
+      dimensions: [dimension({ level: 'weak' })],
+    }));
+    const html = renderAuditReportHtml(minimalReport({ classifications: [...direct, ...evalTests] }));
+    expect(html).toContain('backend/src/modules/tickets (other files)');
+    expect(html).toContain('backend/src/modules/tickets/eval');
+    // The child row's own name never carries the suffix.
+    expect(html).not.toContain('backend/src/modules/tickets/eval (other files)');
+  });
 });
 
 describe('renderAuditReportHtml: top files', () => {

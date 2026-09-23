@@ -56,6 +56,10 @@
  * ancestor row that WAS established (which may be several real levels up, or the root `'.'`) along
  * with any test whose path has no further real segment to split on (recursion stops there
  * structurally, regardless of share). A file with no directory (`smoke.test.ts`) keys to `'.'`.
+ * When a folder's own leftover row coexists with child rows it split into (e.g.
+ * `backend/src/modules/tickets` alongside `backend/src/modules/tickets/eval`), that leftover row
+ * never represents the WHOLE folder — {@link ReportOverviewHeatmapRow.isRemainder} marks it so a
+ * reader is never misled into thinking a remainder row's count is the module's total.
  * Every test is accounted for in exactly one leaf row — the drill-down never drops or double-counts
  * one. Rows are then ranked by `needsChangeCount` (same "tests needing a change" ranking `topFiles`
  * uses); only the top {@link HEATMAP_ROWS_LIMIT} become their own row, and every folder past that is
@@ -161,6 +165,14 @@ export interface ReportOverviewHeatmapRow {
   readonly judgedTotal: number;
   /** `true` only for the trailing merged row summing every folder past {@link HEATMAP_ROWS_LIMIT}. */
   readonly isOther: boolean;
+  /**
+   * `true` when `folder` is the LEFTOVER slice of a folder that also split into its own deeper child
+   * rows (e.g. tests directly in `backend/src/modules/tickets` when `.../tickets/eval` also became
+   * its own row) — see this module's own doc, "Folder grouping". `folder` itself is never suffixed; a
+   * renderer that wants a human-readable distinction (e.g. `"backend/src/modules/tickets (other
+   * files)"`) reads this flag. Always `false` for the merged `'Other'` row.
+   */
+  readonly isRemainder: boolean;
   /** One cell per {@link ReportOverviewHeatmap.dimensionOrder} entry, same order, even when this folder has no test for that dimension (then `applicableCount: 0`, `share: undefined`). */
   readonly cells: readonly ReportOverviewHeatmapCell[];
 }
@@ -343,6 +355,18 @@ interface AdaptiveFolderItem {
 interface AdaptiveFolderGroup {
   readonly folder: string;
   readonly indices: readonly number[];
+  /**
+   * `true` exactly when this row is the LEFTOVER slice of a folder that also split into its own
+   * deeper child rows — e.g. tests directly in `backend/src/modules/tickets` when
+   * `backend/src/modules/tickets/eval` etc. also became their own rows below it. Without this flag a
+   * reader sees a `backend/src/modules/tickets` row and assumes it is the WHOLE module, missing the
+   * tests that live in its sibling child rows. `false` for a folder that never split (its row already
+   * represents everything under it) and for the row-cap's merged `'Other'` row (an aggregate of many
+   * unrelated folders, not one folder's own leftover). `folder` itself is deliberately left
+   * untouched here — see this module's own doc, "Folder grouping" — the caller decides how to label
+   * a remainder row for a human reader.
+   */
+  readonly isRemainder: boolean;
 }
 
 /**
@@ -356,7 +380,7 @@ interface AdaptiveFolderGroup {
  */
 function adaptiveFolderGroups(items: readonly AdaptiveFolderItem[], prefix: string, prefixDepth: number, grandTotal: number): AdaptiveFolderGroup[] {
   if (items.length === 0) return [];
-  if (items.length / grandTotal < FOLDER_DOMINANT_SHARE) return [{ folder: prefix, indices: items.map((item) => item.index) }];
+  if (items.length / grandTotal < FOLDER_DOMINANT_SHARE) return [{ folder: prefix, indices: items.map((item) => item.index), isRemainder: false }];
 
   const buckets = new Map<string, AdaptiveFolderItem[]>();
   const leftover: AdaptiveFolderItem[] = [];
@@ -372,15 +396,16 @@ function adaptiveFolderGroups(items: readonly AdaptiveFolderItem[], prefix: stri
     else bucket.push(item);
   }
 
-  const groups: AdaptiveFolderGroup[] = [];
+  const childGroups: AdaptiveFolderGroup[] = [];
   for (const [key, bucketItems] of buckets) {
     if (bucketItems.length < HEATMAP_MIN_GROUP_SIZE) {
       leftover.push(...bucketItems);
       continue;
     }
-    groups.push(...adaptiveFolderGroups(bucketItems, key, key.split('/').length, grandTotal));
+    childGroups.push(...adaptiveFolderGroups(bucketItems, key, key.split('/').length, grandTotal));
   }
-  if (leftover.length > 0) groups.push({ folder: prefix, indices: leftover.map((item) => item.index) });
+  const groups = childGroups;
+  if (leftover.length > 0) groups.push({ folder: prefix, indices: leftover.map((item) => item.index), isRemainder: childGroups.length > 0 });
   return groups;
 }
 
@@ -392,11 +417,12 @@ interface HeatmapCellTally {
 interface HeatmapFolderTally {
   needsChange: number;
   total: number;
+  isRemainder: boolean;
   cells: Map<string, HeatmapCellTally>;
 }
 
 function emptyHeatmapFolderTally(): HeatmapFolderTally {
-  return { needsChange: 0, total: 0, cells: new Map() };
+  return { needsChange: 0, total: 0, isRemainder: false, cells: new Map() };
 }
 
 function heatmapCells(
@@ -438,6 +464,7 @@ function summarizeFolderHeatmap(
   const folders = new Map<string, HeatmapFolderTally>();
   for (const group of groups) {
     const tally = emptyHeatmapFolderTally();
+    tally.isRemainder = group.isRemainder;
     for (const index of group.indices) {
       const classification = report.classifications[index]!;
       tally.total += 1;
@@ -458,6 +485,7 @@ function summarizeFolderHeatmap(
     needsChangeCount: tally.needsChange,
     judgedTotal: tally.total,
     isOther: false,
+    isRemainder: tally.isRemainder,
     cells: heatmapCells(tally, dimensionOrder),
   }));
 
@@ -473,7 +501,7 @@ function summarizeFolderHeatmap(
         merged.cells.set(dimensionId, existing);
       }
     }
-    rows.push({ folder: 'Other', needsChangeCount: merged.needsChange, judgedTotal: merged.total, isOther: true, cells: heatmapCells(merged, dimensionOrder) });
+    rows.push({ folder: 'Other', needsChangeCount: merged.needsChange, judgedTotal: merged.total, isOther: true, isRemainder: false, cells: heatmapCells(merged, dimensionOrder) });
   }
 
   return { rows, dimensionOrder };

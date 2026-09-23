@@ -422,18 +422,24 @@ function heatColor(share: number): string {
   return color;
 }
 
+/** `row.folder` is never suffixed (see `report-overview.ts`'s own doc, "Folder grouping") — this is the ONE place a remainder row's leftover count is distinguished from its own child rows for a human reader, e.g. `"backend/src/modules/tickets (other files)"`. */
+function heatmapRowLabel(row: ReportOverviewHeatmapRow): string {
+  return row.isRemainder ? `${row.folder} (other files)` : row.folder;
+}
+
 function renderHeatmapRow(row: ReportOverviewHeatmapRow): string {
+  const label = heatmapRowLabel(row);
   const cells = row.cells.map((cell) => {
     if (cell.share === undefined) {
-      return `<td><span class="heat-cell heat-cell-na" title="${escapeHtml(row.folder)} · ${escapeHtml(cell.dimensionLabel)}: n/a (0 applicable)">n/a</span></td>`;
+      return `<td><span class="heat-cell heat-cell-na" title="${escapeHtml(label)} · ${escapeHtml(cell.dimensionLabel)}: n/a (0 applicable)">n/a</span></td>`;
     }
     const percent = formatPercent(cell.share);
     const style = `background:${heatColor(cell.share)};color:#000000`;
-    const title = `${escapeHtml(row.folder)} · ${escapeHtml(cell.dimensionLabel)}: ${percent} (${cell.badCount}/${cell.applicableCount})`;
+    const title = `${escapeHtml(label)} · ${escapeHtml(cell.dimensionLabel)}: ${percent} (${cell.badCount}/${cell.applicableCount})`;
     return `<td><span class="heat-cell" style="${style}" title="${title}">${percent}</span></td>`;
   }).join('');
   const rowClass = row.isOther ? ' class="heat-other"' : '';
-  return `<tr${rowClass}><th scope="row" class="heat-folder-name">${escapeHtml(row.folder)}</th>${cells}</tr>`;
+  return `<tr${rowClass}><th scope="row" class="heat-folder-name">${escapeHtml(label)}</th>${cells}</tr>`;
 }
 
 /** Folder x dimension heatmap — see the Authorized scope addition (2026-09-23): palette neutrals with ember hotspots, a legend naming the steps, a printed percentage where it fits, and a `<title>` per cell. A cell with zero applicable tests reads `n/a`, never `NaN` or a misleading `0%`. */
