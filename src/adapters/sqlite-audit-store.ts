@@ -111,7 +111,7 @@ export function resolveAuditStorePaths(environment: AuditStorePathEnvironment = 
 // only what is genuinely THIS store's own: its meta table name, its schema version, its
 // migrations, and its named error types.
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 /**
  * The schema version this build's persistence layer targets (Phase 6, task P6-2) — exported
@@ -216,6 +216,18 @@ const MIGRATIONS: readonly Migration[] = [
   (db) => {
     db.exec('ALTER TABLE attempts ADD COLUMN latency_ms INTEGER;');
     db.exec('ALTER TABLE attempts ADD COLUMN attempt_latencies_ms TEXT;');
+  },
+  // T2 (`odd/tasks/audit-run-responsiveness.md`): the cache-hit lookup (`LOOKUP_CACHED_JUDGMENT_SQL`
+  // below) joins `attempts` and `judgments` on `work_item_id`, and neither table carried an index on
+  // that column through schema 3 — confirmed empirically against the real `supermarket-pro` store
+  // (`EXPLAIN QUERY PLAN`: `SCAN a` plus an `AUTOMATIC COVERING INDEX` on `j`, rebuilt from scratch
+  // on every single lookup) and reproduced by this task's own migration test. Adding these two
+  // indexes turns both joins into a plain `SEARCH ... USING INDEX`, verified empirically the same
+  // way — no other index is needed: `work_items.cache_key` already has one (`idx_work_items_cache_key`,
+  // MIGRATIONS[1] above), which is what makes `w` itself never scan either.
+  (db) => {
+    db.exec('CREATE INDEX idx_attempts_work_item_id ON attempts (work_item_id);');
+    db.exec('CREATE INDEX idx_judgments_work_item_id ON judgments (work_item_id);');
   },
 ];
 

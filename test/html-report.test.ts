@@ -52,7 +52,7 @@ function minimalReport(overrides: Partial<AuditReport> = {}): AuditReport {
     rootDir: '/repo',
     reportingOnly: true,
     complete: true,
-    versions: { storeSchema: 3, rubric: 2, policy: 2 },
+    versions: { storeSchema: 4, rubric: 2, policy: 2 },
     modelRequested: 'jev-1.13.0',
     discovery: {
       files: [{ path: 'a.test.ts', framework: 'vitest', testCaseCount: 1, dynamicMetadataCount: 0, evidenceBundleCount: 1 }],

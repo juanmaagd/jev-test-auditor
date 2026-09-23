@@ -1464,7 +1464,7 @@ describe('--evaluate', () => {
         expect(exitCode).toBe(0);
         expect(output.lines).toHaveLength(1);
         expect(output.lines[0]).toBe(
-          '{"reportVersion":1,"rootDir":"/workspace","reportingOnly":true,"complete":true,"versions":{"storeSchema":3,"rubric":2,"policy":2},'
+          '{"reportVersion":1,"rootDir":"/workspace","reportingOnly":true,"complete":true,"versions":{"storeSchema":4,"rubric":2,"policy":2},'
           + '"modelRequested":"jev-1.13.0","discovery":{"files":[{"path":"abc.test.ts","framework":"vitest","testCaseCount":1,"dynamicMetadataCount":0,'
           + '"evidenceBundleCount":1}],"excluded":[],"totals":{"files":1,"excluded":0,"testCases":1,"dynamicMetadata":0,"diagnostics":0,'
           + '"unsupportedFrameworkFiles":0,"evidenceBundles":1,"evidenceFragments":0,"evidenceTruncatedFragments":0,"evidenceOmitted":0,'
@@ -1736,7 +1736,7 @@ describe('--evaluate', () => {
         expect(exitCode).toBe(0);
         expect(output.lines).toHaveLength(1);
         expect(output.lines[0]).toBe(
-          '{"reportVersion":1,"rootDir":"/workspace","reportingOnly":true,"complete":true,"versions":{"storeSchema":3,"rubric":2,"policy":2},'
+          '{"reportVersion":1,"rootDir":"/workspace","reportingOnly":true,"complete":true,"versions":{"storeSchema":4,"rubric":2,"policy":2},'
           + '"modelRequested":"jev-1.13.0","discovery":{"files":[{"path":"mixed.test.ts","framework":"vitest","testCaseCount":2,"dynamicMetadataCount":0,'
           + '"evidenceBundleCount":2}],"excluded":[],"totals":{"files":1,"excluded":0,"testCases":2,"dynamicMetadata":0,"diagnostics":0,'
           + '"unsupportedFrameworkFiles":0,"evidenceBundles":2,"evidenceFragments":3,"evidenceTruncatedFragments":1,"evidenceOmitted":1,'
