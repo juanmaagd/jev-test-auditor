@@ -75,7 +75,7 @@ jta audit --dry-run
 jta auth login
 
 # 4. Run real semantic evaluation and open the self-contained offline HTML report
-jta audit --evaluate --html audit-report.html --open
+jta audit --evaluate --html --open   # writes ./report.html
 ```
 
 From this repository's own development checkout:
@@ -187,7 +187,7 @@ Schema validation has no extra runtime dependency: `docs/report-schema.json` is 
 
 ## Self-contained HTML report (`audit --evaluate --html [path]`)
 
-`--html <path>` (Phase 6, task P6-4) renders the exact same canonical report `--evaluate --json` prints into one offline HTML file at `<path>` — a pure function (`renderAuditReportHtml`, `src/domain/html-report.ts`) over the already-built `AuditReport`, with no I/O, no timers, and no adapter imports of its own. **Without this flag, no file is written** — this preserves Phase 5's "nothing is written unless explicitly asked for" guarantee for the first surface that writes a file outside the auth credentials store and the audit store.
+`--html [path]` (Phase 6, task P6-4) renders the exact same canonical report `--evaluate --json` prints into one offline HTML file at `[path]` (default: `report.html` in the invocation directory) — a pure function (`renderAuditReportHtml`, `src/domain/html-report.ts`) over the already-built `AuditReport`, with no I/O, no timers, and no adapter imports of its own. **Without this flag, no file is written** — this preserves Phase 5's "nothing is written unless explicitly asked for" guarantee for the first surface that writes a file outside the auth credentials store and the audit store.
 
 - **Default path.** `--html` with no path (end of the arguments, or followed by another option such as `--open`) writes `report.html` into the directory the command was invoked from — not `--rootDir` — overwriting it on every run. `report.html` is git-ignored in this repository.
 - **Genuinely self-contained.** Every style and script is embedded inline; there is no `<link>`, no `@import`, no external stylesheet or font, no CDN, and no network call at render or view time — the file works on a machine with no internet. Proven in this project's own test suite by a category-based scan (absence of the whole class of external-reference constructs — protocol-relative URLs, `<iframe>`/`<embed>`/`<object>`, a `<script src=…>`, `@import`/`url(…)` inside a real `<style>`/`<script>` block), not by grepping for a couple of known-bad substrings.
