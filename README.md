@@ -167,6 +167,16 @@ A long `--evaluate` run prints nothing else until it finishes, so (Phase 6, task
 - **Non-interactive output** (a pipe, a CI log, a redirected file — anywhere a `\r` redraw would just accumulate as garbage): one clean, newline-terminated line per **terminal** transition only (`completed`/`cached`/`failed`/`skipped`; `pending`/`running` produce no line, since they carry no new terminal information a log reader needs), naming the item's path and name plus the same running counts. A cache hit (`cached`) is always visible as distinct from a genuinely fresh dispatch (`completed`) — materially different to anyone watching provider cost accrue.
 - **The API key never reaches progress output**, exactly like every other output this tool produces.
 
+### Pre-dispatch phases (T3, `odd/tasks/audit-run-responsiveness.md`)
+
+Before any of the above, `runAudit` discovers, reads, extracts, and selects evidence for every test file — 15–20s of CPU with no output at all on a large suite (~7,000 test cases), since none of that work is per-item dispatch. `--evaluate` now reports three coarse pre-dispatch milestones on the same stream, so a long run shows something from its first second:
+
+- **`Discovering test files...`** once, before discovery itself has even resolved (nothing else is known yet).
+- **`Extracting test cases: D/T files (N test case(s) found)...`** as `runAudit` works through the discovered files — extraction and evidence selection are reported together, not as two alternating phases, since they happen back-to-back for the same file; throttled to at most ~20 updates regardless of suite size (a count-based gate, not a timer), so this never floods a non-TTY log.
+- **`Checking cache...`** once, immediately before per-item dispatch begins, only when content-addressed caching is actually enabled for this run (a store, a run id, and a cache-key port all present) — otherwise nothing would be checked, and this line never appears.
+
+Rendered the same way the per-item checkpoints above are: a single redrawn `\r` line on a TTY (closed with a trailing `\n` once dispatch's own progress line takes over, or once the run turns out to have nothing to dispatch at all), one `\n`-terminated line per milestone off one. **`--evaluate` only** — `--dry-run` and the plain default report run through the identical discovery/extraction/evidence pipeline, but neither wires a progress port at all today, so neither prints these lines; `stdout`/`--json` output is byte-for-byte unaffected either way, since all of this stays on stderr.
+
 Production wiring binds this to the real `process.stderr.write`/`process.stderr.isTTY`; `createTerminalProgressReporter` (`src/adapters/terminal-progress-reporter.ts`) is the adapter, `AuditProgressPort` (`src/domain/audit.ts`) is the port the domain and application layers see, and `CliDependencies.createProgressPort` is the test seam.
 
 ## Canonical JSON report (`audit --evaluate --json`)

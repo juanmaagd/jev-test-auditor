@@ -5,7 +5,9 @@ import type {
   AuditEvaluationRequest,
   AuditEvidenceBuildRequest,
   AuditEvidenceBuildResult,
+  AuditExtractorPort,
   AuditPorts,
+  AuditPrePhaseEvent,
   AuditProgressEvent,
   AuditProgressPort,
   AuditRequest,
@@ -411,5 +413,100 @@ describe('progress reporting (Phase 6, task P6-3)', () => {
     await runAudit(configuration, portsFor(discovery, [testCase], immediateEvaluationPort(), { store: orderedStore, progress }));
 
     expect(order).toEqual(['store:completed', 'progress:completed']);
+  });
+});
+
+describe('pre-dispatch phase progress (T3, odd/tasks/audit-run-responsiveness.md)', () => {
+  function manyDiscoveredFiles(count: number): DiscoveredTestFile[] {
+    return Array.from({ length: count }, (_unused, index) => discovered(`file-${index + 1}.test.ts`));
+  }
+
+  /** One test case per file, its id derived from the file's own path — distinct per file so a per-file extractor never accidentally returns a shared object. */
+  function extractorForOneTestCasePerFile(): AuditExtractorPort {
+    return {
+      extract: (request) => extractionFor([baseTestCase(`tc-${request.repositoryRelativePath}`, request.repositoryRelativePath)]),
+    };
+  }
+
+  function portsWithPhaseTracking(discovery: DiscoveryResult, extra: Partial<AuditPorts> = {}): { readonly ports: AuditPorts; readonly phaseCalls: AuditPrePhaseEvent[] } {
+    const phaseCalls: AuditPrePhaseEvent[] = [];
+    const ports: AuditPorts = {
+      discovery: { discover: async () => discovery },
+      sourceReader: { read: async () => 'source' },
+      extractor: extractorForOneTestCasePerFile(),
+      evidence: { build: defaultEvidenceBuild },
+      evaluation: immediateEvaluationPort(),
+      progress: { begin() { /* no-op */ }, report() { /* no-op */ }, phase(event) { phaseCalls.push(event); } },
+      ...extra,
+    };
+    return { ports, phaseCalls };
+  }
+
+  it('reports a discovering phase before any extracting phase, with no counts yet — the first thing a caller sees, before discovery itself even resolves', async () => {
+    const discovery: DiscoveryResult = { files: [discovered('a.test.ts')], excluded: [], diagnostics: [] };
+    const { ports, phaseCalls } = portsWithPhaseTracking(discovery);
+
+    await runAudit(configuration, ports);
+
+    expect(phaseCalls[0]).toEqual({ phase: 'discovering' });
+  });
+
+  it('reports one extracting phase per file for a small suite (throttle floor of 1), with cumulative done/total/testCases', async () => {
+    const discovery: DiscoveryResult = { files: manyDiscoveredFiles(3), excluded: [], diagnostics: [] };
+    const { ports, phaseCalls } = portsWithPhaseTracking(discovery);
+
+    await runAudit(configuration, ports);
+
+    const extracting = phaseCalls.filter((event) => event.phase === 'extracting');
+    expect(extracting).toEqual([
+      { phase: 'extracting', done: 1, total: 3, testCases: 1 },
+      { phase: 'extracting', done: 2, total: 3, testCases: 2 },
+      { phase: 'extracting', done: 3, total: 3, testCases: 3 },
+    ]);
+  });
+
+  it('throttles extracting phase events for a larger suite instead of one per file — bounded output regardless of suite size, always ending on the exact final total', async () => {
+    const fileCount = 100;
+    const discovery: DiscoveryResult = { files: manyDiscoveredFiles(fileCount), excluded: [], diagnostics: [] };
+    const { ports, phaseCalls } = portsWithPhaseTracking(discovery);
+
+    await runAudit(configuration, ports);
+
+    const extracting = phaseCalls.filter((event) => event.phase === 'extracting');
+    expect(extracting.length).toBeLessThan(fileCount);
+    expect(extracting[extracting.length - 1]).toEqual({ phase: 'extracting', done: fileCount, total: fileCount, testCases: fileCount });
+  });
+
+  it('reports a checking-cache phase exactly once, right before begin, only when content-addressed caching is actually enabled for this run', async () => {
+    const discovery: DiscoveryResult = { files: [discovered('cache-check.test.ts')], excluded: [], diagnostics: [] };
+    const store = fakeStore();
+    const cacheKeyPort = { computeKey: () => 'fixed-key-for-phase-test' };
+    const { ports, phaseCalls } = portsWithPhaseTracking(discovery, { store, cacheKey: cacheKeyPort });
+
+    await runAudit(configuration, ports);
+
+    expect(phaseCalls.filter((event) => event.phase === 'checking-cache')).toEqual([{ phase: 'checking-cache' }]);
+  });
+
+  it('never reports checking-cache when no store/cache-key port is wired — nothing would actually be checked', async () => {
+    const discovery: DiscoveryResult = { files: [discovered('no-cache.test.ts')], excluded: [], diagnostics: [] };
+    const { ports, phaseCalls } = portsWithPhaseTracking(discovery);
+
+    await runAudit(configuration, ports);
+
+    expect(phaseCalls.some((event) => event.phase === 'checking-cache')).toBe(false);
+  });
+
+  it('never calls phase() at all when no progress port is wired — the optional hook is genuinely optional', async () => {
+    const discovery: DiscoveryResult = { files: manyDiscoveredFiles(3), excluded: [], diagnostics: [] };
+
+    // No `progress` in the ports at all — must not throw, exactly like every other opt-in port.
+    await expect(runAudit(configuration, {
+      discovery: { discover: async () => discovery },
+      sourceReader: { read: async () => 'source' },
+      extractor: extractorForOneTestCasePerFile(),
+      evidence: { build: defaultEvidenceBuild },
+      evaluation: immediateEvaluationPort(),
+    })).resolves.toBeDefined();
   });
 });

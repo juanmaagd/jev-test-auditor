@@ -359,6 +359,11 @@ async function runEvaluation(
     ? skippedItems
     : skippedItems.filter((skipped) => resume.terminalByIdentityKey.get(identityKey(identityOf(skipped.testCase)))?.state !== 'skipped');
 
+  // T3: the last pre-dispatch phase marker, right before `begin` — only when caching is actually
+  // enabled (a store, a run id, and a cache-key port all present); with no cache to check, nothing
+  // would be checked, and this phase never fires (see `AuditPrePhase`'s own doc).
+  if (cacheEnabled) progress?.phase?.({ phase: 'checking-cache' });
+
   // Phase 6, task P6-3: `begin` fires exactly once, before any per-item transition, naming
   // precisely how many work items will reach a terminal state THIS run — see
   // `AuditProgressPort.begin`'s own doc for why an already-terminal, reused item on a resumed run
@@ -696,6 +701,15 @@ export async function runAudit(
     resumeState = preflight.runState;
   }
 
+  // T3 (`odd/tasks/audit-run-responsiveness.md`): the very first thing a caller with progress
+  // wired ever sees — before discovery itself has even resolved, so a large suite (15–20s of
+  // silent discovery/extraction/evidence-selection before `progress.begin()`, per this task's own
+  // evidence) shows SOMETHING from the first second rather than nothing until dispatch starts.
+  // `--resume`'s own preflight above (when present) still runs first: a resume-specific failure is
+  // diagnosed before this run does any pipeline work at all, exactly like the discovery-failure
+  // early return just below it.
+  ports.progress?.phase?.({ phase: 'discovering' });
+
   let discovery;
   try {
     discovery = await ports.discovery.discover({
@@ -751,6 +765,25 @@ export async function runAudit(
   const needsSourceText = ports.evaluation !== undefined || options.retainSourceText === true;
   const sourceTextByPath: Map<string, string> | undefined = needsSourceText ? new Map() : undefined;
 
+  // T3: one combined `'extracting'` phase event per file, covering extraction AND evidence
+  // selection together — they happen back-to-back for the same file in this same loop iteration,
+  // so two alternating phase labels would only flicker a TTY line and double a non-TTY log for no
+  // benefit (see `AuditPrePhase`'s own doc, `src/domain/audit.ts`). Throttled to at most ~20
+  // updates regardless of suite size (a count-based gate, not time-based, so this stays
+  // deterministic and needs no fake clock to test) — bounded output on a suite of 7,000 test cases
+  // across hundreds of files, exactly as free as a suite of 3 files.
+  const phaseEveryFiles = Math.max(1, Math.floor(files.length / 20));
+  let filesProcessed = 0;
+  let extractedTestCases = 0;
+  function reportExtractingPhase(testCasesInThisFile: number): void {
+    filesProcessed += 1;
+    extractedTestCases += testCasesInThisFile;
+    if (ports.progress?.phase === undefined) return;
+    if (filesProcessed === files.length || filesProcessed % phaseEveryFiles === 0) {
+      ports.progress.phase({ phase: 'extracting', done: filesProcessed, total: files.length, testCases: extractedTestCases });
+    }
+  }
+
   for (const discovered of files) {
     let sourceText: string;
     try {
@@ -773,6 +806,7 @@ export async function runAudit(
         diagnostics: [{ code: diagnostic.code, message: diagnostic.message, severity: diagnostic.severity }],
         evidence: [],
       });
+      reportExtractingPhase(0); // never reached extraction at all — 0 test cases from this file
       continue;
     }
 
@@ -847,6 +881,7 @@ export async function runAudit(
         diagnostics: fileDiagnostics,
         evidence,
       });
+      reportExtractingPhase(extraction.testCases.length);
     } catch (error) {
       const diagnostic = withPath({
         code: 'extraction-failed',
@@ -861,6 +896,7 @@ export async function runAudit(
         diagnostics: [{ code: diagnostic.code, message: diagnostic.message, severity: diagnostic.severity }],
         evidence: [],
       });
+      reportExtractingPhase(0); // extraction itself failed — 0 test cases from this file
     }
   }
 
