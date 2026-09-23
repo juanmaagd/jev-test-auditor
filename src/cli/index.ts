@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { realpathSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getResolvedConfiguration } from '../application/configure.js';
 import { computeDryRunCacheHits, runAudit } from '../application/audit.js';
@@ -117,6 +118,12 @@ export interface CliDependencies {
    */
   readonly openHtmlReport?: (path: string) => Promise<OpenHtmlReportResult>;
   /**
+   * Test seam only: overrides the invocation directory that `--html` paths resolve against,
+   * including the default `report.html` used when `--html` is given without a path.
+   * Production default is `process.cwd()`.
+   */
+  readonly cwd?: () => string;
+  /**
    * Test seam only, consulted by `auth login`: overrides how the API key is
    * read from the terminal. Production default (`readApiKeyFromPrompt`)
    * reads `process.stdin`/`process.stdout` directly — hidden input on a
@@ -228,17 +235,18 @@ Options:
                       re-dispatches it, since there is no way to know whether the first attempt
                       completed, so a resumed run can cost slightly more than the work it appears to
                       redo. Requires --evaluate.
-  --html <path>      Render the canonical report (the same data --evaluate --json prints) into one
-                      self-contained offline HTML file at <path>: the JSON and every style and
+  --html [path]      Render the canonical report (the same data --evaluate --json prints) into one
+                      self-contained offline HTML file at [path], or at report.html in the current
+                      directory when no path is given: the JSON and every style and
                       script are embedded, with no CDN, no external stylesheet or font, and no
                       network access at render or view time. Evidence fragment source content is
                       never included — only provenance decisions and counts, exactly like the JSON
                       report. Without this flag, no file is written. An existing regular file at
-                      <path> is overwritten; an existing directory there, or a path whose parent
+                      that path is overwritten; an existing directory there, or a path whose parent
                       directory does not exist, is a usage error (exit 1) before any evaluation
                       work is dispatched. Requires --evaluate. Cannot be combined with --dry-run or
                       --inspect-payloads. See "Self-contained HTML report" in README.md.
-  --open             Opens the file --html <path> just wrote in the operating system's default
+  --open             Opens the file --html [path] just wrote in the operating system's default
                       viewer (macOS: open; Linux: xdg-open; Windows: explorer.exe) once it has been
                       written successfully. Never opens anything else. A failure to launch a viewer
                       (e.g. no viewer installed, as in most CI environments) is reported on stderr
@@ -739,11 +747,18 @@ interface ParsedAuditOptions {
   readonly json: boolean;
   /** `--resume <runId>` (Phase 5, task P5-4), parsed like `--rootDir` — consumes the next argument. `undefined` unless given. */
   readonly resume?: string;
-  /** `--html <path>` (Phase 6, task P6-4), parsed like `--rootDir` — consumes the next argument. `undefined` unless given. */
+  /**
+   * `--html [path]` (Phase 6, task P6-4): consumes the next argument unless it is missing or another
+   * option, in which case it defaults to `DEFAULT_HTML_REPORT_FILENAME` in the invocation directory.
+   * `undefined` unless given.
+   */
   readonly html?: string;
   /** `--open` (Phase 6, task P6-4): requires `html` to be set — enforced below, never independently meaningful. */
   readonly open: boolean;
 }
+
+/** File name `--html` writes into the invocation directory when given without a path. */
+const DEFAULT_HTML_REPORT_FILENAME = 'report.html';
 
 function parseAuditOptions(args: readonly string[]): ParsedAuditOptions | { readonly error: string } | { readonly help: true } {
   const overrides: ConfigurationOverrides = {};
@@ -794,7 +809,10 @@ function parseAuditOptions(args: readonly string[]): ParsedAuditOptions | { read
     }
     if (argument === '--html') {
       const path = args[index + 1];
-      if (path === undefined || path.startsWith('--')) return { error: '--html requires a path' };
+      if (path === undefined || path.startsWith('--')) {
+        html = DEFAULT_HTML_REPORT_FILENAME;
+        continue;
+      }
       html = path;
       index += 1;
       continue;
@@ -815,8 +833,8 @@ function parseAuditOptions(args: readonly string[]): ParsedAuditOptions | { read
   if (resume !== undefined && !evaluate) return { error: '--resume requires --evaluate (audit --evaluate --resume <runId>)' };
   if (html !== undefined && dryRun) return { error: '--html cannot be combined with --dry-run' };
   if (html !== undefined && inspectPayloads) return { error: '--html cannot be combined with --inspect-payloads' };
-  if (html !== undefined && !evaluate) return { error: '--html requires --evaluate (audit --evaluate --html <path>)' };
-  if (open && html === undefined) return { error: '--open requires --html (audit --evaluate --html <path> --open)' };
+  if (html !== undefined && !evaluate) return { error: '--html requires --evaluate (audit --evaluate --html [path])' };
+  if (open && html === undefined) return { error: '--open requires --html (audit --evaluate --html [path] --open)' };
   return {
     overrides,
     inspectPayloads,
@@ -979,14 +997,16 @@ export async function runCli(
     return 1;
   }
 
+  const htmlPath = parsed.html === undefined ? undefined : resolve(dependencies.cwd?.() ?? process.cwd(), parsed.html);
+
   // Phase 6, task P6-4: preflight `--html <path>` BEFORE any (potentially expensive, real-money)
   // evaluation work is dispatched — a bad path (an existing directory, a missing parent) costs
   // nothing this way, exactly like the API-key/store checks below fail fast before spending.
   // `writeHtmlReport` re-checks the same two conditions at write time regardless (the unavoidable
   // TOCTOU race between this preflight and the real write), so this is a UX improvement, never the
   // only guarantee — see `src/adapters/html-report-writer.ts`'s own doc.
-  if (parsed.html !== undefined) {
-    const problem = await checkHtmlReportPath(parsed.html);
+  if (htmlPath !== undefined) {
+    const problem = await checkHtmlReportPath(htmlPath);
     if (problem !== undefined) {
       io.writeLine(`Unable to write the HTML report: ${problem.message}`);
       return 1;
@@ -1169,10 +1189,10 @@ export async function runCli(
       // exactly like `--json` prints no report either. `report`/`html` are computed fresh here
       // (never reused from `evaluateJsonLine` above) — `buildAuditReport` is pure and cheap, and
       // keeping this block self-contained is worth the one extra call.
-      if (parsed.html !== undefined) {
+      if (htmlPath !== undefined) {
         const report = buildAuditReport(result, REPORT_CONTEXT);
         const html = renderAuditReportHtml(report);
-        const writeResult = await writeHtmlReport(parsed.html, html);
+        const writeResult = await writeHtmlReport(htmlPath, html);
         if (!writeResult.written) {
           io.writeLine(`Unable to write the HTML report: ${writeResult.message}`);
           return 1;
@@ -1181,17 +1201,17 @@ export async function runCli(
         // stderr, never stdout, exactly like progress (P6-3): `--evaluate --json`'s stdout stays
         // byte-clean regardless of whether --html was also given.
         process.stderr.write(
-          `HTML report written to ${parsed.html}${writeResult.overwrote ? ' (overwriting an existing file)' : ''}.\n`,
+          `HTML report written to ${htmlPath}${writeResult.overwrote ? ' (overwriting an existing file)' : ''}.\n`,
         );
 
         if (parsed.open) {
           const openReport = dependencies.openHtmlReport ?? ((path: string) => openHtmlReportWithViewer(path));
-          const openResult = await openReport(parsed.html);
+          const openResult = await openReport(htmlPath);
           if (!openResult.opened) {
             // Never fatal, never changes the exit status, never loses the already-written file —
             // see `src/adapters/html-report-opener.ts`'s own doc for why a CI environment with no
             // viewer installed is the expected common case here, not an error.
-            process.stderr.write(`Unable to open the HTML report automatically: ${openResult.reason}. The report remains at ${parsed.html}.\n`);
+            process.stderr.write(`Unable to open the HTML report automatically: ${openResult.reason}. The report remains at ${htmlPath}.\n`);
           }
         }
       }

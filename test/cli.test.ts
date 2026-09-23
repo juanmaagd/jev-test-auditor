@@ -3250,17 +3250,53 @@ describe('--html and --open (Phase 6, task P6-4)', () => {
       const output = captureOutput();
       const exitCode = await runCli(['--help'], output.io);
       expect(exitCode).toBe(0);
-      expect(output.lines[0]).toContain('--html <path>');
+      expect(output.lines[0]).toContain('--html [path]');
       expect(output.lines[0]).toContain('--open');
     });
 
-    it('rejects --html with no evaluation seam ever reached when the path argument is missing', async () => {
+    it('writes report.html into the invocation directory when --html is given without a path', async () => {
+      const root = await fixture(mathFixtureFiles);
+      const invocationDir = await mkdtemp(join(tmpdir(), 'jev-html-default-'));
+      temporaryRoots.push(invocationDir);
+
       const output = captureOutput();
-      const exitCode = await runCli(['audit', '--html'], output.io, {
-        createEvaluationPort: () => { throw new Error('must not resolve an evaluation port for a usage error'); },
+      const exitCode = await runCli(['audit', '--rootDir', root, '--evaluate', '--html'], output.io, {
+        createEvaluationPort: () => fakeEvaluationPort(),
+        createStorePort: () => fakeStorePort(),
+        cwd: () => invocationDir,
       });
+
+      expect(exitCode).toBe(0);
+      expect(await readdirSorted(invocationDir)).toEqual(['report.html']);
+      expect(await readFile(join(invocationDir, 'report.html'), 'utf8')).toContain('id="jev-report-data"');
+    });
+
+    it('opens the default report.html when --html without a path is followed by --open', async () => {
+      const root = await fixture(mathFixtureFiles);
+      const invocationDir = await mkdtemp(join(tmpdir(), 'jev-html-default-open-'));
+      temporaryRoots.push(invocationDir);
+      const opened: string[] = [];
+
+      const output = captureOutput();
+      const exitCode = await runCli(['audit', '--rootDir', root, '--evaluate', '--html', '--open'], output.io, {
+        createEvaluationPort: () => fakeEvaluationPort(),
+        createStorePort: () => fakeStorePort(),
+        cwd: () => invocationDir,
+        openHtmlReport: async (path) => {
+          opened.push(path);
+          return { opened: true };
+        },
+      });
+
+      expect(exitCode).toBe(0);
+      expect(opened).toEqual([join(invocationDir, 'report.html')]);
+    });
+
+    it('still rejects a pathless --html without --evaluate', async () => {
+      const output = captureOutput();
+      const exitCode = await runCli(['audit', '--html'], output.io);
       expect(exitCode).toBe(1);
-      expect(output.lines[0]).toContain('--html requires a path');
+      expect(output.lines[0]).toContain('--html requires --evaluate');
     });
 
     it('rejects --html without --evaluate', async () => {
