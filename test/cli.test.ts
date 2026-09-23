@@ -3268,7 +3268,7 @@ describe('--html and --open (Phase 6, task P6-4)', () => {
 
       expect(exitCode).toBe(0);
       expect(await readdirSorted(invocationDir)).toEqual(['report.html']);
-      expect(await readFile(join(invocationDir, 'report.html'), 'utf8')).toContain('id="jev-report-data"');
+      expect(await readFile(join(invocationDir, 'report.html'), 'utf8')).toContain('id="jev-hero"');
     });
 
     it('opens the default report.html when --html without a path is followed by --open', async () => {
@@ -3417,7 +3417,7 @@ describe('--html and --open (Phase 6, task P6-4)', () => {
   });
 
   describe('writes one genuinely self-contained file', () => {
-    it('writes exactly one HTML file at the given path, embedding the JSON and containing no external reference', async () => {
+    it('writes exactly one HTML file at the given path — a fixed-size overview, no embedded JSON, no external reference', async () => {
       const root = await fixture(mathFixtureFiles);
       const dir = await mkdtemp(join(tmpdir(), 'jev-html-write-'));
       temporaryRoots.push(dir);
@@ -3436,14 +3436,13 @@ describe('--html and --open (Phase 6, task P6-4)', () => {
 
       const html = await readFile(target, 'utf8');
       expect(html.trimStart().toLowerCase()).toMatch(/^<!doctype html>/);
-      expect(html).toContain('id="jev-report-data"');
+      expect(html).toContain('id="jev-hero"');
+      // Per-test/canonical detail lives only in `--json`; the HTML embeds no JSON block at all.
+      expect(html).not.toContain('id="jev-report-data"');
+      expect(html).not.toContain('application/json');
       expect(html).not.toMatch(/<link\b/i);
       expect(html).not.toMatch(/\bsrc\s*=\s*"https?:\/\//i);
-      const match = /<script type="application\/json" id="jev-report-data">([\s\S]*?)<\/script>/.exec(html);
-      expect(match).not.toBeNull();
-      const parsed = JSON.parse(match![1]!) as { reportVersion: number; rootDir: string };
-      expect(parsed.reportVersion).toBe(1);
-      expect(parsed.rootDir).toBe(root);
+      expect(html).toContain(root);
 
       expect(await readdirSorted(dir)).toEqual(['report.html']);
     });

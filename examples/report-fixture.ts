@@ -1,7 +1,7 @@
 /**
  * Synthetic audit report used only to render `examples/audit-report.html`.
- * The numbers are a style fixture: they exercise every status, the cost line,
- * and the noul matrix. They are not a recorded audit.
+ * The numbers are a style fixture: they exercise every status, the cost
+ * line, and a needs-review dimension. They are not a recorded audit.
  */
 import type { DimensionJudgment, OverallClassificationStatus } from '../src/domain/classification.js';
 import type { AuditReport, AuditReportClassification } from '../src/domain/report.js';
