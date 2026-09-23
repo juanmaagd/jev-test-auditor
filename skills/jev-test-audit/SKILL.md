@@ -9,11 +9,12 @@ metadata:
 
 ## Activation Contract
 
-Load when the user asks to review, explain, or act on `jev-test-auditor`/`jta` results — "audit my tests", "what's wrong with my tests", "fix the misleading/weak tests" — or right after a `jta audit --evaluate` run. Scope: this repo's own Jest/Vitest tests that `jev-test-auditor` judged. Never a general source-code review.
+Load when the user asks to review, explain, or act on `jev-test-auditor`/`jta` results — "audit my tests", "what's wrong with my tests", "fix the misleading/weak tests" — or right after a `jta audit --evaluate` run. Scope: the audited project's own Jest/Vitest tests, never a general source-code review.
 
 ## Hard Rules
 
-- Never load a full report (`.jta/latest.json`, `jta report --json`) into context. Always pipe it through `node skills/jev-test-audit/assets/summarize.mjs` and read only the compact JSON it prints.
+- This skill's scripts live in `assets/`, next to this file (e.g. `~/.claude/skills/jev-test-audit/assets/`) — resolve `assets/summarize.mjs` and `assets/fixer-brief.md` relative to *this file's own directory*, never the audited project's.
+- Never load a full report (`.jta/latest.json`, `jta report --json`) into context. Always pipe it through `assets/summarize.mjs` and read only the compact JSON it prints.
 - Get results with `jta report --last --json` — free, offline. Suggest `jta audit --evaluate` only when no report exists yet, and never run it without the user's explicit consent: it costs money and sends evidence to TypeSafe. Offer `jta audit --dry-run` first so the user sees the cost.
 - No test edit without the user's explicit approval of that batch. Ever.
 - One fix subagent per file, never two writers on the same file; cap concurrent subagents (e.g. 3–5).
@@ -32,7 +33,7 @@ Load when the user asks to review, explain, or act on `jev-test-auditor`/`jta` r
 
 ## Execution Steps
 
-1. Run `jta report --last --json | node skills/jev-test-audit/assets/summarize.mjs -` (or a report path / `--root`). No report yet: follow the Decision Gate above.
+1. Run `jta report --last --json | node assets/summarize.mjs -` (or a report path / `--root`), from this skill's own directory. No report yet: follow the Decision Gate above.
 2. Read only the summary JSON. Explain needs-change count/share with its denominator, the worst folders/dimensions, and what each dimension means in plain language.
 3. Re-run with `--worklist` (optionally `--folder`/`--status`/`--dimension`/`--limit`) for the per-file worklist.
 4. Present a fix plan in batches by file or folder. Ask which batches to fix, then stop and wait.

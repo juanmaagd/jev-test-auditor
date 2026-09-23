@@ -28,7 +28,6 @@
  */
 import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
 
 /** Mirrors `HEATMAP_ROWS_LIMIT`, `src/domain/report-overview.ts`. */
 const DEFAULT_TOP_FOLDERS_LIMIT = 12;
@@ -437,12 +436,14 @@ export function main(argv) {
   }
 }
 
-const isMainModule = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
-if (isMainModule) {
-  try {
-    main(process.argv.slice(2));
-  } catch (error) {
-    process.stderr.write(`Error: ${error instanceof Error ? error.message : String(error)}\n`);
-    process.exitCode = 1;
-  }
+// No "is this the entry module" guard: nothing ever imports this file (it ships as a standalone
+// CLI asset — see this file's own doc). A symlinked skill directory (the common `~/.claude/skills/`
+// dotfiles pattern) can make `process.argv[1]` and `import.meta.url` disagree after path
+// resolution, and a guard that silently skips `main()` on that mismatch would exit 0 with no
+// output — worse than always running it.
+try {
+  main(process.argv.slice(2));
+} catch (error) {
+  process.stderr.write(`Error: ${error instanceof Error ? error.message : String(error)}\n`);
+  process.exitCode = 1;
 }
