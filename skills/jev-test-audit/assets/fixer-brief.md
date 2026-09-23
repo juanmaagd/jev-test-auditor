@@ -19,11 +19,16 @@ below. You are fixing tests, not the feature they cover.
 `{{FINDINGS}}`
 
 <!--
-  Orchestrator: paste this file's worklist entry from `summarize.mjs --worklist`, one line per
-  flagged test — name, status (weak / misleading / needs-review), and its misleading/weak
-  dimensions with their reasons. A `needs-review` dimension means the model was uncertain, not
-  that the test is broken; treat it as a prompt to double-check, not a confirmed defect.
+  Orchestrator: paste this file's `report-query.mjs file <path>` output — every judged test with
+  its per-dimension level and status. A `needs-review` dimension means the model was uncertain,
+  not that the test is broken; treat it as a prompt to double-check, not a confirmed defect.
 -->
+
+## Dimension guide
+
+Read only the section(s) in `../references/dimensions.md` for the dimensions flagged above (by
+`dimensionId`) — what that dimension checks, what misleading/weak means concretely, and typical
+fixes. Do not read the whole guide for one finding.
 
 ## Test command
 
