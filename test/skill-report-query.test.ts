@@ -330,6 +330,7 @@ describe('report-query.mjs: summary parity with summarizeReport', () => {
       readonly discovered: number;
       readonly judged: number;
       readonly needsChange: { readonly count: number; readonly denominator: number; readonly share: number };
+      readonly needsReview: { readonly count: number; readonly denominator: number; readonly share: number };
       readonly statusCounts: Record<string, number>;
       readonly dimensions: readonly { readonly dimensionId: string; readonly dimensionLabel: string; readonly total: number; readonly badCount: number; readonly badShare: number }[];
       readonly topFolders: Paginated<{ readonly folder: string; readonly needsChangeCount: number; readonly judgedTotal: number; readonly isOther: boolean }>;
@@ -342,6 +343,11 @@ describe('report-query.mjs: summary parity with summarizeReport', () => {
     expect(summary.needsChange.count).toBe(overview.needsChange.count);
     expect(summary.needsChange.denominator).toBe(overview.needsChange.judgedTotal);
     expect(summary.needsChange.share).toBeCloseTo(overview.needsChange.share, 12);
+
+    // needs-review is its own figure, never folded into needsChange — see report-overview.ts.
+    expect(summary.needsReview.count).toBe(overview.needsReview.count);
+    expect(summary.needsReview.denominator).toBe(overview.needsReview.judgedTotal);
+    expect(summary.needsReview.share).toBeCloseTo(overview.needsReview.share, 12);
 
     for (const status of ['healthy', 'weak', 'misleading', 'needs-review'] as const) {
       const entry = overview.statusBreakdown.find((candidate) => candidate.status === status);
@@ -401,6 +407,15 @@ describe('report-query.mjs: worklist', () => {
     expect(allTests.every((test) => test.status !== 'healthy')).toBe(true);
     const misleadingTest = allTests.find((test) => test.status === 'misleading');
     expect(misleadingTest!.dimensions).toEqual([{ dimensionId: 'falsifiability', level: 'misleading' }]);
+  });
+
+  it('never lists a needs-review-status test in files — needs-review is not "needs a change"', () => {
+    const result = run(['worklist', '-'], { input: JSON.stringify(fixture()) });
+    expect(result.status).toBe(0);
+    interface Worklist { readonly files: Paginated<{ readonly path: string; readonly tests: readonly { readonly name: string; readonly status: string }[] }> }
+    const worklist = parse<Worklist>(result.stdout);
+    const allTests = worklist.files.items.flatMap((file) => file.tests);
+    expect(allTests.map((test) => test.name)).toEqual(['test a']);
   });
 
   it('surfaces needs-review dimensions with their reason codes in a separate group', () => {
@@ -555,16 +570,28 @@ describe('report-query.mjs: batches', () => {
     expect(new Set(allFiles).size).toBe(allFiles.length); // no file split across batches, none repeated
   });
 
-  it('--exclude-needs-review drops needs-review tests from batch counts', () => {
+  it('default candidates are needs-change only (misleading/weak) — a needs-review test never becomes a fix batch', () => {
     const classifications = [
       classification('m1', 'src/x.test.ts', 'misleading', [dimension({ level: 'misleading' })]),
       classification('r1', 'src/x.test.ts', 'needs-review', [dimension({ needsReview: true })]),
     ];
-    const result = run(['batches', '--by', 'file', '--exclude-needs-review', '-'], { input: JSON.stringify(reportFrom(classifications)) });
+    const result = run(['batches', '--by', 'file', '-'], { input: JSON.stringify(reportFrom(classifications)) });
     expect(result.status).toBe(0);
     interface BatchesResult { readonly batches: Paginated<{ readonly testCount: number }> }
     const batchesResult = parse<BatchesResult>(result.stdout);
     expect(batchesResult.batches.items[0]!.testCount).toBe(1);
+  });
+
+  it('--include-needs-review opts a needs-review test back into batch counts', () => {
+    const classifications = [
+      classification('m1', 'src/x.test.ts', 'misleading', [dimension({ level: 'misleading' })]),
+      classification('r1', 'src/x.test.ts', 'needs-review', [dimension({ needsReview: true })]),
+    ];
+    const result = run(['batches', '--by', 'file', '--include-needs-review', '-'], { input: JSON.stringify(reportFrom(classifications)) });
+    expect(result.status).toBe(0);
+    interface BatchesResult { readonly batches: Paginated<{ readonly testCount: number }> }
+    const batchesResult = parse<BatchesResult>(result.stdout);
+    expect(batchesResult.batches.items[0]!.testCount).toBe(2);
   });
 });
 

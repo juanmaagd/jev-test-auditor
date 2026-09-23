@@ -7,11 +7,21 @@
  * module — `summarizeReport` is a read-only derivation a report reader could recompute from the
  * canonical JSON (`audit --evaluate --json`) at any time.
  *
+ * **`needsChange` never counts `needs-review`.** A `needs-review` classification means the model
+ * was uncertain about that test, never that the test is a confirmed defect (README, "`needs-review`
+ * means uncertainty, not a passing or failing grade"), so it is deliberately excluded from
+ * `needsChange` and every "tests needing a change" count below (`topFiles.needsChangeCount`,
+ * `folderHeatmap` row `needsChangeCount`) — misleading/weak only. It is reported as its own figure,
+ * {@link ReportOverview.needsReview}, over the SAME judged denominator as `needsChange`, so a reader
+ * can see both without either folding into the other. The status bar (`statusBreakdown`) and the
+ * per-dimension needs-review counts are unaffected — they already keep needs-review separate.
+ *
  * **Denominators, precisely** (see also this task's own "Constraints": "Every percentage names its
  * denominator" / "Division by zero never renders NaN"):
- * - `needsChange.share` and every {@link ReportOverviewStatusEntry.share} are over JUDGED tests
- *   (`report.classifications.length`), never discovered tests (`report.discovery.totals.testCases`)
- *   — a test that was skipped, failed outright, or never evaluated is not part of this denominator.
+ * - `needsChange.share`, `needsReview.share`, and every {@link ReportOverviewStatusEntry.share} are
+ *   over JUDGED tests (`report.classifications.length`), never discovered tests
+ *   (`report.discovery.totals.testCases`) — a test that was skipped, failed outright, or never
+ *   evaluated is not part of this denominator.
  * - `coverage.judgedShare` is the one place discovered and judged are compared directly, as a
  *   share, so the discovered/judged gap is visible without conflating it with "needs a change".
  * - Each {@link ReportOverviewDimension}'s six shares are over that dimension's OWN total — the
@@ -53,6 +63,13 @@ export const HEATMAP_ROWS_LIMIT = 12;
 export const HEATMAP_MIN_GROUP_SIZE = 3;
 
 export interface ReportOverviewNeedsChange {
+  readonly count: number;
+  readonly judgedTotal: number;
+  readonly share: number;
+}
+
+/** Same shape as {@link ReportOverviewNeedsChange}, over the same judged denominator — `needs-review` means the model was uncertain, never that the test is broken, so it is never folded into `needsChange`. */
+export interface ReportOverviewNeedsReview {
   readonly count: number;
   readonly judgedTotal: number;
   readonly share: number;
@@ -138,6 +155,8 @@ export interface ReportOverviewHeatmap {
 
 export interface ReportOverview {
   readonly needsChange: ReportOverviewNeedsChange;
+  /** `needs-review` counted on its own — uncertain, never a confirmed defect. Same judged denominator as {@link ReportOverview.needsChange}; the two never overlap and never double-count a test. */
+  readonly needsReview: ReportOverviewNeedsReview;
   /** Worst-first: `misleading`, `weak`, `needs-review`, `healthy` — matches the report's own established ordering (`src/domain/html-report.ts`'s `STATUS_SEVERITY`). */
   readonly statusBreakdown: readonly ReportOverviewStatusEntry[];
   readonly coverage: ReportOverviewCoverage;
@@ -158,10 +177,17 @@ function safeShare(numerator: number, denominator: number): number {
 
 const STATUS_ORDER: readonly OverallClassificationStatus[] = ['misleading', 'weak', 'needs-review', 'healthy'];
 
+/** `needs-review` is deliberately excluded — see this module's own doc, "Denominators, precisely". */
 function summarizeNeedsChange(report: AuditReport): ReportOverviewNeedsChange {
   const judgedTotal = report.classifications.length;
   const counts = report.totals.statusCounts;
-  const count = counts.misleading + counts.weak + counts['needs-review'];
+  const count = counts.misleading + counts.weak;
+  return { count, judgedTotal, share: safeShare(count, judgedTotal) };
+}
+
+function summarizeNeedsReview(report: AuditReport): ReportOverviewNeedsReview {
+  const judgedTotal = report.classifications.length;
+  const count = report.totals.statusCounts['needs-review'];
   return { count, judgedTotal, share: safeShare(count, judgedTotal) };
 }
 
@@ -259,7 +285,7 @@ function summarizeTopFiles(report: AuditReport): readonly ReportOverviewFileEntr
   for (const classification of report.classifications) {
     const tally = byPath.get(classification.repositoryRelativePath) ?? { needsChange: 0, total: 0 };
     tally.total += 1;
-    if (classification.status !== 'healthy') tally.needsChange += 1;
+    if (classification.status === 'misleading' || classification.status === 'weak') tally.needsChange += 1;
     byPath.set(classification.repositoryRelativePath, tally);
   }
   return [...byPath.entries()]
@@ -354,7 +380,7 @@ function summarizeFolderHeatmap(
       folders.set(key, tally);
     }
     tally.total += 1;
-    if (classification.status !== 'healthy') tally.needsChange += 1;
+    if (classification.status === 'misleading' || classification.status === 'weak') tally.needsChange += 1;
     for (const dim of classification.dimensions) addHeatmapCellTally(tally, dim.dimensionId, dim);
   });
 
@@ -432,6 +458,7 @@ export function summarizeReport(report: AuditReport): ReportOverview {
   const dimensionOrder = dimensions.map(({ dimensionId, dimensionLabel }) => ({ dimensionId, dimensionLabel }));
   return {
     needsChange: summarizeNeedsChange(report),
+    needsReview: summarizeNeedsReview(report),
     statusBreakdown: summarizeStatusBreakdown(report),
     coverage: summarizeCoverage(report),
     dimensions,

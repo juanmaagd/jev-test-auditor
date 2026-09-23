@@ -229,7 +229,18 @@ section > p { max-width: 68ch; color: var(--graphite); }
   letter-spacing: 0.2px;
   max-width: 34ch;
 }
-.hero-note { color: var(--smoke); margin: 0 0 24px; }
+.hero-note { color: var(--smoke); margin: 0 0 12px; }
+.hero-secondary { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin: 0 0 24px; }
+.hero-secondary-value {
+  font-family: var(--font-display);
+  font-weight: 300;
+  font-size: 28px;
+  line-height: 1;
+  letter-spacing: -0.4px;
+  color: var(--violet);
+  font-variant-numeric: proportional-nums;
+}
+.hero-secondary-label { font-size: 13px; font-weight: 500; letter-spacing: 0.13px; color: var(--smoke); max-width: 34ch; }
 .status-stack { display: flex; flex-direction: column; gap: 16px; }
 .stack-bar {
   display: flex;
@@ -483,10 +494,11 @@ footer p { margin: 0; max-width: 62ch; }
 
 <section id="jev-hero" class="hero">
 <p class="hero-figure">
-<span class="hero-value">60%</span>
+<span class="hero-value">40%</span>
 <span class="hero-label">of 5 judged tests need a change</span>
 </p>
-<p class="hero-note">3 of 5 judged tests are misleading, weak, or need review.</p>
+<p class="hero-note">2 of 5 judged tests are misleading or weak.</p>
+<p class="hero-secondary"><span class="hero-secondary-value">20%</span><span class="hero-secondary-label">of 5 judged tests need review (uncertain, not a confirmed defect)</span></p>
 <div class="status-stack">
 <div class="stack-bar" role="img" aria-label="Status share of judged tests"><span class="stack-seg status-misleading" style="flex-grow:1" title="Misleading: 1 (20%)"></span><span class="stack-seg status-weak" style="flex-grow:1" title="Weak: 1 (20%)"></span><span class="stack-seg status-needs-review" style="flex-grow:1" title="Needs review: 1 (20%)"></span><span class="stack-seg status-healthy" style="flex-grow:2" title="Healthy: 2 (40%)"></span></div>
 <div class="status-summary"><span class="badge status-misleading">Misleading<span class="stat-count">1</span><span class="stat-share">20%</span></span><span class="badge status-weak">Weak<span class="stat-count">1</span><span class="stat-share">20%</span></span><span class="badge status-needs-review">Needs review<span class="stat-count">1</span><span class="stat-share">20%</span></span><span class="badge status-healthy">Healthy<span class="stat-count">2</span><span class="stat-share">40%</span></span></div>
@@ -544,8 +556,8 @@ footer p { margin: 0; max-width: 62ch; }
 <section id="jev-top-files">
 <h2>Top files</h2>
 <p>Files ranked by tests needing a change, each against its own judged test count — top 2.</p>
-<div class="file-list"><div class="file-row"><span class="file-path" title="src/billing.test.ts">src/billing.test.ts</span><span class="file-bar-track"><span class="file-bar-fill" style="width:66.66666666666666%;background:#ff4704" title="src/billing.test.ts: 2/3 (67%)"></span></span><span class="file-bar-value">2/3 · 67%</span></div>
-<div class="file-row"><span class="file-path" title="src/invoice.test.ts">src/invoice.test.ts</span><span class="file-bar-track"><span class="file-bar-fill" style="width:50%;background:#ff4704" title="src/invoice.test.ts: 1/2 (50%)"></span></span><span class="file-bar-value">1/2 · 50%</span></div></div>
+<div class="file-list"><div class="file-row"><span class="file-path" title="src/invoice.test.ts">src/invoice.test.ts</span><span class="file-bar-track"><span class="file-bar-fill" style="width:50%;background:#ff4704" title="src/invoice.test.ts: 1/2 (50%)"></span></span><span class="file-bar-value">1/2 · 50%</span></div>
+<div class="file-row"><span class="file-path" title="src/billing.test.ts">src/billing.test.ts</span><span class="file-bar-track"><span class="file-bar-fill" style="width:33.33333333333333%;background:#a59f97" title="src/billing.test.ts: 1/3 (33%)"></span></span><span class="file-bar-value">1/3 · 33%</span></div></div>
 </section>
 <section id="jev-diagnostics">
 <h2>Diagnostics</h2>

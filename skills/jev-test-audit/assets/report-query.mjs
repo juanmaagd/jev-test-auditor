@@ -17,13 +17,13 @@
  *   node report-query.mjs <subcommand> [args] [options]
  *
  * Subcommands:
- *   summary  [reportPath|-] [options]                    - headline needs-change/status/dimension aggregate
- *   worklist [reportPath|-] [options]                     - non-healthy tests (files) + needs-review reasons (needsReview)
+ *   summary  [reportPath|-] [options]                    - headline needs-change/needs-review/status/dimension aggregate
+ *   worklist [reportPath|-] [options]                     - needs-change tests (files) + needs-review reasons (needsReview)
  *   file <path> [reportPath|-] [options]                  - every judged test in one file, per-dimension level+status
  *   test <name-substring|testCaseId> [reportPath|-] [opt] - matching tests with full per-dimension detail
  *   folders  [reportPath|-] [options]                     - ranked folder aggregate (reuses summary math)
  *   dimensions [reportPath|-] [options]                   - ranked dimension aggregate, worst-first
- *   batches --by file|folder [--max-tests N] [--exclude-needs-review] [reportPath|-] [options]
+ *   batches --by file|folder [--max-tests N] [--include-needs-review] [reportPath|-] [options]
  *                                                          - proposed fix batches
  *   diff <beforeRunId|path> [afterRunId|path] [--root <dir>] [--limit/--offset]
  *                                                          - before/after comparison, default after = latest
@@ -69,13 +69,13 @@ const USAGE = [
   'Usage: node report-query.mjs <subcommand> [args] [options]',
   '',
   'Subcommands:',
-  '  summary    [reportPath|-]  headline needs-change/status/dimension aggregate',
-  '  worklist   [reportPath|-]  non-healthy tests (files) + needs-review reasons (needsReview)',
+  '  summary    [reportPath|-]  headline needs-change/needs-review/status/dimension aggregate',
+  '  worklist   [reportPath|-]  needs-change tests (files) + needs-review reasons (needsReview)',
   '  file       <path> [reportPath|-]  every judged test in one file, per-dimension level+status',
   '  test       <name-substring|testCaseId> [reportPath|-]  matching tests, full per-dimension detail',
   '  folders    [reportPath|-]  ranked folder aggregate',
   '  dimensions [reportPath|-]  ranked dimension aggregate, worst-first',
-  '  batches    --by file|folder [--max-tests N] [--exclude-needs-review] [reportPath|-]',
+  '  batches    --by file|folder [--max-tests N] [--include-needs-review] [reportPath|-]',
   '  diff       <beforeRunId|path> [afterRunId|path]  before/after comparison (default after = latest)',
   '  runs       list persisted run ids under .jta/reports',
   '',
@@ -111,8 +111,8 @@ function parseArgs(argv) {
       options.help = true;
       continue;
     }
-    if (argument === '--exclude-needs-review') {
-      options.excludeNeedsReview = true;
+    if (argument === '--include-needs-review') {
+      options.includeNeedsReview = true;
       continue;
     }
     const key = VALUE_FLAG_KEYS[argument];
@@ -275,9 +275,18 @@ function summarizeStatusCounts(classifications) {
   return counts;
 }
 
+// `needs-review` is deliberately excluded here — see src/domain/report-overview.ts, "'Needs a
+// change' never counts needs-review": the model was uncertain, never a confirmed defect.
 function summarizeNeedsChange(classifications, statusCounts) {
   const denominator = classifications.length;
-  const count = statusCounts.misleading + statusCounts.weak + statusCounts['needs-review'];
+  const count = statusCounts.misleading + statusCounts.weak;
+  return { count, denominator, share: safeShare(count, denominator) };
+}
+
+/** `needs-review`'s own figure, over the SAME denominator as `summarizeNeedsChange` — never folded into it. Mirrors `summarizeNeedsReview`, src/domain/report-overview.ts. */
+function summarizeNeedsReview(classifications, statusCounts) {
+  const denominator = classifications.length;
+  const count = statusCounts['needs-review'];
   return { count, denominator, share: safeShare(count, denominator) };
 }
 
@@ -335,7 +344,7 @@ function summarizeTopFolders(classifications) {
       folders.set(key, tally);
     }
     tally.total += 1;
-    if (classification.status !== 'healthy') tally.needsChange += 1;
+    if (classification.status === 'misleading' || classification.status === 'weak') tally.needsChange += 1;
   });
 
   const ranked = [...folders.entries()].sort(
@@ -376,7 +385,7 @@ function summarizeTopFiles(classifications) {
   for (const classification of classifications) {
     const tally = byPath.get(classification.repositoryRelativePath) ?? { needsChange: 0, total: 0 };
     tally.total += 1;
-    if (classification.status !== 'healthy') tally.needsChange += 1;
+    if (classification.status === 'misleading' || classification.status === 'weak') tally.needsChange += 1;
     byPath.set(classification.repositoryRelativePath, tally);
   }
   return [...byPath.entries()]
@@ -410,6 +419,7 @@ function cmdSummary(positionals, options) {
     discovered: report.discovery.totals.testCases,
     judged: filtered.length,
     needsChange: summarizeNeedsChange(filtered, statusCounts),
+    needsReview: summarizeNeedsReview(filtered, statusCounts),
     statusCounts,
     dimensions: summarizeDimensions(filtered),
     topFolders: paginate(summarizeTopFolders(filtered), foldersLimit.limit, foldersLimit.offset),
@@ -420,10 +430,13 @@ function cmdSummary(positionals, options) {
 /**
  * Both groups read `classification.dimensions` directly (never `findings`) — the same source
  * `summary`/`dimensions`/`file`/`test` already read, so there is exactly one place a dimension's
- * level/status/reason comes from. `files`: non-healthy tests grouped by file, with their judged
- * misleading/weak dimensions (a judged dimension never carries a `reason` — only a needs-review
- * dimension does). `needsReview`: the previously-dead `reason` codes, one entry per needs-review
- * dimension, grouped by file.
+ * level/status/reason comes from. `files`: needs-change tests (status misleading/weak — NEVER
+ * needs-review, which is uncertain rather than a confirmed defect) grouped by file, with their
+ * judged misleading/weak dimensions (a judged dimension never carries a `reason` — only a
+ * needs-review dimension does). `needsReview`: the previously-dead `reason` codes, one entry per
+ * needs-review dimension, grouped by file — scanned over every filtered classification, so a
+ * misleading/weak test that ALSO carries a needs-review dimension on another dimensionId still
+ * appears in both groups.
  */
 function cmdWorklist(positionals, options) {
   const report = readAndParseReport(positionals[0], options);
@@ -436,7 +449,9 @@ function cmdWorklist(positionals, options) {
 
   const byFile = new Map();
   for (const classification of filtered) {
-    if (classification.status === 'healthy') continue;
+    // needs a change = misleading/weak only; needs-review is uncertain, never a confirmed defect,
+    // and is already surfaced separately below (`needsReviewByFile`).
+    if (classification.status !== 'misleading' && classification.status !== 'weak') continue;
     const list = byFile.get(classification.repositoryRelativePath) ?? [];
     list.push(classification);
     byFile.set(classification.repositoryRelativePath, list);
@@ -638,14 +653,22 @@ function greedyChunk(files, maxTests) {
   return chunks;
 }
 
+/**
+ * Default candidates are needs-change only (misleading/weak) — a fix batch proposes tests to FIX,
+ * and `needs-review` means the model was uncertain, never a confirmed defect (see SKILL.md's own
+ * Hard Rule: "never present it as a defect"). `--include-needs-review` opts uncertain tests back in
+ * for a batch that also wants a human to double-check them alongside real fixes.
+ */
 function cmdBatches(positionals, options) {
   const report = readAndParseReport(positionals[0], options);
   const by = options.by ?? 'file';
   if (by !== 'file' && by !== 'folder') throw new UsageError('--by must be "file" or "folder"');
   const maxTests = options.maxTests !== undefined ? parsePositiveIntOption(options.maxTests, 'max-tests') : undefined;
 
-  let candidates = report.classifications.filter((classification) => classification.status !== 'healthy');
-  if (options.excludeNeedsReview) candidates = candidates.filter((classification) => classification.status !== 'needs-review');
+  let candidates = report.classifications.filter((classification) => classification.status === 'misleading' || classification.status === 'weak');
+  if (options.includeNeedsReview) {
+    candidates = report.classifications.filter((classification) => classification.status !== 'healthy');
+  }
 
   const { limit, offset } = limitOffset(options, DEFAULT_BATCHES_LIMIT);
   const batches = by === 'file' ? buildFileBatches(candidates) : buildFolderBatches(candidates, maxTests);

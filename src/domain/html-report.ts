@@ -20,6 +20,12 @@
  * page no longer embeds that canonical JSON either (Phase 6 shipped it as `#jev-report-data`; a real
  * 7,234-test run made the file weigh megabytes) — the HTML is for a glance, the JSON is for a tool.
  *
+ * **"Needs a change" never counts `needs-review`.** The hero headline and every downstream ranking
+ * (top files, folder heatmap) count only misleading/weak tests — `needs-review` means the model was
+ * uncertain, never a confirmed defect (README). It is shown as its own, visually secondary figure
+ * right below the headline (`renderNeedsReviewFigure`, `.hero-secondary`), over the same judged
+ * denominator, so a reader sees both without either folding into the other.
+ *
  * **Escaping.** Every value interpolated into element text content, a double-quoted attribute, or a
  * `title="…"` hover string goes through {@link escapeHtml} (`&`, `<`, `>`, `"`, `'`). This is what
  * makes a hostile test name, file path, folder name, or diagnostic message safe to render as
@@ -215,6 +221,19 @@ function renderStatusStack(overview: ReportOverview): string {
   ].join('\n');
 }
 
+/** Secondary, visually muted figure for `needs-review` — same judged denominator as the headline, never merged into it. Empty when there is nothing to review (no denominator, or zero needs-review). */
+function renderNeedsReviewFigure(overview: ReportOverview): string {
+  const { needsReview } = overview;
+  if (needsReview.judgedTotal === 0) return '';
+  const judgedWord = needsReview.judgedTotal === 1 ? 'judged test needs' : 'judged tests need';
+  return [
+    '<p class="hero-secondary">',
+    `<span class="hero-secondary-value">${formatPercent(needsReview.share)}</span>`,
+    `<span class="hero-secondary-label">of ${needsReview.judgedTotal} ${judgedWord} review (uncertain, not a confirmed defect)</span>`,
+    '</p>',
+  ].join('');
+}
+
 function renderHero(overview: ReportOverview): string {
   const { needsChange } = overview;
   const judgedWord = needsChange.judgedTotal === 1 ? 'judged test needs' : 'judged tests need';
@@ -224,7 +243,8 @@ function renderHero(overview: ReportOverview): string {
     `<span class="hero-value">${formatPercent(needsChange.share)}</span>`,
     `<span class="hero-label">of ${needsChange.judgedTotal} ${judgedWord} a change</span>`,
     '</p>',
-    `<p class="hero-note">${needsChange.count} of ${needsChange.judgedTotal} judged tests are misleading, weak, or need review.</p>`,
+    `<p class="hero-note">${needsChange.count} of ${needsChange.judgedTotal} judged tests are misleading or weak.</p>`,
+    renderNeedsReviewFigure(overview),
     renderStatusStack(overview),
     '</section>',
   ].join('\n');
@@ -711,7 +731,18 @@ section > p { max-width: 68ch; color: var(--graphite); }
   letter-spacing: 0.2px;
   max-width: 34ch;
 }
-.hero-note { color: var(--smoke); margin: 0 0 24px; }
+.hero-note { color: var(--smoke); margin: 0 0 12px; }
+.hero-secondary { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin: 0 0 24px; }
+.hero-secondary-value {
+  font-family: var(--font-display);
+  font-weight: 300;
+  font-size: 28px;
+  line-height: 1;
+  letter-spacing: -0.4px;
+  color: var(--violet);
+  font-variant-numeric: proportional-nums;
+}
+.hero-secondary-label { font-size: 13px; font-weight: 500; letter-spacing: 0.13px; color: var(--smoke); max-width: 34ch; }
 .status-stack { display: flex; flex-direction: column; gap: 16px; }
 .stack-bar {
   display: flex;

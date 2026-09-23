@@ -132,6 +132,24 @@ describe('summarizeReport: needs-change is over judged tests, never discovered',
   });
 });
 
+describe('summarizeReport: needs-review is its own figure, never folded into needs-change', () => {
+  it('excludes needs-review from needsChange and reports it separately with the same judged denominator', () => {
+    const misleading = classification({ testCaseId: 'tc:v1:m' as TestCaseId, status: 'misleading' });
+    const needsReview = classification({ testCaseId: 'tc:v1:r' as TestCaseId, status: 'needs-review' });
+    const healthy = classification({ testCaseId: 'tc:v1:h' as TestCaseId, status: 'healthy' });
+    const report = minimalReport({
+      totals: {
+        ...minimalReport().totals,
+        statusCounts: { healthy: 1, weak: 0, misleading: 1, 'needs-review': 1 },
+      },
+      classifications: [misleading, needsReview, healthy],
+    });
+    const overview = summarizeReport(report);
+    expect(overview.needsChange).toEqual({ count: 1, judgedTotal: 3, share: 1 / 3 });
+    expect(overview.needsReview).toEqual({ count: 1, judgedTotal: 3, share: 1 / 3 });
+  });
+});
+
 describe('summarizeReport: status breakdown', () => {
   it('lists every status worst-first with count and share over judged tests', () => {
     const report = minimalReport({
@@ -272,6 +290,18 @@ describe('summarizeReport: top files', () => {
     const overview = summarizeReport(report);
     expect(overview.topFiles).toEqual([]);
   });
+
+  it('never counts a needs-review test toward needsChangeCount, and excludes a file whose non-healthy tests are all needs-review', () => {
+    const report = minimalReport({
+      classifications: [
+        classification({ testCaseId: 'tc:v1:1' as TestCaseId, repositoryRelativePath: 'mixed.test.ts', status: 'weak' }),
+        classification({ testCaseId: 'tc:v1:2' as TestCaseId, repositoryRelativePath: 'mixed.test.ts', status: 'needs-review' }),
+        classification({ testCaseId: 'tc:v1:3' as TestCaseId, repositoryRelativePath: 'uncertain-only.test.ts', status: 'needs-review' }),
+      ],
+    });
+    const overview = summarizeReport(report);
+    expect(overview.topFiles).toEqual([{ path: 'mixed.test.ts', needsChangeCount: 1, judgedTotal: 2, share: 0.5 }]);
+  });
 });
 
 describe('summarizeReport: folder x dimension heatmap', () => {
@@ -298,6 +328,20 @@ describe('summarizeReport: folder x dimension heatmap', () => {
     expect(row!.needsChangeCount).toBe(2);
     const cell = row!.cells.find((entry) => entry.dimensionId === 'falsifiability');
     expect(cell).toEqual({ dimensionId: 'falsifiability', dimensionLabel: 'Falsifiability', badCount: 2, applicableCount: 3, share: 2 / 3 });
+  });
+
+  it('never counts a needs-review test toward a row\'s needsChangeCount', () => {
+    const classifications = [
+      withPathAndStatus('src/payments/checkout.test.ts', '1', 'weak', { level: 'weak' }),
+      withPathAndStatus('src/payments/refund.test.ts', '2', 'needs-review', { level: undefined, status: 'needs-review', reason: 'boundary-straddle' }),
+      withPathAndStatus('src/payments/invoice.test.ts', '3', 'needs-review', { level: undefined, status: 'needs-review', reason: 'boundary-straddle' }),
+    ];
+    const report = minimalReport({ classifications });
+    const overview = summarizeReport(report);
+    const row = overview.folderHeatmap.rows.find((entry) => entry.folder === 'src/payments');
+    expect(row).toBeDefined();
+    expect(row!.judgedTotal).toBe(3);
+    expect(row!.needsChangeCount).toBe(1);
   });
 
   it('renders a cell with zero applicable tests as share undefined, never NaN or 0', () => {
