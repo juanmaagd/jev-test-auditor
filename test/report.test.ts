@@ -21,7 +21,7 @@ const context: AuditReportContext = {
   modelRequested: 'jev-1.13.0',
   rubricVersion: 2,
   policyVersion: 2,
-  storeSchemaVersion: 3,
+  storeSchemaVersion: 4,
 };
 
 const zeroSpan = { start: { line: 1, column: 1 }, end: { line: 1, column: 2 } };
@@ -227,7 +227,7 @@ describe('buildAuditReport — golden shape and stable key order', () => {
 
     expect(JSON.stringify(report)).toBe(
       '{"reportVersion":1,"rootDir":"/workspace/mixed","runId":"run:v1:mixed-fresh-8a41c2","reportingOnly":true,"complete":true,'
-      + '"versions":{"storeSchema":3,"rubric":2,"policy":2},"modelRequested":"jev-1.13.0",'
+      + '"versions":{"storeSchema":4,"rubric":2,"policy":2},"modelRequested":"jev-1.13.0",'
       + '"discovery":{"files":[{"path":"mixed.test.ts","framework":"vitest","testCaseCount":2,"dynamicMetadataCount":0,"evidenceBundleCount":2},'
       + '{"path":"other.test.ts","framework":"vitest","testCaseCount":1,"dynamicMetadataCount":0,"evidenceBundleCount":1}],'
       + '"excluded":[{"path":"skipped.test.ts","reason":"configured-exclude"}],'

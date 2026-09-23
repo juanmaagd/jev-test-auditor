@@ -662,6 +662,43 @@ export interface AuditProgressPort {
   begin(total: number): void;
   /** Called once per checkpoint transition — see {@link AuditProgressEvent}'s own doc. */
   report(event: AuditProgressEvent): void;
+  /**
+   * Opt-in (T3, `odd/tasks/audit-run-responsiveness.md`): pre-dispatch phase milestones, called
+   * zero or more times BEFORE {@link begin} — discovery, extraction/evidence selection, and (only
+   * when caching is enabled) the transition into cache-aware dispatch. Optional so every existing
+   * `AuditProgressPort` implementation (a test double with only `begin`/`report`) keeps satisfying
+   * this interface unchanged. See {@link AuditPrePhaseEvent}'s own doc for exactly what fires when,
+   * and `runAudit`/`runEvaluation` (`src/application/audit.ts`) for the throttling rule that keeps
+   * this from flooding a large suite's output.
+   */
+  phase?(event: AuditPrePhaseEvent): void;
+}
+
+/**
+ * Pre-dispatch phase labels (T3, `odd/tasks/audit-run-responsiveness.md`): what `runAudit` is
+ * doing before `AuditProgressPort.begin` ever fires, so a long run shows SOMETHING from its first
+ * second instead of 15–20s of silence on a large suite. `'discovering'` fires once, before
+ * `AuditDiscoveryPort.discover` is even called (nothing is known yet — no `done`/`total`).
+ * `'extracting'` fires per-file, throttled, while `runAudit` reads/extracts/selects evidence for
+ * each discovered file — `done`/`total` are FILES processed so far / total files, `testCases` is
+ * the cumulative test-case count extracted so far; extraction and evidence selection are reported
+ * as one combined phase (not two alternating ones) since they happen back-to-back for the same
+ * file in the same loop iteration — see `runAudit`'s own comment for why splitting them would only
+ * flicker a TTY line and double a non-TTY log for no benefit. `'checking-cache'` fires at most
+ * once, immediately before `begin`, only when content-addressed caching is actually enabled for
+ * this run (a store, a run id, and a cache-key port are all present) — otherwise nothing would be
+ * checked, and this phase never fires.
+ */
+export type AuditPrePhase = 'discovering' | 'extracting' | 'checking-cache';
+
+export interface AuditPrePhaseEvent {
+  readonly phase: AuditPrePhase;
+  /** Files processed so far — only ever present for `'extracting'`. */
+  readonly done?: number;
+  /** Total files to process — only ever present for `'extracting'`, once discovery has completed. */
+  readonly total?: number;
+  /** Cumulative test cases extracted so far — only ever present for `'extracting'`. */
+  readonly testCases?: number;
 }
 
 export interface AuditPorts {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createTerminalProgressReporter } from '../src/adapters/terminal-progress-reporter.js';
-import type { AuditProgressEvent, AuditProgressState, AuditStoreWorkItemIdentity } from '../src/domain/audit.js';
+import type { AuditPrePhaseEvent, AuditProgressEvent, AuditProgressState, AuditStoreWorkItemIdentity } from '../src/domain/audit.js';
 
 function identity(overrides: Partial<AuditStoreWorkItemIdentity> = {}): AuditStoreWorkItemIdentity {
   return { testCaseId: 'tc:v1:example', repositoryRelativePath: 'a.test.ts', name: 'example', ...overrides } as AuditStoreWorkItemIdentity;
@@ -148,6 +148,114 @@ describe('terminal progress reporter (Phase 6, task P6-3)', () => {
       const line = chunks[0]!;
       expect(line.endsWith('\n')).toBe(true);
       expect(line.slice(0, -1)).not.toMatch(/[\r\n]/); // no embedded CR/LF anywhere except the single trailing newline
+    });
+  });
+});
+
+describe('pre-dispatch phase rendering (T3, odd/tasks/audit-run-responsiveness.md)', () => {
+  describe('interactive terminal (isTTY: true)', () => {
+    it('redraws a single carriage-return-terminated line for a phase event, never a newline', () => {
+      const { write, chunks } = recordingWriter();
+      const reporter = createTerminalProgressReporter({ write, isTTY: true });
+
+      reporter.phase!({ phase: 'discovering' });
+      reporter.phase!({ phase: 'extracting', done: 3, total: 10, testCases: 12 });
+
+      expect(chunks.length).toBeGreaterThan(0);
+      for (const chunk of chunks) {
+        expect(chunk.startsWith('\r')).toBe(true);
+        expect(chunk.endsWith('\n')).toBe(false);
+      }
+    });
+
+    it('closes an open phase redraw with a trailing newline once begin(0) is called — otherwise a run with nothing to evaluate leaves the cursor stranded mid-line forever', () => {
+      const { write, chunks } = recordingWriter();
+      const reporter = createTerminalProgressReporter({ write, isTTY: true });
+
+      reporter.phase!({ phase: 'discovering' });
+      expect(chunks[chunks.length - 1]!.endsWith('\n')).toBe(false);
+
+      reporter.begin(0); // nothing evaluable/skippable — report() will never fire to close the line itself
+
+      expect(chunks[chunks.length - 1]).toBe('\n');
+    });
+
+    it('closes an open phase redraw with a trailing newline before a positive begin(total) too, so the phase line and the dispatch line never run together', () => {
+      const { write, chunks } = recordingWriter();
+      const reporter = createTerminalProgressReporter({ write, isTTY: true });
+
+      reporter.phase!({ phase: 'extracting', done: 1, total: 1, testCases: 1 });
+      const phaseChunkCount = chunks.length;
+      reporter.begin(2);
+
+      expect(chunks.length).toBeGreaterThan(phaseChunkCount);
+      expect(chunks[phaseChunkCount]).toBe('\n');
+    });
+
+    it('never writes a closing newline from begin() when no phase line was ever open — unchanged from before this task', () => {
+      const { write, chunks } = recordingWriter();
+      const reporter = createTerminalProgressReporter({ write, isTTY: true });
+
+      reporter.begin(0);
+
+      expect(chunks).toEqual([]); // exactly the pre-existing "writes nothing at all when begin(0) is called" behavior
+    });
+
+    it(
+      'pads a shorter phase redraw to the width of the longest one seen so far, so a short line (e.g. "Checking cache...") '
+      + 'after a long one (e.g. a large "Extracting..." line) never leaves that longer line\'s trailing characters on screen — '
+      + '\\r returns to column 0 but never erases, so an unpadded shorter write leaves stale characters visible',
+      () => {
+        const { write, chunks } = recordingWriter();
+        const reporter = createTerminalProgressReporter({ write, isTTY: true });
+
+        reporter.phase!({ phase: 'extracting', done: 100, total: 100, testCases: 7260 });
+        const longLineLength = chunks[chunks.length - 1]!.length - 1; // minus the leading \r
+        reporter.phase!({ phase: 'checking-cache' });
+        const shortChunk = chunks[chunks.length - 1]!;
+
+        expect(shortChunk.length - 1).toBeGreaterThanOrEqual(longLineLength); // padded, not left short
+        expect(shortChunk.slice(1).trimEnd()).toBe('Checking cache...'); // the visible text itself is unchanged, only trailing padding was added
+      },
+    );
+  });
+
+  describe('non-interactive output (isTTY: false — a pipe, a CI log, a file)', () => {
+    it('writes one newline-terminated line per phase call — never a bare carriage return', () => {
+      const { write, chunks } = recordingWriter();
+      const reporter = createTerminalProgressReporter({ write, isTTY: false });
+
+      reporter.phase!({ phase: 'discovering' });
+      reporter.phase!({ phase: 'extracting', done: 3, total: 10, testCases: 12 });
+      reporter.phase!({ phase: 'checking-cache' });
+
+      expect(chunks).toHaveLength(3);
+      for (const chunk of chunks) {
+        expect(chunk.endsWith('\n')).toBe(true);
+        expect(chunk.slice(0, -1)).not.toMatch(/[\r\n]/);
+      }
+    });
+
+    it('names the phase and its known counts in the line', () => {
+      const { write, chunks } = recordingWriter();
+      const reporter = createTerminalProgressReporter({ write, isTTY: false });
+
+      reporter.phase!({ phase: 'extracting', done: 3, total: 10, testCases: 12 } satisfies AuditPrePhaseEvent);
+
+      expect(chunks[0]).toContain('3');
+      expect(chunks[0]).toContain('10');
+      expect(chunks[0]).toContain('12');
+    });
+
+    it('begin() is unaffected by a prior phase call — still writes exactly its own opening/nothing line, no extra newline from the phase tracking TTY uses', () => {
+      const { write, chunks } = recordingWriter();
+      const reporter = createTerminalProgressReporter({ write, isTTY: false });
+
+      reporter.phase!({ phase: 'discovering' });
+      chunks.length = 0;
+      reporter.begin(3);
+
+      expect(chunks).toEqual(['Evaluating 3 test case(s)...\n']);
     });
   });
 });

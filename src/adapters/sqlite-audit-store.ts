@@ -111,7 +111,7 @@ export function resolveAuditStorePaths(environment: AuditStorePathEnvironment = 
 // only what is genuinely THIS store's own: its meta table name, its schema version, its
 // migrations, and its named error types.
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 /**
  * The schema version this build's persistence layer targets (Phase 6, task P6-2) — exported
@@ -217,6 +217,18 @@ const MIGRATIONS: readonly Migration[] = [
     db.exec('ALTER TABLE attempts ADD COLUMN latency_ms INTEGER;');
     db.exec('ALTER TABLE attempts ADD COLUMN attempt_latencies_ms TEXT;');
   },
+  // T2 (`odd/tasks/audit-run-responsiveness.md`): the cache-hit lookup (`LOOKUP_CACHED_JUDGMENT_SQL`
+  // below) joins `attempts` and `judgments` on `work_item_id`, and neither table carried an index on
+  // that column through schema 3 — confirmed empirically against the real `supermarket-pro` store
+  // (`EXPLAIN QUERY PLAN`: `SCAN a` plus an `AUTOMATIC COVERING INDEX` on `j`, rebuilt from scratch
+  // on every single lookup) and reproduced by this task's own migration test. Adding these two
+  // indexes turns both joins into a plain `SEARCH ... USING INDEX`, verified empirically the same
+  // way — no other index is needed: `work_items.cache_key` already has one (`idx_work_items_cache_key`,
+  // MIGRATIONS[1] above), which is what makes `w` itself never scan either.
+  (db) => {
+    db.exec('CREATE INDEX idx_attempts_work_item_id ON attempts (work_item_id);');
+    db.exec('CREATE INDEX idx_judgments_work_item_id ON judgments (work_item_id);');
+  },
 ];
 
 /**
@@ -227,7 +239,7 @@ const MIGRATIONS: readonly Migration[] = [
  * one module-level constant, not two hand-copied query strings, so the two
  * can never silently drift apart and disagree on what counts as a hit.
  */
-const LOOKUP_CACHED_JUDGMENT_SQL = `
+export const LOOKUP_CACHED_JUDGMENT_SQL = `
   SELECT j.classification AS classification
   FROM work_items w
   JOIN attempts a ON a.work_item_id = w.id
@@ -623,7 +635,8 @@ export type AuditStoreLookupResult =
  * existing store, but must never create one, never migrate one, and never
  * write anything" (`odd/tasks/phase-5-persistence.md`, task P5-5). Verified
  * empirically against this Node's real `node:sqlite` (see this task's own
- * evidence in the feature document, not assumed from documentation):
+ * evidence, and `odd/tasks/audit-run-responsiveness.md`'s T1 for the fix
+ * below, not assumed from documentation):
  *
  * - `stat`s `options.databaseFile` first, and returns
  *   `{ available: false, reason: 'no-store' }` immediately when it does not
@@ -635,33 +648,48 @@ export type AuditStoreLookupResult =
  * - When the file exists, opens it through a `file:` URI (built with
  *   `pathToFileURL`, never raw string concatenation — a `#`/`?`/`%` in the
  *   resolved path, e.g. inside `XDG_CONFIG_HOME`, would otherwise corrupt a
- *   hand-built URI) carrying `immutable=1`, plus `{ readOnly: true }` as a
- *   second, independent guard. `immutable=1` is the load-bearing piece,
- *   empirically confirmed both ways: `readOnly: true` alone still makes
- *   SQLite create `-shm`/`-wal` sidecar files for a WAL-mode database on the
- *   very first `SELECT` (it needs the wal-index to read a consistent
- *   snapshot), while `immutable=1` alone (no `readOnly` option at all)
- *   already refuses a write attempt outright ("attempt to write a readonly
- *   database") and creates no sidecar — `immutable=1` tells SQLite the file
- *   will not change and to skip that locking/indexing machinery entirely.
- *   `readOnly: true` is kept anyway as defense-in-depth at the `node:sqlite`
- *   binding level, not because it is independently necessary. Verified to
- *   create no sidecar file and leave the main file byte-identical (hash
- *   and size), both against a cleanly closed store and one still holding an
- *   uncheckpointed `-wal` file from another live connection.
- * - **Known, documented limitation of `immutable=1`**: it also means a row
- *   sitting only in an uncheckpointed `-wal` sidecar (the store did not
- *   close cleanly since that write — see P5-3's own WAL evidence) is
- *   invisible to this read-only reader; it reads only the main database
- *   file's own last-checkpointed content. This can only ever make a dry
- *   run UNDER-report cache hits (report a test case as billable that a
- *   subsequent real `--evaluate` — which opens the store normally and does
- *   see the WAL — would actually find cached), never the reverse. The
- *   required "billable count matches what a subsequent real run issues"
- *   guarantee holds for the ordinary case this task verifies: sequential
- *   CLI invocations, each of which closes its store cleanly (`runCli`'s own
- *   `finally`), so by the time a later `--dry-run`/`--evaluate` opens the
- *   file, everything is already checkpointed into it.
+ *   hand-built URI) carrying `mode=ro`, plus `{ readOnly: true }` as a
+ *   second, independent guard, and a `timeout` busy-wait so a momentary
+ *   `SQLITE_BUSY` against a concurrent writer's lock is retried rather than
+ *   surfacing as a misleading `AuditStoreCorruptError`.
+ * - **`mode=ro`, not `immutable=1` (T1 fix, `odd/tasks/audit-run-responsiveness.md`).**
+ *   The original P5-5 implementation used `immutable=1`, on the theory that
+ *   a dry run's own store file "will not change" for the duration of the
+ *   read. That promise does not hold in practice: a real `--evaluate` run
+ *   can be writing to the very same store, in WAL mode, at the same time —
+ *   and `immutable=1` tells SQLite to skip WAL's locking/indexing machinery
+ *   entirely, trusting the file never to change underneath it. Against a
+ *   genuinely concurrent writer this produces exactly the two failure modes
+ *   observed against the real `supermarket-pro` store (see this task's own
+ *   evidence): a committed-but-not-yet-checkpointed row silently invisible
+ *   (an honest under-count, tolerable), or — once the writer's WAL grows or
+ *   checkpoints mid-read — a hard crash (`database disk image is
+ *   malformed`), even though `PRAGMA quick_check` on the same file reports
+ *   `ok`. `mode=ro` is the standard SQLite way to open a WAL-mode database
+ *   read-only: it participates in the same locking/wal-index protocol every
+ *   other connection does, so it always sees the current, consistent,
+ *   committed state — including a row still sitting only in an
+ *   uncheckpointed `-wal` sidecar — and never throws merely because another
+ *   connection is writing concurrently.
+ * - **The tradeoff, verified empirically both ways**: `mode=ro` against a
+ *   WAL-mode database (every store this adapter creates — see
+ *   `createSqliteAuditStore`'s own `PRAGMA journal_mode = WAL` doc) DOES
+ *   create `-shm`/`-wal` sidecar files next to the main one, on the very
+ *   first `SELECT` — it needs the wal-index to read a consistent snapshot,
+ *   the same reason `readOnly: true` alone always did under the OLD
+ *   `immutable=1` doc's own comparison. Those sidecars can outlive the read
+ *   (a read-only connection cannot checkpoint, so closing it does not
+ *   necessarily remove them) — harmless, tiny, and reused/checkpointed away
+ *   by the next writable open, but a real filesystem side effect a caller
+ *   should not be surprised by. Against a database that has never been
+ *   opened in WAL mode at all (the `schema-outdated`/corrupt fixtures below,
+ *   and a genuinely empty file), `mode=ro` creates no sidecar at all —
+ *   confirmed empirically, not assumed. In every case, the MAIN file's own
+ *   bytes stay byte-for-byte identical (hash and size) before and after —
+ *   this reader still never writes a single byte of actual data, never
+ *   creates the main file itself, never migrates, and never records
+ *   anything; only WAL coordination metadata can appear alongside it now,
+ *   never inside it.
  * - **Schema compatibility**, decided by "what would a subsequent real
  *   `--evaluate` against this exact file do?" (never a separate policy):
  *   a version newer than this build supports, or a store `readSchemaVersion`
@@ -700,12 +728,18 @@ export async function openSqliteAuditStoreForLookup(
   }
 
   const sqliteModule = await loadSqliteModule();
-  const immutableUrl = new URL(pathToFileURL(options.databaseFile).href);
-  immutableUrl.searchParams.set('immutable', '1');
+  const readOnlyUrl = new URL(pathToFileURL(options.databaseFile).href);
+  readOnlyUrl.searchParams.set('mode', 'ro');
 
   let db: DatabaseSync;
   try {
-    db = new sqliteModule.DatabaseSync(immutableUrl.href, { readOnly: true });
+    // T1 (`odd/tasks/audit-run-responsiveness.md`): `mode=ro`, not `immutable=1` — see this
+    // function's own doc above for the full rationale and the sidecar tradeoff. `timeout` is a
+    // short busy-wait (milliseconds) so a momentary lock held by a concurrent writer is retried
+    // rather than immediately surfacing as `SQLITE_BUSY` — wrapped, like any other native failure
+    // here, into the same named `AuditStoreCorruptError` a genuine problem would produce, but this
+    // keeps that outcome rare rather than routine under ordinary concurrent use.
+    db = new sqliteModule.DatabaseSync(readOnlyUrl.href, { readOnly: true, timeout: 1_000 });
   } catch (error) {
     throw wrapNativeSqliteError(error, options.databaseFile);
   }

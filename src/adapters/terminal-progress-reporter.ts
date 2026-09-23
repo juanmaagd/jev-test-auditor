@@ -1,4 +1,4 @@
-import type { AuditProgressEvent, AuditProgressPort, AuditProgressState } from '../domain/audit.js';
+import type { AuditPrePhaseEvent, AuditProgressEvent, AuditProgressPort, AuditProgressState } from '../domain/audit.js';
 
 /**
  * Terminal-progress reporting (Phase 6, task P6-3): the adapter that actually writes anywhere for
@@ -46,6 +46,17 @@ function sanitizeForSingleLine(value: string): string {
 }
 
 /**
+ * One human-readable line for a pre-dispatch phase event (T3, `odd/tasks/audit-run-responsiveness.md`)
+ * — no trailing newline or carriage return of its own; the caller (`phase` below) adds whichever
+ * one fits its TTY/non-TTY rendering.
+ */
+function phaseLine(event: AuditPrePhaseEvent): string {
+  if (event.phase === 'discovering') return 'Discovering test files...';
+  if (event.phase === 'checking-cache') return 'Checking cache...';
+  return `Extracting test cases: ${event.done}/${event.total} files (${event.testCases} test case(s) found)...`;
+}
+
+/**
  * Builds a real {@link AuditProgressPort}. Tracks four independently counted terminal outcomes —
  * a genuinely fresh dispatch (`completed`), a cache hit (`cached`), a failure (`failed`), and a
  * static skip (`skipped`) — against the `total` {@link AuditProgressPort.begin} names, so the
@@ -60,6 +71,22 @@ export function createTerminalProgressReporter(options: TerminalProgressReporter
   let cachedCount = 0;
   let failedCount = 0;
   let skippedCount = 0;
+  // T3, TTY only: `true` while the most recent write was an un-terminated `\r` phase redraw (a
+  // `phase()` call, before `begin`/`report` ever fired). `report`'s own redraw always ends the run
+  // with a trailing `\n` once every work item is done — but a run with zero evaluable/skippable
+  // items never calls `report` at all, so without this, a phase line's bare `\r` redraw would leave
+  // the cursor stranded mid-line forever. `begin` closes it below, whether or not `total` turns out
+  // to be positive.
+  let phaseLineOpen = false;
+  // T3, TTY only: the widest phase line written so far this run, reset alongside `phaseLineOpen` in
+  // `begin`. `\r` returns the cursor to column 0 but never erases what was already there — a
+  // shorter later phase line (e.g. `Checking cache...`, 18 chars) redrawn over a longer earlier one
+  // (e.g. a large `Extracting test cases: ...` line) would otherwise leave that longer line's own
+  // trailing characters visible on screen, permanently, once `begin` appends its closing `\n`.
+  // Padding every phase line to the widest one seen so far (with trailing spaces, never a
+  // terminal-specific escape like `\x1b[K` — this stays plain-text and testable with a dumb
+  // recording writer) is what keeps every redraw fully overwriting the one before it.
+  let maxPhaseLineWidth = 0;
 
   function statusLine(concurrencyLimit: number): string {
     const freshCount = doneCount - cachedCount - failedCount - skippedCount;
@@ -74,6 +101,11 @@ export function createTerminalProgressReporter(options: TerminalProgressReporter
       cachedCount = 0;
       failedCount = 0;
       skippedCount = 0;
+      if (isTTY && phaseLineOpen) {
+        write('\n');
+        phaseLineOpen = false;
+        maxPhaseLineWidth = 0;
+      }
       // Nothing to report for a run with no evaluable or skippable items at all: no work items will
       // ever reach `report`, so an opening line here would be the only line this run ever prints,
       // for a run that never actually evaluated anything.
@@ -107,6 +139,22 @@ export function createTerminalProgressReporter(options: TerminalProgressReporter
       if (!terminal) return;
       const label = `${sanitizeForSingleLine(event.identity.repositoryRelativePath)} :: ${sanitizeForSingleLine(event.identity.name)}`;
       write(`${event.state} ${label} — ${statusLine(event.concurrencyLimit)}\n`);
+    },
+    // T3 (`odd/tasks/audit-run-responsiveness.md`): pre-dispatch phase milestones, called zero or
+    // more times before `begin`. TTY: the same single-rewritten-line convention `report` uses (a
+    // bare `\r`, no trailing `\n` — `begin` closes it, see `phaseLineOpen`'s own doc above).
+    // Non-TTY: one clean `\n`-terminated line per call — `runAudit`'s own throttling already
+    // bounds this to a small, fixed number of lines regardless of suite size, so no further
+    // rate-limiting belongs here.
+    phase(event: AuditPrePhaseEvent): void {
+      const line = phaseLine(event);
+      if (isTTY) {
+        maxPhaseLineWidth = Math.max(maxPhaseLineWidth, line.length);
+        write(`\r${line.padEnd(maxPhaseLineWidth)}`);
+        phaseLineOpen = true;
+        return;
+      }
+      write(`${line}\n`);
     },
   };
 }
