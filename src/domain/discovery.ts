@@ -9,6 +9,11 @@ export const DEFAULT_DISCOVERY_EXCLUDES: readonly string[] = [
   '**/vendor/**',
   '**/coverage/**',
   '**/generated/**',
+  // `.jta/` (feature "persisted-run-reports") is where `audit --evaluate` persists its own canonical
+  // report JSON inside the audited project's own root (`src/adapters/persisted-report-store.ts`) —
+  // excluded by default exactly like `.git`/`node_modules`, so a repeat run never discovers its own
+  // prior output.
+  '**/.jta/**',
 ];
 
 export type DiscoveryExclusionReason =

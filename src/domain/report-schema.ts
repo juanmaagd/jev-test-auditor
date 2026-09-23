@@ -5,9 +5,12 @@
  * machinery than validating one fixed, internally-produced shape needs. The validator supports
  * exactly the subset of JSON Schema (draft-07-shaped) `REPORT_JSON_SCHEMA` below actually uses —
  * `type` (a string or an array of strings, for a nullable/union field), `enum`, `properties` +
- * `required` + `additionalProperties` for objects, and `items` for arrays — nothing else. It is
- * used at test time only (`test/report.test.ts`) to prove `buildAuditReport`'s output actually
- * matches its own published contract; nothing in the CLI's runtime path calls it.
+ * `required` + `additionalProperties` for objects, and `items` for arrays — nothing else. Originally
+ * used at test time only (`test/report.test.ts`), to prove `buildAuditReport`'s output actually
+ * matches its own published contract; feature "persisted-run-reports" (task T2, `jta report`,
+ * `src/cli/index.ts`) also calls {@link validateAgainstSchema} at CLI runtime now, to reject a
+ * persisted `.jta/` report that is unreadable or no longer matches this shape before rendering or
+ * printing it — still the same zero-runtime-dependency validator, no `ajv`.
  *
  * `docs/report-schema.json` is the published, checked-in copy of {@link REPORT_JSON_SCHEMA} —
  * `test/report.test.ts` asserts the two are byte-for-byte the same JSON, so they can never

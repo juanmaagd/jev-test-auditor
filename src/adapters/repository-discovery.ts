@@ -24,6 +24,9 @@ const DEFAULT_EXCLUDED_SEGMENTS = new Set([
   'vendor',
   'coverage',
   'generated',
+  // Keep in sync with `DEFAULT_DISCOVERY_EXCLUDES` (`src/domain/discovery.ts`) — see that entry's
+  // own comment for why `.jta` belongs alongside `.git`/`node_modules` here.
+  '.jta',
 ]);
 const E2E_MODULES = new Set([
   '@playwright/test',
