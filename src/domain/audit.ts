@@ -154,7 +154,7 @@ export interface AuditEvaluationPort {
 /**
  * The content-addressed cache key port (Phase 5, task P5-2). Computes the
  * deterministic key that identifies "evaluating this exact test case
- * against this exact evidence, full source, rubric, and policy" — see
+ * against this exact evidence, full source, and rubric" — see
  * `src/adapters/cache-key.ts`'s own doc for precisely which of
  * `request`/`fullTestSource` the composed key covers and how. Optional on
  * {@link AuditPorts}, exactly like {@link AuditEvaluationPort} and
@@ -166,6 +166,14 @@ export interface AuditEvaluationPort {
  */
 export interface AuditCacheKeyPort {
   computeKey(request: AuditEvaluationRequest, fullTestSource: string): string;
+  /**
+   * Classifies a cache hit's stored raw answers under the CURRENT
+   * classification policy (`odd/tasks/policy-free-cache-and-calibration.md`,
+   * task T1): the policy is deliberately not part of the key, so a policy
+   * change re-derives every hit locally and never causes a provider request.
+   * Pure and local; `request` supplies the identity the result reports.
+   */
+  classifyCached(request: AuditEvaluationRequest, evaluation: JevEvaluation): ClassificationResult;
 }
 
 /**
@@ -272,9 +280,16 @@ export type AuditStoreWorkItemOutcome =
     readonly reason: DryRunSkippedReason;
   };
 
-/** One cached judgment returned by {@link AuditStorePort.lookup}: just the reused {@link ClassificationResult} — never the original raw {@link JevEvaluation}, since a cache hit makes no provider request to have one from. */
+/**
+ * One cache hit returned by {@link AuditStorePort.lookup}: the original
+ * provider response's raw {@link JevEvaluation}, exactly as stored — never
+ * the classification recorded alongside it, which may have been derived
+ * under an older policy. The caller re-classifies it under the current policy
+ * ({@link AuditCacheKeyPort.classifyCached}); a cache hit itself makes no
+ * provider request.
+ */
 export interface AuditStoreCachedJudgment {
-  readonly classification: ClassificationResult;
+  readonly evaluation: JevEvaluation;
 }
 
 /**

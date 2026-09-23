@@ -2190,7 +2190,7 @@ describe('content-addressed caching wiring (Phase 5, task P5-2)', () => {
         for (let index = workItemCalls.length - 1; index >= 0; index -= 1) {
           const { outcome } = workItemCalls[index]!;
           if (outcome.state === 'completed' && outcome.cacheKey === cacheKey && outcome.evaluation.modelMatchesPin) {
-            return { classification: outcome.classification };
+            return { evaluation: outcome.evaluation };
           }
         }
         return undefined;

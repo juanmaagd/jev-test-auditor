@@ -16,6 +16,7 @@ import {
 import {
   AuditStoreCorruptError,
   AuditStoreSchemaVersionError,
+  type AuditStoreCachedJudgment,
   type AuditStorePort,
   type AuditStoreRunState,
   type AuditStoreWorkItemOutcome,
@@ -1019,9 +1020,28 @@ async function recordCompleted(
     state: 'completed',
     identity: { testCaseId, repositoryRelativePath: 'a.test.ts', name: 'adds numbers' },
     cacheKey,
-    evaluation: { ...sampleEvaluation(), modelMatchesPin: matchesPin },
+    evaluation: { ...sampleEvaluation(), modelMatchesPin: matchesPin, usage: { inputTokens: STATUS_MARKER_TOKENS[status], outputTokens: 47 } },
     classification: { ...classificationWithStatus(testCaseId, status), model: { requested: 'jev-eval-requested-model', responded: 'jev-eval-responded-model', matchesPin } },
   });
+}
+
+/**
+ * `lookup` returns the stored raw evaluation, never the stored classification (task T1 of
+ * `odd/tasks/policy-free-cache-and-calibration.md`), so each fixture's `status` is also stamped
+ * into its evaluation as a distinct `inputTokens` marker — letting a test tell which of several
+ * stored rows a `lookup` call actually returned.
+ */
+const STATUS_MARKER_TOKENS: Readonly<Record<ClassificationResult['status'], number>> = {
+  healthy: 301,
+  weak: 302,
+  misleading: 303,
+  'needs-review': 304,
+};
+
+function statusMarkedBy(hit: AuditStoreCachedJudgment | undefined): ClassificationResult['status'] | undefined {
+  if (hit === undefined) return undefined;
+  const entry = Object.entries(STATUS_MARKER_TOKENS).find(([, tokens]) => tokens === hit.evaluation.usage.inputTokens);
+  return entry?.[0] as ClassificationResult['status'] | undefined;
 }
 
 describe('createSqliteAuditStore lookup', () => {
@@ -1049,7 +1069,7 @@ describe('createSqliteAuditStore lookup', () => {
     await recordCompleted(store, runId, testCaseId, 'ck-shared', 'weak', true);
 
     const hit = await store.lookup('ck-shared');
-    expect(hit?.classification.status).toBe('weak');
+    expect(statusMarkedBy(hit)).toBe('weak');
   });
 
   it('skips a newer pin-mismatched judgment and returns an older pin-matching one under the same key', async () => {
@@ -1062,7 +1082,7 @@ describe('createSqliteAuditStore lookup', () => {
     await recordCompleted(store, runId, testCaseId, 'ck-pin-skip', 'misleading', false);
 
     const hit = await store.lookup('ck-pin-skip');
-    expect(hit?.classification.status).toBe('healthy');
+    expect(statusMarkedBy(hit)).toBe('healthy');
   });
 
   it('returns undefined when every completed judgment under a key is pin-mismatched', async () => {
@@ -1096,7 +1116,7 @@ describe('createSqliteAuditStore lookup', () => {
     });
 
     const hit = await store.lookup('ck-not-cached-source');
-    expect(hit?.classification.status).toBe('healthy');
+    expect(statusMarkedBy(hit)).toBe('healthy');
   });
 
   // A `cached`/`failed`/`skipped` work item never gets its own `attempts` row through
@@ -1160,7 +1180,7 @@ describe('createSqliteAuditStore lookup', () => {
 
     await recordCompleted(store, runId, testCaseId, 'ck-fresh', 'healthy', true);
     const beforeFresh = await store.lookup('ck-fresh');
-    expect(beforeFresh?.classification.status).toBe('healthy');
+    expect(statusMarkedBy(beforeFresh)).toBe('healthy');
 
     // A `--fresh` dispatch bypasses lookup but still writes a new immutable completed result
     // under the same key (see the domain port's own doc) — simulated here directly at the store
@@ -1168,7 +1188,7 @@ describe('createSqliteAuditStore lookup', () => {
     await recordCompleted(store, runId, testCaseId, 'ck-fresh', 'weak', true);
 
     const afterFresh = await store.lookup('ck-fresh');
-    expect(afterFresh?.classification.status).toBe('weak');
+    expect(statusMarkedBy(afterFresh)).toBe('weak');
 
     const db = new DatabaseSync(databaseFile);
     try {
@@ -1200,7 +1220,7 @@ describe('createSqliteAuditStore lookup', () => {
     await recordCompleted(store, runId, testCaseId, 'ck-with-checkpoints', 'healthy', true);
 
     const hit = await store.lookup('ck-with-checkpoints');
-    expect(hit?.classification.status).toBe('healthy');
+    expect(statusMarkedBy(hit)).toBe('healthy');
   });
 
   // Unlike the test above (the realistic shape `recordWorkItem` actually produces — a
@@ -1239,7 +1259,7 @@ describe('createSqliteAuditStore lookup', () => {
     // deliberately carries a different `status` (`misleading`) than the real `completed` row
     // (`healthy`), so returning the wrong one is observable.
     const hit = await store.lookup('ck-running-defensive');
-    expect(hit?.classification.status).toBe('healthy');
+    expect(statusMarkedBy(hit)).toBe('healthy');
   });
 });
 
@@ -1578,7 +1598,7 @@ describe('openSqliteAuditStoreForLookup', () => {
       const miss = await result.lookup.lookup('ck-does-not-exist');
       await result.lookup.close();
 
-      expect(hit).toEqual({ classification: sampleClassification(testCaseId) });
+      expect(hit).toEqual({ evaluation: sampleEvaluation() });
       expect(miss).toBeUndefined();
 
       // The main file's own bytes are the guarantee that matters: this reader still never writes,
@@ -1628,7 +1648,7 @@ describe('openSqliteAuditStoreForLookup', () => {
         const hit = await result.lookup.lookup('ck-uncheckpointed');
         await result.lookup.close();
 
-        expect(hit).toEqual({ classification: sampleClassification(testCaseId) });
+        expect(hit).toEqual({ evaluation: sampleEvaluation() });
       } finally {
         await store.close();
       }

@@ -13,8 +13,9 @@
  * `classification.rubricVersion`, and `classification.policyVersion`. All three of those already
  * exist and mean different things — conflating them would make the report lie about what changed.
  * `versions` carries the latter three explicitly (as this build's currently active pins; an
- * individual classification's own `rubricVersion`/`policyVersion` may differ for an older cached
- * judgment reused from a prior version — see `ClassificationResult`'s own doc), clearly
+ * individual classification's own `rubricVersion`/`policyVersion` may still differ for a judgment
+ * `--resume` carries over from a run interrupted before a version bump; a cache hit is re-classified
+ * under the active policy — see `ClassificationResult`'s own doc), clearly
  * distinguished from `reportVersion` at the top level.
  *
  * **Stable key order.** Every object here is built as one object literal with a fixed key

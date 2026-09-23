@@ -3,6 +3,7 @@ import { runAudit } from '../src/index.js';
 import { computeDryRunCacheHits } from '../src/application/audit.js';
 import { createAuditCacheKeyPort } from '../src/adapters/cache-key.js';
 import type {
+  AuditCacheKeyPort,
   AuditEvaluationPort,
   AuditEvaluationRequest,
   AuditEvidenceBuildRequest,
@@ -800,12 +801,12 @@ function fakeStore(): FakeStore {
     // a `cached` outcome is never itself eligible as a source. Records every call in
     // `lookupCalls` so a test can assert `--fresh` skips the lookup entirely, not merely that it
     // ignores whatever the lookup would have returned.
-    async lookup(cacheKey: string): Promise<{ readonly classification: ClassificationResult } | undefined> {
+    async lookup(cacheKey: string): Promise<{ readonly evaluation: JevEvaluation } | undefined> {
       lookupCalls.push(cacheKey);
       for (let index = workItemCalls.length - 1; index >= 0; index -= 1) {
         const { outcome } = workItemCalls[index]!;
         if (outcome.state === 'completed' && outcome.cacheKey === cacheKey && outcome.evaluation.modelMatchesPin) {
-          return { classification: outcome.classification };
+          return { evaluation: outcome.evaluation };
         }
       }
       return undefined;
@@ -1461,15 +1462,34 @@ describe('adaptive scheduling (Phase 5, task P5-3)', () => {
 // --- Content-addressed caching (Phase 5, task P5-2) -------------------------
 
 describe('content-addressed caching (Phase 5, task P5-2)', () => {
+  /**
+   * The real cache-key port's `computeKey`, with a `classifyCached` that replays the verdict
+   * stamped into the stored evaluation's `outputTokens`. These tests pin cache mechanics (no
+   * provider request, newest completed row wins); a hit's re-derivation under the real policy is
+   * covered end to end by `test/policy-free-cache.test.ts`.
+   */
+  const STATUS_BY_OUTPUT_TOKENS: Readonly<Record<number, OverallClassificationStatus>> = { 1: 'healthy', 2: 'weak' };
+  function statusReplayingCacheKeyPort(): AuditCacheKeyPort {
+    const real = createAuditCacheKeyPort();
+    return {
+      computeKey: (request, fullTestSource) => real.computeKey(request, fullTestSource),
+      classifyCached: (request, evaluation) => classificationFor(request.testCase.id, {
+        status: STATUS_BY_OUTPUT_TOKENS[evaluation.usage.outputTokens] ?? 'needs-review',
+        inputTokens: evaluation.usage.inputTokens,
+        outputTokens: evaluation.usage.outputTokens,
+      }),
+    };
+  }
+
   it('the second of two identical evaluations issues no provider request and reuses the same judgment via a cached work item', async () => {
     const store = fakeStore();
-    const cacheKey = createAuditCacheKeyPort();
+    const cacheKey = statusReplayingCacheKeyPort();
     const evaluableCase = testCaseWithModifiers('tc:v1:cache-warm', [], 'cache-warm.test.ts');
     const discovery: DiscoveryResult = { files: [discovered('cache-warm.test.ts')], excluded: [], diagnostics: [] };
     let evaluateCalls = 0;
     const evaluation = stubEvaluationPort(async (request) => {
       evaluateCalls += 1;
-      return classificationFor(request.testCase.id, { status: 'healthy' });
+      return classificationFor(request.testCase.id, { status: 'healthy', outputTokens: 1 });
     });
 
     const portsForRun: AuditPorts = {
@@ -1531,13 +1551,13 @@ describe('content-addressed caching (Phase 5, task P5-2)', () => {
 
   it('--fresh bypasses lookup and issues a new provider request despite a warm cache, appending a new immutable completed result without altering the prior one; a later plain run then reuses the newest, not the older, judgment', async () => {
     const store = fakeStore();
-    const cacheKey = createAuditCacheKeyPort();
+    const cacheKey = statusReplayingCacheKeyPort();
     const evaluableCase = testCaseWithModifiers('tc:v1:cache-fresh', [], 'cache-fresh.test.ts');
     const discovery: DiscoveryResult = { files: [discovered('cache-fresh.test.ts')], excluded: [], diagnostics: [] };
     let evaluateCalls = 0;
     const evaluation = stubEvaluationPort(async (request) => {
       evaluateCalls += 1;
-      return classificationFor(request.testCase.id, { status: evaluateCalls === 1 ? 'healthy' : 'weak' });
+      return classificationFor(request.testCase.id, evaluateCalls === 1 ? { status: 'healthy', outputTokens: 1 } : { status: 'weak', outputTokens: 2 });
     });
 
     const portsForRun: AuditPorts = {
