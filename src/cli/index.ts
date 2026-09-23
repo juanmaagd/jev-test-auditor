@@ -265,7 +265,9 @@ Options:
                       script are embedded, with no CDN, no external stylesheet or font, and no
                       network access at render or view time. Evidence fragment source content is
                       never included — only provenance decisions and counts, exactly like the JSON
-                      report. Without this flag, no file is written. An existing regular file at
+                      report. Without this flag, no HTML file is written (every --evaluate run still
+                      persists its canonical report to <rootDir>/.jta/ regardless — see "jta report"
+                      above and "Persisted run reports" in README.md). An existing regular file at
                       that path is overwritten; an existing directory there, or a path whose parent
                       directory does not exist, is a usage error (exit 1) before any evaluation
                       work is dispatched. Requires --evaluate. Cannot be combined with --dry-run or

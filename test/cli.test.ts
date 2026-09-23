@@ -3889,7 +3889,7 @@ describe('jta report — feature "persisted-run-reports", task T2', () => {
   });
 
   describe('default output (human summary)', () => {
-    it('includes the run id, the needs-a-change share and denominator, and at least one folder', async () => {
+    it('includes the run id and the needs-a-change share and denominator; omits the folder list entirely when nothing needs a change', async () => {
       const root = await fixture(mathFixtureFiles);
       await seedRun(root);
       const output = captureOutput();
@@ -3900,7 +3900,56 @@ describe('jta report — feature "persisted-run-reports", task T2', () => {
       const text = output.lines.join('\n');
       expect(text).toContain(FIXED_RUN_ID);
       expect(text).toContain('0/1');
-      expect(text).toMatch(/math\.test\.ts|\./);
+      // The seeded fixture's one test case is classified 'healthy' — no folder needs a change, so
+      // the "Top folders" section must not appear at all (never a vacuous empty list).
+      expect(text).not.toContain('Top folders');
+    });
+
+    it('lists the worst folder by tests needing a change when at least one dimension is misleading', async () => {
+      const root = await fixture(mathFixtureFiles);
+      const seedOutput = captureOutput();
+      const exitCode = await runCli(['audit', '--rootDir', root, '--evaluate'], seedOutput.io, {
+        createEvaluationPort: () => ({
+          async evaluate(request) {
+            return {
+              evaluation: {
+                requestedModel: 'jev-1.13.0', respondedModel: 'jev-1.13.0', modelMatchesPin: true,
+                answers: {}, usage: { inputTokens: 10, outputTokens: 1 }, attempts: 1,
+              },
+              classification: {
+                testCaseId: request.testCase.id,
+                repositoryRelativePath: request.testCase.repositoryRelativePath,
+                name: request.testCase.name,
+                status: 'misleading',
+                dimensions: [{
+                  dimensionId: 'assertion-strength', dimensionLabel: 'Assertion strength',
+                  applicable: true, applicabilityProbability: 0.9,
+                  status: 'judged', level: 'misleading', score: 0,
+                  confidence: 0.9, reason: undefined,
+                  probabilities: { '0': 0.9, '1': 0.05, '2': 0.03, '3': 0.02 },
+                  deficientMass: 0.9, acceptableMass: 0.05, criticalMass: 0.9,
+                }],
+                findings: [],
+                policyVersion: 2,
+                rubricVersion: 2,
+                model: { requested: 'jev-1.13.0', responded: 'jev-1.13.0', matchesPin: true },
+                usage: { inputTokens: 10, outputTokens: 1 },
+              },
+            };
+          },
+        }),
+        createStorePort: () => fakeStorePort(FIXED_RUN_ID),
+      });
+      if (exitCode !== 0) throw new Error('seeding failed');
+
+      const output = captureOutput();
+      const reportExit = await runCli(['report', '--rootDir', root], output.io);
+
+      expect(reportExit).toBe(0);
+      const text = output.lines.join('\n');
+      expect(text).toContain('1/1');
+      expect(text).toContain('Top folders needing a change:');
+      expect(text).toContain('1/1 need a change');
     });
   });
 
