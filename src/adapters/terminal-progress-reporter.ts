@@ -78,6 +78,15 @@ export function createTerminalProgressReporter(options: TerminalProgressReporter
   // the cursor stranded mid-line forever. `begin` closes it below, whether or not `total` turns out
   // to be positive.
   let phaseLineOpen = false;
+  // T3, TTY only: the widest phase line written so far this run, reset alongside `phaseLineOpen` in
+  // `begin`. `\r` returns the cursor to column 0 but never erases what was already there — a
+  // shorter later phase line (e.g. `Checking cache...`, 18 chars) redrawn over a longer earlier one
+  // (e.g. a large `Extracting test cases: ...` line) would otherwise leave that longer line's own
+  // trailing characters visible on screen, permanently, once `begin` appends its closing `\n`.
+  // Padding every phase line to the widest one seen so far (with trailing spaces, never a
+  // terminal-specific escape like `\x1b[K` — this stays plain-text and testable with a dumb
+  // recording writer) is what keeps every redraw fully overwriting the one before it.
+  let maxPhaseLineWidth = 0;
 
   function statusLine(concurrencyLimit: number): string {
     const freshCount = doneCount - cachedCount - failedCount - skippedCount;
@@ -95,6 +104,7 @@ export function createTerminalProgressReporter(options: TerminalProgressReporter
       if (isTTY && phaseLineOpen) {
         write('\n');
         phaseLineOpen = false;
+        maxPhaseLineWidth = 0;
       }
       // Nothing to report for a run with no evaluable or skippable items at all: no work items will
       // ever reach `report`, so an opening line here would be the only line this run ever prints,
@@ -137,12 +147,14 @@ export function createTerminalProgressReporter(options: TerminalProgressReporter
     // bounds this to a small, fixed number of lines regardless of suite size, so no further
     // rate-limiting belongs here.
     phase(event: AuditPrePhaseEvent): void {
+      const line = phaseLine(event);
       if (isTTY) {
-        write(`\r${phaseLine(event)}`);
+        maxPhaseLineWidth = Math.max(maxPhaseLineWidth, line.length);
+        write(`\r${line.padEnd(maxPhaseLineWidth)}`);
         phaseLineOpen = true;
         return;
       }
-      write(`${phaseLine(event)}\n`);
+      write(`${line}\n`);
     },
   };
 }

@@ -200,6 +200,24 @@ describe('pre-dispatch phase rendering (T3, odd/tasks/audit-run-responsiveness.m
 
       expect(chunks).toEqual([]); // exactly the pre-existing "writes nothing at all when begin(0) is called" behavior
     });
+
+    it(
+      'pads a shorter phase redraw to the width of the longest one seen so far, so a short line (e.g. "Checking cache...") '
+      + 'after a long one (e.g. a large "Extracting..." line) never leaves that longer line\'s trailing characters on screen — '
+      + '\\r returns to column 0 but never erases, so an unpadded shorter write leaves stale characters visible',
+      () => {
+        const { write, chunks } = recordingWriter();
+        const reporter = createTerminalProgressReporter({ write, isTTY: true });
+
+        reporter.phase!({ phase: 'extracting', done: 100, total: 100, testCases: 7260 });
+        const longLineLength = chunks[chunks.length - 1]!.length - 1; // minus the leading \r
+        reporter.phase!({ phase: 'checking-cache' });
+        const shortChunk = chunks[chunks.length - 1]!;
+
+        expect(shortChunk.length - 1).toBeGreaterThanOrEqual(longLineLength); // padded, not left short
+        expect(shortChunk.slice(1).trimEnd()).toBe('Checking cache...'); // the visible text itself is unchanged, only trailing padding was added
+      },
+    );
   });
 
   describe('non-interactive output (isTTY: false — a pipe, a CI log, a file)', () => {
