@@ -35,13 +35,13 @@
  * **Charts.** Every chart is plain HTML/CSS: flex-grow-sized segments for the status share and
  * per-dimension diverging bars (never a report string interpolated into a CSS length — only a
  * number, already computed by {@link summarizeReport}, ever reaches a `style` attribute), and an
- * inline-styled `background` for the sequential single-hue heatmap/top-files ramp
+ * inline-styled `background` for the heatmap/top-files heat steps
  * ({@link heatColor}). Every mark carries a `title="…"` attribute naming its value and denominator,
  * so a reader can hover for the exact figure without a script. Status/dimension colors are the
  * report's own reserved semantic palette (ember = misleading/critical, graphite = weak, violet =
  * needs-review, stone = healthy; ash/ink extend it for acceptable/strong) — never reused for
- * unrelated series. The heatmap/top-files ramp is a single validated hue (light `#e99b6e` to dark
- * `#5c1900`), never a rainbow.
+ * unrelated series. The heatmap/top-files steps stay inside that palette: stone and ash for context,
+ * ember only for a hotspot (>= 50% misleading or weak), never an invented hue.
  */
 import type { OverallClassificationStatus } from './classification.js';
 import { JEV_ESTIMATE_SNAPSHOT } from './jev-pricing.js';
@@ -380,23 +380,27 @@ function renderDimensionsSection(overview: ReportOverview): string {
   ].join('\n');
 }
 
-/** Endpoints of the one validated sequential ember ramp this page uses for magnitude (heatmap cells, top-files bars) — light `#e99b6e` to dark `#5c1900`; see this module's own doc, "Charts". Validated (`dataviz` skill's `validate_palette.js`, `--ordinal`, light mode, surface `#fdfcfc`): lightness monotone, adjacent steps >= 0.06 apart, light end >= 2:1 contrast against the page surface, single hue (spread 12°). */
-const HEAT_LIGHT: readonly [number, number, number] = [0xe9, 0x9b, 0x6e];
-const HEAT_DARK: readonly [number, number, number] = [0x5c, 0x19, 0x00];
+/**
+ * Heat steps for magnitude (heatmap cells, top-files bars), drawn only from the page palette: the
+ * neutrals `--stone` and `--ash` carry context, and `--ember` marks a hotspot — a share of misleading
+ * or weak at or above {@link HEAT_HOTSPOT_SHARE}. This is the dataviz "emphasis" form (the one thing
+ * that matters in the accent hue, the rest in gray) rather than a continuous ramp: `--ember` alone
+ * has too little lightness range for a readable sequential scale (validated: its tints sit at
+ * ~1.2:1 against the surface and its dark steps collapse together). Ink text clears contrast on every
+ * step, and every cell also prints its percentage, so the value never rests on color alone.
+ */
+const HEAT_HOTSPOT_SHARE = 0.5;
+const HEAT_STEPS: readonly { readonly from: number; readonly color: string; readonly label: string }[] = [
+  { from: 0, color: '#ebe8e4', label: '0–24%' },
+  { from: 0.25, color: '#a59f97', label: '25–49%' },
+  { from: HEAT_HOTSPOT_SHARE, color: '#ff4704', label: '≥ 50% hotspot' },
+];
 
 function heatColor(share: number): string {
-  const t = Math.max(0, Math.min(1, share));
-  const toHex = (n: number) => n.toString(16).padStart(2, '0');
-  const mix = (a: number, b: number) => Math.round(a + (b - a) * t);
-  return `#${toHex(mix(HEAT_LIGHT[0], HEAT_DARK[0]))}${toHex(mix(HEAT_LIGHT[1], HEAT_DARK[1]))}${toHex(mix(HEAT_LIGHT[2], HEAT_DARK[2]))}`;
+  let color = HEAT_STEPS[0]?.color ?? '';
+  for (const step of HEAT_STEPS) if (share >= step.from) color = step.color;
+  return color;
 }
-
-/** White text past the ramp's midpoint, ink text before it — picked by the fill's own luminance so an in-fill label always clears contrast (marks-and-anatomy: "pick white or ink by the fill's luminance"). */
-function heatTextColor(share: number): string {
-  return share >= 0.5 ? '#fdfcfc' : '#000000';
-}
-
-const HEAT_LEGEND_STEPS: readonly number[] = [0, 0.25, 0.5, 0.75, 1];
 
 function renderHeatmapRow(row: ReportOverviewHeatmapRow): string {
   const cells = row.cells.map((cell) => {
@@ -404,7 +408,7 @@ function renderHeatmapRow(row: ReportOverviewHeatmapRow): string {
       return `<td><span class="heat-cell heat-cell-na" title="${escapeHtml(row.folder)} · ${escapeHtml(cell.dimensionLabel)}: n/a (0 applicable)">n/a</span></td>`;
     }
     const percent = formatPercent(cell.share);
-    const style = `background:${heatColor(cell.share)};color:${heatTextColor(cell.share)}`;
+    const style = `background:${heatColor(cell.share)};color:#000000`;
     const title = `${escapeHtml(row.folder)} · ${escapeHtml(cell.dimensionLabel)}: ${percent} (${cell.badCount}/${cell.applicableCount})`;
     return `<td><span class="heat-cell" style="${style}" title="${title}">${percent}</span></td>`;
   }).join('');
@@ -412,14 +416,14 @@ function renderHeatmapRow(row: ReportOverviewHeatmapRow): string {
   return `<tr${rowClass}><th scope="row" class="heat-folder-name">${escapeHtml(row.folder)}</th>${cells}</tr>`;
 }
 
-/** Folder x dimension heatmap — see the Authorized scope addition (2026-09-23): sequential single-hue ramp, a legend naming the scale, a printed percentage where it fits, and a `<title>` per cell. A cell with zero applicable tests reads `n/a`, never `NaN` or a misleading `0%`. */
+/** Folder x dimension heatmap — see the Authorized scope addition (2026-09-23): palette neutrals with ember hotspots, a legend naming the steps, a printed percentage where it fits, and a `<title>` per cell. A cell with zero applicable tests reads `n/a`, never `NaN` or a misleading `0%`. */
 function renderHeatmapSection(overview: ReportOverview): string {
   const { rows, dimensionOrder } = overview.folderHeatmap;
   if (rows.length === 0 || dimensionOrder.length === 0) return '';
   const head = dimensionOrder.map((dimension) => `<th title="${escapeHtml(dimension.dimensionLabel)}">${escapeHtml(shortDimensionLabel(dimension.dimensionLabel))}</th>`).join('');
-  const legend = HEAT_LEGEND_STEPS.map((step) => [
-    `<span class="heat-legend-swatch" style="background:${heatColor(step)}" aria-hidden="true"></span>`,
-    `<span class="heat-legend-label">${Math.round(step * 100)}%</span>`,
+  const legend = HEAT_STEPS.map((step) => [
+    `<span class="heat-legend-swatch" style="background:${step.color}" aria-hidden="true"></span>`,
+    `<span class="heat-legend-label">${step.label}</span>`,
   ].join('')).join('');
   return [
     '<section id="jev-heatmap">',
@@ -431,7 +435,7 @@ function renderHeatmapSection(overview: ReportOverview): string {
   ].join('\n');
 }
 
-/** Top files by tests needing a change, capped — see this module's own doc. Sequential single-hue bars (magnitude), each direct-labeled with its own count and share. */
+/** Top files by tests needing a change, capped — see this module's own doc. Bars on the same palette heat steps as the heatmap (ember only for a hotspot), each direct-labeled with its own count and share. */
 function renderTopFilesSection(overview: ReportOverview): string {
   const files = overview.topFiles;
   if (files.length === 0) return '';

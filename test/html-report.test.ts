@@ -368,11 +368,34 @@ describe('renderAuditReportHtml: folder x dimension heatmap', () => {
     expect(html).toContain('src/payments · Assertion strength: n/a (0 applicable)');
   });
 
-  it('carries a legend naming the 0%/100% ends of the sequential scale', () => {
+  it('paints context cells in the palette neutrals and only hotspots (>= 50% misleading or weak) in ember', () => {
+    const inFolder = (folder: string, levels: readonly ('misleading' | 'weak' | 'strong')[]) => levels.map((level, index) => classification({
+      testCaseId: `tc:v1:${folder}-${index}` as TestCaseId,
+      repositoryRelativePath: `src/${folder}/case-${index}.test.ts`,
+      status: level === 'strong' ? 'healthy' : level,
+      dimensions: [dimension({ level })],
+    }));
+    const classifications = [
+      ...inFolder('hot', ['misleading', 'weak', 'strong']),
+      ...inFolder('warm', ['weak', 'strong', 'strong']),
+      ...inFolder('cold', ['strong', 'strong', 'strong']),
+    ];
+    const html = renderAuditReportHtml(minimalReport({ classifications }));
+    const cellBackground = (folder: string) => new RegExp(`style="background:(#[0-9a-f]{6})[^"]*" title="src/${folder} · `).exec(html)?.[1];
+    expect(cellBackground('hot')).toBe('#ff4704');
+    expect(cellBackground('warm')).toBe('#a59f97');
+    expect(cellBackground('cold')).toBe('#ebe8e4');
+    const inlineBackgrounds = new Set([...html.matchAll(/style="[^"]*background:(#[0-9a-f]{6})/g)].map((match) => match[1]));
+    expect([...inlineBackgrounds].every((color) => ['#ebe8e4', '#a59f97', '#ff4704'].includes(color ?? ''))).toBe(true);
+    expect(html).toContain('≥ 50%');
+  });
+
+  it('carries a legend naming every heat step, hotspot included', () => {
     const html = renderAuditReportHtml(minimalReport());
     expect(html).toContain('heat-legend');
-    expect(html).toContain('0%');
-    expect(html).toContain('100%');
+    expect(html).toContain('0–24%');
+    expect(html).toContain('25–49%');
+    expect(html).toContain('≥ 50% hotspot');
   });
 });
 
