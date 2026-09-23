@@ -17,7 +17,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "skills/jev-test-audit"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
