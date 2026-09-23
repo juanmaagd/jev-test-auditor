@@ -201,34 +201,26 @@ function reportFrom(classifications: readonly AuditReportClassification[], overr
 }
 
 /**
- * 15 distinct top-level folders, enough to exceed `HEATMAP_ROWS_LIMIT` (12) and exercise both the
- * Other-merge and the min-group-size depth-one fold `folders`/`batches` reuse from
- * `report-overview.ts`. Each folder has a DIFFERENT first path segment so the small ones don't
- * all collapse into one shared depth-one bucket (which would never exceed the row cap).
- * - `big-0`, `big-1`: 5 tests each, depth-two ("big-N/sub") stays its own row.
- * - `small-2`..`small-14` (13 folders): 1 test each, folds to its own depth-one row ("small-N") —
- *   13 distinct rows, so together with the 2 "big-*" rows that is 15 > 12, forcing an Other row.
+ * `HEATMAP_ROWS_LIMIT + 3` (15) distinct top-level folders, each with exactly `HEATMAP_MIN_GROUP_SIZE`
+ * (3) tests — enough to be its own row (never folds away as too small) but, at that size, below
+ * `FOLDER_DOMINANT_SHARE` of the grand total (3/45 ≈ 6.7% < 1/12 ≈ 8.3%), so none of them drills down
+ * further into "mod". That yields exactly one row per folder — 15 > `HEATMAP_ROWS_LIMIT` (12) —
+ * forcing the row cap's Other-merge. Mirrors `report-overview.test.ts`'s own "caps rows" fixture,
+ * `src/domain/report-overview.ts`.
  */
 function manyFoldersReport(): AuditReport {
   const classifications: AuditReportClassification[] = [];
-  for (let folderIndex = 0; folderIndex < 2; folderIndex += 1) {
-    for (let testIndex = 0; testIndex < 5; testIndex += 1) {
-      const id = `big${folderIndex}t${testIndex}`;
+  const perFolder = 3;
+  const folderCount = 15;
+  for (let folderIndex = 0; folderIndex < folderCount; folderIndex += 1) {
+    for (let testIndex = 0; testIndex < perFolder; testIndex += 1) {
       classifications.push(classification(
-        id,
-        `big-${folderIndex}/sub/file-${testIndex}.test.ts`,
-        testIndex === 0 ? 'misleading' : 'healthy',
-        [dimension({ index: 0, level: testIndex === 0 ? 'misleading' : 'strong' })],
+        `area${folderIndex}t${testIndex}`,
+        `area-${folderIndex}/mod/file-${testIndex}.test.ts`,
+        'misleading',
+        [dimension({ index: 0, level: 'misleading' })],
       ));
     }
-  }
-  for (let folderIndex = 2; folderIndex < 15; folderIndex += 1) {
-    classifications.push(classification(
-      `small${folderIndex}`,
-      `small-${folderIndex}/sub/file.test.ts`,
-      'misleading',
-      [dimension({ index: 0, level: 'misleading' })],
-    ));
   }
   return reportFrom(classifications);
 }

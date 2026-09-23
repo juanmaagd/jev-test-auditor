@@ -49,6 +49,10 @@ import { join, resolve } from 'node:path';
 const HEATMAP_ROWS_LIMIT = 12;
 /** Mirrors `HEATMAP_MIN_GROUP_SIZE`, `src/domain/report-overview.ts`. */
 const HEATMAP_MIN_GROUP_SIZE = 3;
+/** Mirrors `FOLDER_GENERIC_SEGMENTS`, `src/domain/report-overview.ts` — skipped only when CHOOSING the next folder-grouping split level, never when naming a row. */
+const FOLDER_GENERIC_SEGMENTS = new Set(['src', 'lib', 'app', 'test', 'tests', '__tests__', 'spec', 'packages', 'apps']);
+/** Mirrors `FOLDER_DOMINANT_SHARE`, `src/domain/report-overview.ts`. */
+const FOLDER_DOMINANT_SHARE = 1 / HEATMAP_ROWS_LIMIT;
 
 const DEFAULT_TOP_FOLDERS_LIMIT = 20;
 const DEFAULT_TOP_FILES_LIMIT = 10; // mirrors TOP_FILES_LIMIT, src/domain/report-overview.ts
@@ -242,16 +246,59 @@ function directorySegments(path) {
   return path.split('/').slice(0, -1);
 }
 
-function depthOneFolderKey(path) {
-  const dirs = directorySegments(path);
-  return dirs.length === 0 ? '.' : dirs[0];
+/**
+ * The next real (non-generic) directory-segment boundary past `fromIndex`, silently absorbing any
+ * generic segments along the way — or `undefined` when nothing but generic segments (or nothing at
+ * all) remains, meaning this path has no further real segment to split on. Mirrors
+ * `nextFolderBoundary`, src/domain/report-overview.ts.
+ */
+function nextFolderBoundary(dirs, fromIndex) {
+  let index = fromIndex;
+  while (index < dirs.length && FOLDER_GENERIC_SEGMENTS.has(dirs[index])) index += 1;
+  return index < dirs.length ? index + 1 : undefined;
 }
 
-function depthTwoFolderKey(path) {
-  const dirs = directorySegments(path);
-  if (dirs.length === 0) return '.';
-  if (dirs.length === 1) return dirs[0];
-  return dirs.slice(0, 2).join('/');
+/**
+ * Deterministic adaptive folder split — mirrors `adaptiveFolderGroups`, src/domain/report-overview.ts,
+ * byte-for-byte (proven by this file's own parity tests). `items` are `{ path, count, ... }`; `count`
+ * is a weight (1 per classification for `summarizeTopFolders`, tests-per-file for
+ * `buildFolderBatches`, which must never split one file across two folders). Recurses from
+ * `prefix`/`prefixDepth`: while this node's own count holds at least `FOLDER_DOMINANT_SHARE` of
+ * `grandTotal`, it splits into its next real (non-generic) child segments; a child whose count is
+ * under `HEATMAP_MIN_GROUP_SIZE` folds back into `prefix`'s own row instead of becoming its own.
+ * Returns leaf groups only — `{ folder, items }[]` — every input item in exactly one group.
+ */
+function adaptiveFolderGroups(items, prefix, prefixDepth, grandTotal) {
+  const total = items.reduce((sum, item) => sum + item.count, 0);
+  if (total === 0) return [];
+  if (total / grandTotal < FOLDER_DOMINANT_SHARE) return [{ folder: prefix, items }];
+
+  const buckets = new Map();
+  const leftover = [];
+  for (const item of items) {
+    const dirs = directorySegments(item.path);
+    const newDepth = nextFolderBoundary(dirs, prefixDepth);
+    if (newDepth === undefined) {
+      leftover.push(item);
+      continue;
+    }
+    const key = dirs.slice(0, newDepth).join('/');
+    const bucket = buckets.get(key);
+    if (bucket === undefined) buckets.set(key, [item]);
+    else bucket.push(item);
+  }
+
+  const groups = [];
+  for (const [key, bucketItems] of buckets) {
+    const bucketTotal = bucketItems.reduce((sum, item) => sum + item.count, 0);
+    if (bucketTotal < HEATMAP_MIN_GROUP_SIZE) {
+      leftover.push(...bucketItems);
+      continue;
+    }
+    groups.push(...adaptiveFolderGroups(bucketItems, key, key.split('/').length, grandTotal));
+  }
+  if (leftover.length > 0) groups.push({ folder: prefix, items: leftover });
+  return groups;
 }
 
 function matchesDimensionFilter(classification, dimensionFilter) {
@@ -325,31 +372,25 @@ function summarizeDimensions(classifications) {
 }
 
 /**
- * The canonical, folded folder ranking — the same "Other"-merge `summarizeFolderHeatmap`
- * (`src/domain/report-overview.ts`) performs, at the SAME fixed thresholds
- * (`HEATMAP_ROWS_LIMIT`/`HEATMAP_MIN_GROUP_SIZE`), never `--limit`: the merge is part of what
- * "top folders" means, not a display cap. `--limit`/`--offset` paginate this already-folded,
- * already-capped (`HEATMAP_ROWS_LIMIT` + 1 "Other" row at most) list afterwards.
+ * The canonical, folded folder ranking — the same adaptive-drill-down "Other"-merge
+ * `summarizeFolderHeatmap` (`src/domain/report-overview.ts`) performs, at the SAME fixed thresholds
+ * (`HEATMAP_ROWS_LIMIT`/`HEATMAP_MIN_GROUP_SIZE`/`FOLDER_DOMINANT_SHARE`), never `--limit`: the merge
+ * is part of what "top folders" means, not a display cap. `--limit`/`--offset` paginate this
+ * already-folded, already-capped (`HEATMAP_ROWS_LIMIT` + 1 "Other" row at most) list afterwards.
  */
 function summarizeTopFolders(classifications) {
-  const candidateKeys = classifications.map((classification) => depthTwoFolderKey(classification.repositoryRelativePath));
-  const candidateSizes = new Map();
-  for (const key of candidateKeys) candidateSizes.set(key, (candidateSizes.get(key) ?? 0) + 1);
+  const items = classifications.map((classification) => ({ path: classification.repositoryRelativePath, count: 1, classification }));
+  const groups = adaptiveFolderGroups(items, '.', 0, classifications.length);
 
   const folders = new Map();
-  classifications.forEach((classification, index) => {
-    const candidate = candidateKeys[index];
-    const key = (candidateSizes.get(candidate) ?? 0) >= HEATMAP_MIN_GROUP_SIZE
-      ? candidate
-      : depthOneFolderKey(classification.repositoryRelativePath);
-    let tally = folders.get(key);
-    if (tally === undefined) {
-      tally = { needsChange: 0, total: 0 };
-      folders.set(key, tally);
+  for (const group of groups) {
+    const tally = { needsChange: 0, total: 0 };
+    for (const item of group.items) {
+      tally.total += 1;
+      if (item.classification.status === 'misleading' || item.classification.status === 'weak') tally.needsChange += 1;
     }
-    tally.total += 1;
-    if (classification.status === 'misleading' || classification.status === 'weak') tally.needsChange += 1;
-  });
+    folders.set(group.folder, tally);
+  }
 
   const ranked = [...folders.entries()].sort(
     ([leftKey, left], [rightKey, right]) => right.needsChange - left.needsChange || right.total - left.total || leftKey.localeCompare(rightKey),
@@ -626,7 +667,14 @@ function buildFileBatches(candidates) {
   return batches;
 }
 
-/** Packs files (never splitting one file across batches — "one subagent per file") into folder-scoped batches, greedily chunked to `maxTests` when given. Folder key folding reuses the same depth-two/depth-one rule `summarizeTopFolders` uses, scoped to the candidate files only — never the "Other" row cutoff, since every batch must stay actionable. */
+/**
+ * Packs files (never splitting one file across batches — "one subagent per file") into
+ * folder-scoped batches, greedily chunked to `maxTests` when given. Groups with the same adaptive
+ * drill-down `summarizeTopFolders` uses, weighted by tests-per-file and scoped to the candidate
+ * files only — never the "Other" row cutoff, since every batch must stay actionable — so the same
+ * folder isn't reported as `backend/src/modules/budgets` in `folders`/`summary` and merely
+ * `backend/src` here.
+ */
 function buildFolderBatches(candidates, maxTests) {
   const byFile = new Map();
   for (const classification of candidates) {
@@ -636,23 +684,12 @@ function buildFolderBatches(candidates, maxTests) {
   }
   const fileEntries = [...byFile.entries()].map(([path, entries]) => ({ path, entries, count: entries.length }));
 
-  const candidateKeys = fileEntries.map((file) => depthTwoFolderKey(file.path));
-  // Counts TESTS, not files, per candidate key — matching what `summarizeTopFolders` counts, so
-  // the same folder isn't reported as "src/area" there and merely "src" here.
-  const candidateSizes = new Map();
-  fileEntries.forEach((file, index) => {
-    const key = candidateKeys[index];
-    candidateSizes.set(key, (candidateSizes.get(key) ?? 0) + file.count);
-  });
+  const totalTests = fileEntries.reduce((sum, file) => sum + file.count, 0);
+  const items = fileEntries.map((file) => ({ path: file.path, count: file.count, file }));
+  const groups = adaptiveFolderGroups(items, '.', 0, totalTests);
 
   const byFolder = new Map();
-  fileEntries.forEach((file, index) => {
-    const candidate = candidateKeys[index];
-    const key = (candidateSizes.get(candidate) ?? 0) >= HEATMAP_MIN_GROUP_SIZE ? candidate : depthOneFolderKey(file.path);
-    const list = byFolder.get(key) ?? [];
-    list.push(file);
-    byFolder.set(key, list);
-  });
+  for (const group of groups) byFolder.set(group.folder, group.items.map((item) => item.file));
 
   const batches = [];
   for (const [folderKey, files] of byFolder.entries()) {

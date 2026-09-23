@@ -363,20 +363,53 @@ describe('summarizeReport: folder x dimension heatmap', () => {
     expect(cell).toEqual({ dimensionId: 'assertion-strength', dimensionLabel: 'Assertion strength', badCount: 0, applicableCount: 0, share: undefined });
   });
 
-  it('falls back to the shallower (first-segment) folder key when a depth-two group is smaller than the minimum meaningful size', () => {
+  it('folds a too-small candidate group up into its nearest ancestor row instead of giving it its own row', () => {
     expect(HEATMAP_MIN_GROUP_SIZE).toBeGreaterThan(1);
-    const classifications = Array.from({ length: HEATMAP_MIN_GROUP_SIZE - 1 }, (_, index) =>
+    const common = Array.from({ length: 6 }, (_, index) =>
+      withPathAndStatus(`src/common/${index}.test.ts`, `common-${index}`, 'weak', { level: 'weak' }));
+    const rare = Array.from({ length: HEATMAP_MIN_GROUP_SIZE - 1 }, (_, index) =>
       withPathAndStatus(`src/rare/${index}.test.ts`, `rare-${index}`, 'weak', { level: 'weak' }));
-    const report = minimalReport({ classifications });
+    const report = minimalReport({ classifications: [...common, ...rare] });
     const overview = summarizeReport(report);
-    expect(overview.folderHeatmap.rows.map((row) => row.folder)).toContain('src');
-    expect(overview.folderHeatmap.rows.map((row) => row.folder)).not.toContain('src/rare');
+    const folders = overview.folderHeatmap.rows.map((row) => row.folder);
+    expect(folders).toContain('src/common');
+    expect(folders).not.toContain('src/rare');
+    expect(folders).not.toContain('src'); // "src" is a generic segment, never a row of its own
+    // The too-small "src/rare" group folds up to the nearest ancestor row that was actually
+    // established (root, "."), since "src" alone is never a candidate row.
+    const root = overview.folderHeatmap.rows.find((row) => row.folder === '.');
+    expect(root).toBeDefined();
+    expect(root!.judgedTotal).toBe(rare.length);
   });
 
   it('buckets a root-level test file (no directory) under "."', () => {
     const report = minimalReport({ classifications: [withPathAndStatus('smoke.test.ts', '1', 'weak', { level: 'weak' })] });
     const overview = summarizeReport(report);
     expect(overview.folderHeatmap.rows.map((row) => row.folder)).toContain('.');
+  });
+
+  it('drills down past generic segments to module/feature level for a supermarket-pro-shaped monorepo', () => {
+    const backendModules = ['budgets', 'inventory', 'orders'];
+    const mobileFeatures = ['checkout', 'cart'];
+    const classifications = [
+      ...backendModules.flatMap((mod) => Array.from({ length: 8 }, (_, index) =>
+        withPathAndStatus(`backend/src/modules/${mod}/__tests__/${mod}-${index}.spec.ts`, `${mod}-${index}`, 'weak', { level: 'weak' }))),
+      ...mobileFeatures.flatMap((feature) => Array.from({ length: 6 }, (_, index) =>
+        withPathAndStatus(`mobile/src/features/${feature}/${feature}-${index}.test.tsx`, `${feature}-${index}`, 'weak', { level: 'weak' }))),
+    ];
+    const report = minimalReport({ classifications });
+    const overview = summarizeReport(report);
+    const folders = overview.folderHeatmap.rows.map((row) => row.folder);
+    for (const mod of backendModules) expect(folders).toContain(`backend/src/modules/${mod}`);
+    for (const feature of mobileFeatures) expect(folders).toContain(`mobile/src/features/${feature}`);
+    // Never a coarse stop at a bare top-level or "src" prefix — those are too coarse to be useful.
+    expect(folders).not.toContain('backend');
+    expect(folders).not.toContain('backend/src');
+    expect(folders).not.toContain('mobile');
+    expect(folders).not.toContain('mobile/src');
+    // Every test is accounted for somewhere — the drill-down never silently drops a test.
+    const total = overview.folderHeatmap.rows.reduce((sum, row) => sum + row.judgedTotal, 0);
+    expect(total).toBe(classifications.length);
   });
 
   it('caps rows at the limit, folding the remaining folders into one "Other" row summing their counts', () => {

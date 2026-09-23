@@ -38,17 +38,30 @@
  * - Every share helper routes through {@link safeShare}, which returns `0` (never `NaN`) for a
  *   zero denominator.
  *
- * **Folder grouping (`summarizeFolderHeatmap`).** A row's key is that folder's first TWO path
- * segments (e.g. `src/payments` for `src/payments/checkout.test.ts`) — deliberately coarser than
- * one segment, since "src" alone would merge unrelated subsystems into one meaningless row, and
- * finer than the full directory chain, which would produce as many rows as files. A depth-two key
- * that would own fewer than {@link HEATMAP_MIN_GROUP_SIZE} tests folds up to its depth-one parent
- * instead (documented per-call in {@link summarizeFolderHeatmap}) — a two-test row is noise, not a
- * trend, and merging it into its parent keeps the row meaningful without discarding the tests. A
- * file with no directory (`smoke.test.ts`) keys to `'.'`. Rows are ranked by `needsChangeCount`
- * (same "tests needing a change" ranking `topFiles` uses); only the top {@link HEATMAP_ROWS_LIMIT}
- * become their own row, and every folder past that is summed into one trailing `'Other'` row so the
- * heatmap never grows with the number of folders a run touches.
+ * **Folder grouping (`summarizeFolderHeatmap`), adaptive drill-down.** A fixed depth-two rule
+ * (`src/payments`) is too coarse for a real monorepo — `backend/src`, `mobile/src`, `frontend/src`
+ * carry no signal; the actual hotspots live one or two levels deeper
+ * (`backend/src/modules/budgets`). `adaptiveFolderGroups` instead recurses from the root: a node
+ * splits into its next REAL (non-generic) child segment only while it still holds at least
+ * {@link FOLDER_DOMINANT_SHARE} of the population being grouped (tied to the row budget: a node
+ * worth more than one row of a {@link HEATMAP_ROWS_LIMIT}-row grid is worth resolving further) — a
+ * node below that share stops and becomes one row, even if the directory tree goes deeper. Choosing
+ * the next split level SKIPS generic structural segments (`src`, `lib`, `app`, `test`, `tests`,
+ * `__tests__`, `spec`, `packages`, `apps` — {@link FOLDER_GENERIC_SEGMENTS}), silently absorbing any
+ * number of them in one step so `backend/src/modules` is reached in the SAME step as `backend`,
+ * never stopping at a bare `backend/src` row; the row's KEY is always the real, unmodified path
+ * prefix (generic segments included), never a shortened alias, so `--folder <row>`-style prefix
+ * filtering elsewhere keeps working. A child candidate that would own fewer than
+ * {@link HEATMAP_MIN_GROUP_SIZE} tests never becomes its own row; it folds back into the nearest
+ * ancestor row that WAS established (which may be several real levels up, or the root `'.'`) along
+ * with any test whose path has no further real segment to split on (recursion stops there
+ * structurally, regardless of share). A file with no directory (`smoke.test.ts`) keys to `'.'`.
+ * Every test is accounted for in exactly one leaf row — the drill-down never drops or double-counts
+ * one. Rows are then ranked by `needsChangeCount` (same "tests needing a change" ranking `topFiles`
+ * uses); only the top {@link HEATMAP_ROWS_LIMIT} become their own row, and every folder past that is
+ * summed into one trailing `'Other'` row so the heatmap never grows with the number of folders a run
+ * touches. `report-query.mjs`'s `summarizeTopFolders` mirrors this algorithm byte-for-byte (proven
+ * by `test/skill-report-query.test.ts`'s parity tests).
  */
 import type { ClassificationLevel, OverallClassificationStatus } from './classification.js';
 import type { AuditReport } from './report.js';
@@ -59,8 +72,14 @@ export const TOP_FILES_LIMIT = 10;
 /** How many of the {@link summarizeFolderHeatmap} folder rows are kept individually — everything past this rank folds into one trailing `'Other'` row. */
 export const HEATMAP_ROWS_LIMIT = 12;
 
-/** The smallest depth-two folder group {@link summarizeFolderHeatmap} keeps at that depth; a smaller candidate group folds up to its depth-one parent — see this module's own doc, "Folder grouping". */
+/** The smallest candidate folder group {@link summarizeFolderHeatmap} keeps as its own row, at any depth; a smaller candidate folds up to its nearest established ancestor row — see this module's own doc, "Folder grouping". */
 export const HEATMAP_MIN_GROUP_SIZE = 3;
+
+/** Directory segments skipped when CHOOSING the next folder-grouping split level — never when naming a row (the row key is always the real, unmodified path prefix). See this module's own doc, "Folder grouping". */
+const FOLDER_GENERIC_SEGMENTS: ReadonlySet<string> = new Set(['src', 'lib', 'app', 'test', 'tests', '__tests__', 'spec', 'packages', 'apps']);
+
+/** The share of the population being grouped a folder must hold to be worth splitting into finer children — see this module's own doc, "Folder grouping". Tied to {@link HEATMAP_ROWS_LIMIT}: a folder that would take more than one row's worth of a fixed-size grid is worth resolving further; one that would not stays a single, coarser row. */
+const FOLDER_DOMINANT_SHARE = 1 / HEATMAP_ROWS_LIMIT;
 
 export interface ReportOverviewNeedsChange {
   readonly count: number;
@@ -304,18 +323,65 @@ function directorySegments(path: string): readonly string[] {
   return path.split('/').slice(0, -1);
 }
 
-/** The coarser, depth-one fallback key a too-small depth-two group folds up into — see this module's own doc, "Folder grouping". */
-function depthOneFolderKey(path: string): string {
-  const dirs = directorySegments(path);
-  return dirs.length === 0 ? '.' : dirs[0]!;
+/**
+ * The next real (non-generic) directory-segment boundary past `fromIndex`, silently absorbing any
+ * generic segments along the way — or `undefined` when nothing but generic segments (or nothing at
+ * all) remains, meaning this path has no further real segment to split on. See this module's own
+ * doc, "Folder grouping".
+ */
+function nextFolderBoundary(dirs: readonly string[], fromIndex: number): number | undefined {
+  let index = fromIndex;
+  while (index < dirs.length && FOLDER_GENERIC_SEGMENTS.has(dirs[index]!)) index += 1;
+  return index < dirs.length ? index + 1 : undefined;
 }
 
-/** The default, finer folder key: the first two directory segments, or fewer when the path is shallower. */
-function depthTwoFolderKey(path: string): string {
-  const dirs = directorySegments(path);
-  if (dirs.length === 0) return '.';
-  if (dirs.length === 1) return dirs[0]!;
-  return dirs.slice(0, 2).join('/');
+interface AdaptiveFolderItem {
+  readonly index: number;
+  readonly dirs: readonly string[];
+}
+
+interface AdaptiveFolderGroup {
+  readonly folder: string;
+  readonly indices: readonly number[];
+}
+
+/**
+ * Deterministic adaptive folder split — see this module's own doc, "Folder grouping". Recurses from
+ * `prefix`/`prefixDepth` (a real path prefix and its segment count): while this node holds at least
+ * {@link FOLDER_DOMINANT_SHARE} of `grandTotal`, it splits into its next real (non-generic) child
+ * segments; a child under {@link HEATMAP_MIN_GROUP_SIZE} folds back into `prefix`'s own row instead
+ * of becoming its own. Returns leaf groups only, ready for the caller's own tallying/ranking. Every
+ * item passed in appears in EXACTLY one returned group's `indices` — the drill-down never drops or
+ * double-counts one.
+ */
+function adaptiveFolderGroups(items: readonly AdaptiveFolderItem[], prefix: string, prefixDepth: number, grandTotal: number): AdaptiveFolderGroup[] {
+  if (items.length === 0) return [];
+  if (items.length / grandTotal < FOLDER_DOMINANT_SHARE) return [{ folder: prefix, indices: items.map((item) => item.index) }];
+
+  const buckets = new Map<string, AdaptiveFolderItem[]>();
+  const leftover: AdaptiveFolderItem[] = [];
+  for (const item of items) {
+    const newDepth = nextFolderBoundary(item.dirs, prefixDepth);
+    if (newDepth === undefined) {
+      leftover.push(item);
+      continue;
+    }
+    const key = item.dirs.slice(0, newDepth).join('/');
+    const bucket = buckets.get(key);
+    if (bucket === undefined) buckets.set(key, [item]);
+    else bucket.push(item);
+  }
+
+  const groups: AdaptiveFolderGroup[] = [];
+  for (const [key, bucketItems] of buckets) {
+    if (bucketItems.length < HEATMAP_MIN_GROUP_SIZE) {
+      leftover.push(...bucketItems);
+      continue;
+    }
+    groups.push(...adaptiveFolderGroups(bucketItems, key, key.split('/').length, grandTotal));
+  }
+  if (leftover.length > 0) groups.push({ folder: prefix, indices: leftover.map((item) => item.index) });
+  return groups;
 }
 
 interface HeatmapCellTally {
@@ -355,34 +421,31 @@ function addHeatmapCellTally(tally: HeatmapFolderTally, dimensionId: string, jud
 
 /**
  * Folder x dimension "where is this bad" grid — see this module's own doc, "Folder grouping", for
- * the two-pass depth-two-with-depth-one-fallback grouping rule and the row cap. `dimensionOrder`
- * (the same order {@link summarizeDimensions} already produced) fixes every row's column order, so a
- * folder that never saw a given dimension still emits a `share: undefined` cell rather than omitting
- * the column entirely.
+ * the adaptive drill-down and the row cap. `dimensionOrder` (the same order {@link summarizeDimensions}
+ * already produced) fixes every row's column order, so a folder that never saw a given dimension
+ * still emits a `share: undefined` cell rather than omitting the column entirely.
  */
 function summarizeFolderHeatmap(
   report: AuditReport,
   dimensionOrder: readonly { readonly dimensionId: string; readonly dimensionLabel: string }[],
 ): ReportOverviewHeatmap {
-  const candidateKeys = report.classifications.map((classification) => depthTwoFolderKey(classification.repositoryRelativePath));
-  const candidateSizes = new Map<string, number>();
-  for (const key of candidateKeys) candidateSizes.set(key, (candidateSizes.get(key) ?? 0) + 1);
+  const items: AdaptiveFolderItem[] = report.classifications.map((classification, index) => ({
+    index,
+    dirs: directorySegments(classification.repositoryRelativePath),
+  }));
+  const groups = adaptiveFolderGroups(items, '.', 0, report.classifications.length);
 
   const folders = new Map<string, HeatmapFolderTally>();
-  report.classifications.forEach((classification, index) => {
-    const candidate = candidateKeys[index]!;
-    const key = (candidateSizes.get(candidate) ?? 0) >= HEATMAP_MIN_GROUP_SIZE
-      ? candidate
-      : depthOneFolderKey(classification.repositoryRelativePath);
-    let tally = folders.get(key);
-    if (tally === undefined) {
-      tally = emptyHeatmapFolderTally();
-      folders.set(key, tally);
+  for (const group of groups) {
+    const tally = emptyHeatmapFolderTally();
+    for (const index of group.indices) {
+      const classification = report.classifications[index]!;
+      tally.total += 1;
+      if (classification.status === 'misleading' || classification.status === 'weak') tally.needsChange += 1;
+      for (const dim of classification.dimensions) addHeatmapCellTally(tally, dim.dimensionId, dim);
     }
-    tally.total += 1;
-    if (classification.status === 'misleading' || classification.status === 'weak') tally.needsChange += 1;
-    for (const dim of classification.dimensions) addHeatmapCellTally(tally, dim.dimensionId, dim);
-  });
+    folders.set(group.folder, tally);
+  }
 
   const ranked = [...folders.entries()].sort(
     ([leftKey, left], [rightKey, right]) => right.needsChange - left.needsChange || right.total - left.total || leftKey.localeCompare(rightKey),

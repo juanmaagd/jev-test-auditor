@@ -448,7 +448,7 @@ function renderHeatmapSection(overview: ReportOverview): string {
   return [
     '<section id="jev-heatmap">',
     '<h2>Where the changes are</h2>',
-    '<p>Share of each folder’s own applicable tests that are misleading or weak, per dimension. A folder groups by its first one or two path segments; folders too small to be meaningful on their own fold into their parent, and the smallest-ranked folders fold into “Other”.</p>',
+    '<p>Share of each folder’s own applicable tests that are misleading or weak, per dimension. Folders drill down adaptively — a folder big enough to be worth resolving further splits into its modules/features; a folder too small to split, or too small to be meaningful on its own, stays at the coarser level — and the smallest-ranked folders fold into “Other”.</p>',
     `<div class="heat-legend">${legend}</div>`,
     renderDataTable(`<th class="heat-folder"></th>${head}`, rows.map(renderHeatmapRow).join('\n'), 'heatmap'),
     '</section>',
