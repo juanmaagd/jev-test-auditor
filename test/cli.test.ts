@@ -3951,6 +3951,107 @@ describe('jta report — feature "persisted-run-reports", task T2', () => {
       expect(text).toContain('Top folders needing a change:');
       expect(text).toContain('1/1 need a change');
     });
+
+    it('labels a split folder\'s own leftover row "(other files)" in the Top folders list', async () => {
+      const files: Record<string, string> = {};
+      for (let i = 0; i < 4; i += 1) {
+        files[`backend/src/modules/tickets/direct-${i}.test.ts`] = `import { expect, test } from 'vitest';\ntest('adds', () => { expect(1 + 1).toBe(2); });\n`;
+      }
+      for (let i = 0; i < 5; i += 1) {
+        files[`backend/src/modules/tickets/eval/eval-${i}.test.ts`] = `import { expect, test } from 'vitest';\ntest('adds', () => { expect(1 + 1).toBe(2); });\n`;
+      }
+      const root = await fixture(files);
+      const seedOutput = captureOutput();
+      const exitCode = await runCli(['audit', '--rootDir', root, '--evaluate'], seedOutput.io, {
+        createEvaluationPort: () => ({
+          async evaluate(request) {
+            return {
+              evaluation: {
+                requestedModel: 'jev-1.13.0', respondedModel: 'jev-1.13.0', modelMatchesPin: true,
+                answers: {}, usage: { inputTokens: 10, outputTokens: 1 }, attempts: 1,
+              },
+              classification: {
+                testCaseId: request.testCase.id,
+                repositoryRelativePath: request.testCase.repositoryRelativePath,
+                name: request.testCase.name,
+                status: 'weak',
+                dimensions: [{
+                  dimensionId: 'assertion-strength', dimensionLabel: 'Assertion strength',
+                  applicable: true, applicabilityProbability: 0.9,
+                  status: 'judged', level: 'weak', score: 1,
+                  confidence: 0.9, reason: undefined,
+                  probabilities: { '0': 0.1, '1': 0.8, '2': 0.05, '3': 0.05 },
+                  deficientMass: 0.8, acceptableMass: 0.2, criticalMass: 0.1,
+                }],
+                findings: [],
+                policyVersion: 2,
+                rubricVersion: 2,
+                model: { requested: 'jev-1.13.0', responded: 'jev-1.13.0', matchesPin: true },
+                usage: { inputTokens: 10, outputTokens: 1 },
+              },
+            };
+          },
+        }),
+        createStorePort: () => fakeStorePort(FIXED_RUN_ID),
+      });
+      if (exitCode !== 0) throw new Error('seeding failed');
+
+      const output = captureOutput();
+      const reportExit = await runCli(['report', '--rootDir', root], output.io);
+
+      expect(reportExit).toBe(0);
+      const text = output.lines.join('\n');
+      expect(text).toContain('backend/src/modules/tickets (other files): 4/4 need a change');
+      expect(text).toContain('backend/src/modules/tickets/eval: 5/5 need a change');
+    });
+
+    it('reports needs-review as its own line, never folded into "Needs a change"', async () => {
+      const root = await fixture(mathFixtureFiles);
+      const seedOutput = captureOutput();
+      const exitCode = await runCli(['audit', '--rootDir', root, '--evaluate'], seedOutput.io, {
+        createEvaluationPort: () => ({
+          async evaluate(request) {
+            return {
+              evaluation: {
+                requestedModel: 'jev-1.13.0', respondedModel: 'jev-1.13.0', modelMatchesPin: true,
+                answers: {}, usage: { inputTokens: 10, outputTokens: 1 }, attempts: 1,
+              },
+              classification: {
+                testCaseId: request.testCase.id,
+                repositoryRelativePath: request.testCase.repositoryRelativePath,
+                name: request.testCase.name,
+                status: 'needs-review',
+                dimensions: [{
+                  dimensionId: 'assertion-strength', dimensionLabel: 'Assertion strength',
+                  applicable: true, applicabilityProbability: 0.9,
+                  status: 'needs-review', level: undefined, score: undefined,
+                  confidence: undefined, reason: 'boundary-straddle',
+                  probabilities: { '0': 0.3, '1': 0.3, '2': 0.2, '3': 0.2 },
+                  deficientMass: 0.5, acceptableMass: 0.5, criticalMass: 0.2,
+                }],
+                findings: [],
+                policyVersion: 2,
+                rubricVersion: 2,
+                model: { requested: 'jev-1.13.0', responded: 'jev-1.13.0', matchesPin: true },
+                usage: { inputTokens: 10, outputTokens: 1 },
+              },
+            };
+          },
+        }),
+        createStorePort: () => fakeStorePort(FIXED_RUN_ID),
+      });
+      if (exitCode !== 0) throw new Error('seeding failed');
+
+      const output = captureOutput();
+      const reportExit = await runCli(['report', '--rootDir', root], output.io);
+
+      expect(reportExit).toBe(0);
+      const text = output.lines.join('\n');
+      expect(text).toContain('Needs a change: 0/1');
+      expect(text).toContain('Needs review (uncertain): 1/1');
+      // A needs-review-only run has no folder needing a change: no "Top folders" section.
+      expect(text).not.toContain('Top folders');
+    });
   });
 
   describe('--run <runId>', () => {

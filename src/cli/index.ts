@@ -956,27 +956,36 @@ function parseReportOptions(args: readonly string[]): ParsedReportOptions | { re
 
 /**
  * Short human-readable default (`jta report`, neither `--json` nor `--html`): the run's own identity
- * and recorded time, the headline "needs a change" share and its denominator (reusing
- * `summarizeReport`, the same aggregation the HTML overview renders from — `src/domain/report-overview.ts`),
- * and up to 5 worst folders by tests needing a change (from the same `folderHeatmap` the overview's
- * own heatmap section renders, excluding its trailing merged `'Other'` row here — a folder-by-folder
- * top list, not that section's full capped grid).
+ * and recorded time, the headline "needs a change" share and its denominator, a separate "needs
+ * review" share over the same denominator (never folded into "needs a change" — `needs-review` means
+ * the model was uncertain, not that the test is broken), both reusing `summarizeReport` (the same
+ * aggregation the HTML overview renders from — `src/domain/report-overview.ts`), and up to 5 worst
+ * folders by tests needing a change (from the same `folderHeatmap` the overview's own heatmap section
+ * renders, excluding its trailing merged `'Other'` row here — a folder-by-folder top list, not that
+ * section's full capped grid).
  */
 function reportSummaryText(report: AuditReport, recordedAt: Date): string {
   const overview = summarizeReport(report);
-  const { needsChange } = overview;
+  const { needsChange, needsReview } = overview;
   const needsChangeLine = needsChange.judgedTotal === 0
     ? 'Needs a change: n/a (no judged test cases)'
     : `Needs a change: ${needsChange.count}/${needsChange.judgedTotal} (${(needsChange.share * 100).toFixed(1)}%)`;
+  const needsReviewLine = needsReview.judgedTotal === 0
+    ? 'Needs review (uncertain): n/a (no judged test cases)'
+    : `Needs review (uncertain): ${needsReview.count}/${needsReview.judgedTotal} (${(needsReview.share * 100).toFixed(1)}%)`;
   const topFolders = overview.folderHeatmap.rows
     .filter((row) => !row.isOther && row.needsChangeCount > 0)
     .slice(0, 5)
-    .map((row) => `  - ${row.folder}: ${row.needsChangeCount}/${row.judgedTotal} need a change`);
+    // A remainder row (`row.isRemainder`) is the leftover slice of a folder that ALSO split into
+    // its own deeper rows (e.g. "backend/src/modules/tickets" alongside ".../tickets/eval") — the
+    // suffix keeps a reader from mistaking it for the whole folder's count.
+    .map((row) => `  - ${row.folder}${row.isRemainder ? ' (other files)' : ''}: ${row.needsChangeCount}/${row.judgedTotal} need a change`);
 
   return [
     `Run ${report.runId ?? '(unknown run id)'} — recorded ${recordedAt.toISOString()}`,
     `Root: ${report.rootDir}`,
     needsChangeLine,
+    needsReviewLine,
     ...(topFolders.length === 0 ? [] : ['Top folders needing a change:', ...topFolders]),
   ].join('\n');
 }

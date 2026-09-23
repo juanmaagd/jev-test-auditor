@@ -19,9 +19,11 @@ below. You are fixing tests, not the feature they cover.
 `{{FINDINGS}}`
 
 <!--
-  Orchestrator: paste this file's `report-query.mjs file <path>` output — every judged test with
-  its per-dimension level and status. A `needs-review` dimension means the model was uncertain,
-  not that the test is broken; treat it as a prompt to double-check, not a confirmed defect.
+  Orchestrator: paste this file's `report-query.mjs file <path>` output (compact by default: only
+  the tests carrying a judged weak/misleading dimension, and only those dimensions — pass --full
+  only if you genuinely need every judged test and every dimension). A `needsReview` dimension id
+  on a test means the model was uncertain about that ONE dimension, not that the test is broken;
+  treat it as a prompt to double-check, not a confirmed defect.
 -->
 
 ## Dimension guide

@@ -227,7 +227,24 @@ describe('renderAuditReportHtml: headline percentage', () => {
     }));
     expect(html).toContain('67%');
     expect(html).toContain('of 3 judged tests need a change');
-    expect(html).toContain('2 of 3 judged tests are misleading, weak, or need review');
+    expect(html).toContain('2 of 3 judged tests are misleading or weak');
+  });
+
+  it('excludes needs-review from the headline share and shows it as a separate, secondary figure over the same denominator', () => {
+    const misleading = classification({ testCaseId: 'tc:v1:m' as TestCaseId, status: 'misleading' });
+    const needsReview = classification({ testCaseId: 'tc:v1:r' as TestCaseId, status: 'needs-review' });
+    const healthy = classification({ testCaseId: 'tc:v1:h' as TestCaseId, status: 'healthy' });
+    const html = renderAuditReportHtml(minimalReport({
+      totals: { ...minimalReport().totals, statusCounts: { healthy: 1, weak: 0, misleading: 1, 'needs-review': 1 } },
+      classifications: [misleading, needsReview, healthy],
+    }));
+    // Headline share is 1/3 (misleading only), never 2/3 (which would fold needs-review in).
+    expect(html).toContain('33%');
+    expect(html).toContain('of 3 judged tests need a change');
+    expect(html).not.toContain('67%');
+    // Secondary needs-review figure, same judged denominator, visually distinct markup.
+    expect(html).toContain('class="hero-secondary"');
+    expect(html).toContain('of 3 judged tests need review');
   });
 
   it('never renders NaN anywhere, even for a report with zero judged tests', () => {
@@ -396,6 +413,26 @@ describe('renderAuditReportHtml: folder x dimension heatmap', () => {
     expect(html).toContain('0–24%');
     expect(html).toContain('25–49%');
     expect(html).toContain('≥ 50% hotspot');
+  });
+
+  it('labels a split folder\'s own leftover row "(other files)" so it is never mistaken for the whole folder', () => {
+    const direct = Array.from({ length: 4 }, (_, index) => classification({
+      testCaseId: `tc:v1:direct-${index}` as TestCaseId,
+      repositoryRelativePath: `backend/src/modules/tickets/direct-${index}.test.ts`,
+      status: 'weak',
+      dimensions: [dimension({ level: 'weak' })],
+    }));
+    const evalTests = Array.from({ length: 5 }, (_, index) => classification({
+      testCaseId: `tc:v1:eval-${index}` as TestCaseId,
+      repositoryRelativePath: `backend/src/modules/tickets/eval/eval-${index}.test.ts`,
+      status: 'weak',
+      dimensions: [dimension({ level: 'weak' })],
+    }));
+    const html = renderAuditReportHtml(minimalReport({ classifications: [...direct, ...evalTests] }));
+    expect(html).toContain('backend/src/modules/tickets (other files)');
+    expect(html).toContain('backend/src/modules/tickets/eval');
+    // The child row's own name never carries the suffix.
+    expect(html).not.toContain('backend/src/modules/tickets/eval (other files)');
   });
 });
 

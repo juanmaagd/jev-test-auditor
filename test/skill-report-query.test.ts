@@ -201,34 +201,26 @@ function reportFrom(classifications: readonly AuditReportClassification[], overr
 }
 
 /**
- * 15 distinct top-level folders, enough to exceed `HEATMAP_ROWS_LIMIT` (12) and exercise both the
- * Other-merge and the min-group-size depth-one fold `folders`/`batches` reuse from
- * `report-overview.ts`. Each folder has a DIFFERENT first path segment so the small ones don't
- * all collapse into one shared depth-one bucket (which would never exceed the row cap).
- * - `big-0`, `big-1`: 5 tests each, depth-two ("big-N/sub") stays its own row.
- * - `small-2`..`small-14` (13 folders): 1 test each, folds to its own depth-one row ("small-N") —
- *   13 distinct rows, so together with the 2 "big-*" rows that is 15 > 12, forcing an Other row.
+ * `HEATMAP_ROWS_LIMIT + 3` (15) distinct top-level folders, each with exactly `HEATMAP_MIN_GROUP_SIZE`
+ * (3) tests — enough to be its own row (never folds away as too small) but, at that size, below
+ * `FOLDER_DOMINANT_SHARE` of the grand total (3/45 ≈ 6.7% < 1/12 ≈ 8.3%), so none of them drills down
+ * further into "mod". That yields exactly one row per folder — 15 > `HEATMAP_ROWS_LIMIT` (12) —
+ * forcing the row cap's Other-merge. Mirrors `report-overview.test.ts`'s own "caps rows" fixture,
+ * `src/domain/report-overview.ts`.
  */
 function manyFoldersReport(): AuditReport {
   const classifications: AuditReportClassification[] = [];
-  for (let folderIndex = 0; folderIndex < 2; folderIndex += 1) {
-    for (let testIndex = 0; testIndex < 5; testIndex += 1) {
-      const id = `big${folderIndex}t${testIndex}`;
+  const perFolder = 3;
+  const folderCount = 15;
+  for (let folderIndex = 0; folderIndex < folderCount; folderIndex += 1) {
+    for (let testIndex = 0; testIndex < perFolder; testIndex += 1) {
       classifications.push(classification(
-        id,
-        `big-${folderIndex}/sub/file-${testIndex}.test.ts`,
-        testIndex === 0 ? 'misleading' : 'healthy',
-        [dimension({ index: 0, level: testIndex === 0 ? 'misleading' : 'strong' })],
+        `area${folderIndex}t${testIndex}`,
+        `area-${folderIndex}/mod/file-${testIndex}.test.ts`,
+        'misleading',
+        [dimension({ index: 0, level: 'misleading' })],
       ));
     }
-  }
-  for (let folderIndex = 2; folderIndex < 15; folderIndex += 1) {
-    classifications.push(classification(
-      `small${folderIndex}`,
-      `small-${folderIndex}/sub/file.test.ts`,
-      'misleading',
-      [dimension({ index: 0, level: 'misleading' })],
-    ));
   }
   return reportFrom(classifications);
 }
@@ -330,9 +322,10 @@ describe('report-query.mjs: summary parity with summarizeReport', () => {
       readonly discovered: number;
       readonly judged: number;
       readonly needsChange: { readonly count: number; readonly denominator: number; readonly share: number };
+      readonly needsReview: { readonly count: number; readonly denominator: number; readonly share: number };
       readonly statusCounts: Record<string, number>;
       readonly dimensions: readonly { readonly dimensionId: string; readonly dimensionLabel: string; readonly total: number; readonly badCount: number; readonly badShare: number }[];
-      readonly topFolders: Paginated<{ readonly folder: string; readonly needsChangeCount: number; readonly judgedTotal: number; readonly isOther: boolean }>;
+      readonly topFolders: Paginated<{ readonly folder: string; readonly needsChangeCount: number; readonly judgedTotal: number; readonly isOther: boolean; readonly isRemainder: boolean }>;
       readonly topFiles: Paginated<{ readonly path: string; readonly needsChangeCount: number; readonly judgedTotal: number }>;
     }
     const summary = parse<Summary>(result.stdout);
@@ -342,6 +335,11 @@ describe('report-query.mjs: summary parity with summarizeReport', () => {
     expect(summary.needsChange.count).toBe(overview.needsChange.count);
     expect(summary.needsChange.denominator).toBe(overview.needsChange.judgedTotal);
     expect(summary.needsChange.share).toBeCloseTo(overview.needsChange.share, 12);
+
+    // needs-review is its own figure, never folded into needsChange — see report-overview.ts.
+    expect(summary.needsReview.count).toBe(overview.needsReview.count);
+    expect(summary.needsReview.denominator).toBe(overview.needsReview.judgedTotal);
+    expect(summary.needsReview.share).toBeCloseTo(overview.needsReview.share, 12);
 
     for (const status of ['healthy', 'weak', 'misleading', 'needs-review'] as const) {
       const entry = overview.statusBreakdown.find((candidate) => candidate.status === status);
@@ -356,8 +354,8 @@ describe('report-query.mjs: summary parity with summarizeReport', () => {
       expect(found!.badShare).toBeCloseTo(dim.deficientShare, 12);
     }
 
-    const expectedFolders = overview.folderHeatmap.rows.map((row) => ({ folder: row.folder, needsChangeCount: row.needsChangeCount, judgedTotal: row.judgedTotal, isOther: row.isOther }));
-    expect(summary.topFolders.items.map(({ folder, needsChangeCount, judgedTotal, isOther }) => ({ folder, needsChangeCount, judgedTotal, isOther }))).toEqual(expectedFolders);
+    const expectedFolders = overview.folderHeatmap.rows.map((row) => ({ folder: row.folder, needsChangeCount: row.needsChangeCount, judgedTotal: row.judgedTotal, isOther: row.isOther, isRemainder: row.isRemainder }));
+    expect(summary.topFolders.items.map(({ folder, needsChangeCount, judgedTotal, isOther, isRemainder }) => ({ folder, needsChangeCount, judgedTotal, isOther, isRemainder }))).toEqual(expectedFolders);
     expect(summary.topFolders.total).toBe(overview.folderHeatmap.rows.length);
 
     const expectedFiles = overview.topFiles.map((file) => ({ path: file.path, needsChangeCount: file.needsChangeCount, judgedTotal: file.judgedTotal }));
@@ -403,6 +401,15 @@ describe('report-query.mjs: worklist', () => {
     expect(misleadingTest!.dimensions).toEqual([{ dimensionId: 'falsifiability', level: 'misleading' }]);
   });
 
+  it('never lists a needs-review-status test in files — needs-review is not "needs a change"', () => {
+    const result = run(['worklist', '-'], { input: JSON.stringify(fixture()) });
+    expect(result.status).toBe(0);
+    interface Worklist { readonly files: Paginated<{ readonly path: string; readonly tests: readonly { readonly name: string; readonly status: string }[] }> }
+    const worklist = parse<Worklist>(result.stdout);
+    const allTests = worklist.files.items.flatMap((file) => file.tests);
+    expect(allTests.map((test) => test.name)).toEqual(['test a']);
+  });
+
   it('surfaces needs-review dimensions with their reason codes in a separate group', () => {
     const result = run(['worklist', '-'], { input: JSON.stringify(fixture()) });
     expect(result.status).toBe(0);
@@ -433,19 +440,50 @@ describe('report-query.mjs: worklist', () => {
 // -------------------------------------------------------------------------------------------
 
 describe('report-query.mjs: file <path>', () => {
-  it('returns every judged test in that file with per-dimension level and status', () => {
+  it('--full returns every judged test in that file with per-dimension level and status', () => {
     const report = exampleAuditReport();
-    const result = run(['file', 'src/billing.test.ts', '-'], { input: JSON.stringify(report) });
+    const result = run(['file', 'src/billing.test.ts', '--full', '-'], { input: JSON.stringify(report) });
     expect(result.status).toBe(0);
     interface FileResult {
       readonly path: string;
+      readonly mode: string;
       readonly tests: Paginated<{ readonly name: string; readonly status: string; readonly dimensions: readonly { readonly dimensionId: string; readonly status: string; readonly level: string | undefined }[] }>;
     }
     const fileResult = parse<FileResult>(result.stdout);
     expect(fileResult.path).toBe('src/billing.test.ts');
+    expect(fileResult.mode).toBe('full');
     const expectedCount = report.classifications.filter((c) => c.repositoryRelativePath === 'src/billing.test.ts').length;
     expect(fileResult.tests.total).toBe(expectedCount);
     expect(fileResult.tests.items[0]!.dimensions).toHaveLength(7);
+  });
+
+  it('defaults to compact mode: only tests with a judged weak/misleading dimension, only those dimensions, needs-review dimensions as ids only', () => {
+    const classifications = [
+      classification('m', 'src/a.test.ts', 'misleading', [dimension({ index: 0, level: 'misleading' })], 'test m'),
+      classification('w', 'src/a.test.ts', 'weak', [
+        dimension({ index: 0, level: 'weak' }),
+        dimension({ index: 1, needsReview: true, reason: 'missing-answer' }),
+      ], 'test w'),
+      classification('h', 'src/a.test.ts', 'healthy', [dimension({ index: 0, level: 'strong' })], 'test h'),
+      classification('r', 'src/a.test.ts', 'needs-review', [dimension({ index: 0, needsReview: true, reason: 'boundary-straddle' })], 'test r'),
+    ];
+    const result = run(['file', 'src/a.test.ts', '-'], { input: JSON.stringify(reportFrom(classifications)) });
+    expect(result.status).toBe(0);
+    interface CompactFileResult {
+      readonly path: string;
+      readonly mode: string;
+      readonly tests: Paginated<{ readonly name: string; readonly status: string; readonly dimensions: readonly { readonly dimensionId: string; readonly level: string }[]; readonly needsReview: readonly string[] }>;
+    }
+    const fileResult = parse<CompactFileResult>(result.stdout);
+    expect(fileResult.mode).toBe('compact');
+    // Healthy and needs-review-only tests are dropped entirely.
+    expect(fileResult.tests.items.map((test) => test.name)).toEqual(['test m', 'test w']);
+    expect(fileResult.tests.items[0]).toEqual({
+      name: 'test m', status: 'misleading', dimensions: [{ dimensionId: 'falsifiability', level: 'misleading' }], needsReview: [],
+    });
+    expect(fileResult.tests.items[1]).toEqual({
+      name: 'test w', status: 'weak', dimensions: [{ dimensionId: 'falsifiability', level: 'weak' }], needsReview: ['behavioral-focus'],
+    });
   });
 
   it('exits 1 with a clear message when no judged test matches that file', () => {
@@ -506,12 +544,35 @@ describe('report-query.mjs: folders', () => {
 
     const result = run(['folders', '-'], { input: JSON.stringify(report) });
     expect(result.status).toBe(0);
-    interface FoldersResult { readonly folders: Paginated<{ readonly folder: string; readonly needsChangeCount: number; readonly judgedTotal: number; readonly isOther: boolean }> }
+    interface FoldersResult { readonly folders: Paginated<{ readonly folder: string; readonly needsChangeCount: number; readonly judgedTotal: number; readonly isOther: boolean; readonly isRemainder: boolean }> }
     const foldersResult = parse<FoldersResult>(result.stdout);
 
-    const expected = overview.folderHeatmap.rows.map((row) => ({ folder: row.folder, needsChangeCount: row.needsChangeCount, judgedTotal: row.judgedTotal, isOther: row.isOther }));
-    expect(foldersResult.folders.items.map(({ folder, needsChangeCount, judgedTotal, isOther }) => ({ folder, needsChangeCount, judgedTotal, isOther }))).toEqual(expected);
+    const expected = overview.folderHeatmap.rows.map((row) => ({ folder: row.folder, needsChangeCount: row.needsChangeCount, judgedTotal: row.judgedTotal, isOther: row.isOther, isRemainder: row.isRemainder }));
+    expect(foldersResult.folders.items.map(({ folder, needsChangeCount, judgedTotal, isOther, isRemainder }) => ({ folder, needsChangeCount, judgedTotal, isOther, isRemainder }))).toEqual(expected);
     expect(foldersResult.folders.items.some((row) => row.isOther)).toBe(true);
+  });
+
+  it('marks a split folder\'s own leftover row isRemainder:true, keeping "folder" a clean, unsuffixed path', () => {
+    const classifications = [
+      ...['eval', 'services', 'extraction'].flatMap((sub) => Array.from({ length: 5 }, (_, index) =>
+        classification(`${sub}${index}`, `backend/src/modules/tickets/${sub}/${sub}-${index}.test.ts`, 'weak', [dimension({ level: 'weak' })]))),
+      ...Array.from({ length: 4 }, (_, index) =>
+        classification(`direct${index}`, `backend/src/modules/tickets/direct-${index}.test.ts`, 'weak', [dimension({ level: 'weak' })])),
+    ];
+    const report = reportFrom(classifications);
+    const result = run(['folders', '-'], { input: JSON.stringify(report) });
+    expect(result.status).toBe(0);
+    interface FoldersResult { readonly folders: Paginated<{ readonly folder: string; readonly isRemainder: boolean; readonly judgedTotal: number }> }
+    const foldersResult = parse<FoldersResult>(result.stdout);
+
+    const evalRow = foldersResult.folders.items.find((row) => row.folder === 'backend/src/modules/tickets/eval');
+    expect(evalRow).toBeDefined();
+    expect(evalRow!.isRemainder).toBe(false);
+
+    const remainderRow = foldersResult.folders.items.find((row) => row.folder === 'backend/src/modules/tickets');
+    expect(remainderRow).toBeDefined();
+    expect(remainderRow!.isRemainder).toBe(true);
+    expect(remainderRow!.judgedTotal).toBe(4);
   });
 });
 
@@ -555,16 +616,50 @@ describe('report-query.mjs: batches', () => {
     expect(new Set(allFiles).size).toBe(allFiles.length); // no file split across batches, none repeated
   });
 
-  it('--exclude-needs-review drops needs-review tests from batch counts', () => {
+  it('default candidates are needs-change only (misleading/weak) — a needs-review test never becomes a fix batch', () => {
     const classifications = [
       classification('m1', 'src/x.test.ts', 'misleading', [dimension({ level: 'misleading' })]),
       classification('r1', 'src/x.test.ts', 'needs-review', [dimension({ needsReview: true })]),
     ];
-    const result = run(['batches', '--by', 'file', '--exclude-needs-review', '-'], { input: JSON.stringify(reportFrom(classifications)) });
+    const result = run(['batches', '--by', 'file', '-'], { input: JSON.stringify(reportFrom(classifications)) });
     expect(result.status).toBe(0);
     interface BatchesResult { readonly batches: Paginated<{ readonly testCount: number }> }
     const batchesResult = parse<BatchesResult>(result.stdout);
     expect(batchesResult.batches.items[0]!.testCount).toBe(1);
+  });
+
+  it('--include-needs-review opts a needs-review test back into batch counts', () => {
+    const classifications = [
+      classification('m1', 'src/x.test.ts', 'misleading', [dimension({ level: 'misleading' })]),
+      classification('r1', 'src/x.test.ts', 'needs-review', [dimension({ needsReview: true })]),
+    ];
+    const result = run(['batches', '--by', 'file', '--include-needs-review', '-'], { input: JSON.stringify(reportFrom(classifications)) });
+    expect(result.status).toBe(0);
+    interface BatchesResult { readonly batches: Paginated<{ readonly testCount: number }> }
+    const batchesResult = parse<BatchesResult>(result.stdout);
+    expect(batchesResult.batches.items[0]!.testCount).toBe(2);
+  });
+
+  it('--by folder labels a split folder\'s own leftover batch "(other files)" and marks it isRemainder', () => {
+    const classifications = [
+      ...['eval', 'services', 'extraction'].flatMap((sub) => Array.from({ length: 5 }, (_, index) =>
+        classification(`${sub}${index}`, `backend/src/modules/tickets/${sub}/${sub}-${index}.test.ts`, 'weak', [dimension({ level: 'weak' })]))),
+      ...Array.from({ length: 4 }, (_, index) =>
+        classification(`direct${index}`, `backend/src/modules/tickets/direct-${index}.test.ts`, 'weak', [dimension({ level: 'weak' })])),
+    ];
+    const result = run(['batches', '--by', 'folder', '-'], { input: JSON.stringify(reportFrom(classifications)) });
+    expect(result.status).toBe(0);
+    interface BatchesResult { readonly batches: Paginated<{ readonly key: string; readonly testCount: number; readonly isRemainder: boolean }> }
+    const batchesResult = parse<BatchesResult>(result.stdout);
+
+    const evalBatch = batchesResult.batches.items.find((batch) => batch.key === 'backend/src/modules/tickets/eval');
+    expect(evalBatch).toBeDefined();
+    expect(evalBatch!.isRemainder).toBe(false);
+
+    const remainderBatch = batchesResult.batches.items.find((batch) => batch.key === 'backend/src/modules/tickets (other files)');
+    expect(remainderBatch).toBeDefined();
+    expect(remainderBatch!.isRemainder).toBe(true);
+    expect(remainderBatch!.testCount).toBe(4);
   });
 });
 

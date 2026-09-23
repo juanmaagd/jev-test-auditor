@@ -17,13 +17,13 @@
  *   node report-query.mjs <subcommand> [args] [options]
  *
  * Subcommands:
- *   summary  [reportPath|-] [options]                    - headline needs-change/status/dimension aggregate
- *   worklist [reportPath|-] [options]                     - non-healthy tests (files) + needs-review reasons (needsReview)
- *   file <path> [reportPath|-] [options]                  - every judged test in one file, per-dimension level+status
+ *   summary  [reportPath|-] [options]                    - headline needs-change/needs-review/status/dimension aggregate
+ *   worklist [reportPath|-] [options]                     - needs-change tests (files) + needs-review reasons (needsReview)
+ *   file <path> [reportPath|-] [--full] [options]          - compact by default: weak/misleading tests + their bad dimensions only (--full: every judged test, every dimension)
  *   test <name-substring|testCaseId> [reportPath|-] [opt] - matching tests with full per-dimension detail
  *   folders  [reportPath|-] [options]                     - ranked folder aggregate (reuses summary math)
  *   dimensions [reportPath|-] [options]                   - ranked dimension aggregate, worst-first
- *   batches --by file|folder [--max-tests N] [--exclude-needs-review] [reportPath|-] [options]
+ *   batches --by file|folder [--max-tests N] [--include-needs-review] [reportPath|-] [options]
  *                                                          - proposed fix batches
  *   diff <beforeRunId|path> [afterRunId|path] [--root <dir>] [--limit/--offset]
  *                                                          - before/after comparison, default after = latest
@@ -49,6 +49,10 @@ import { join, resolve } from 'node:path';
 const HEATMAP_ROWS_LIMIT = 12;
 /** Mirrors `HEATMAP_MIN_GROUP_SIZE`, `src/domain/report-overview.ts`. */
 const HEATMAP_MIN_GROUP_SIZE = 3;
+/** Mirrors `FOLDER_GENERIC_SEGMENTS`, `src/domain/report-overview.ts` — skipped only when CHOOSING the next folder-grouping split level, never when naming a row. */
+const FOLDER_GENERIC_SEGMENTS = new Set(['src', 'lib', 'app', 'test', 'tests', '__tests__', 'spec', 'packages', 'apps']);
+/** Mirrors `FOLDER_DOMINANT_SHARE`, `src/domain/report-overview.ts`. */
+const FOLDER_DOMINANT_SHARE = 1 / HEATMAP_ROWS_LIMIT;
 
 const DEFAULT_TOP_FOLDERS_LIMIT = 20;
 const DEFAULT_TOP_FILES_LIMIT = 10; // mirrors TOP_FILES_LIMIT, src/domain/report-overview.ts
@@ -69,13 +73,13 @@ const USAGE = [
   'Usage: node report-query.mjs <subcommand> [args] [options]',
   '',
   'Subcommands:',
-  '  summary    [reportPath|-]  headline needs-change/status/dimension aggregate',
-  '  worklist   [reportPath|-]  non-healthy tests (files) + needs-review reasons (needsReview)',
-  '  file       <path> [reportPath|-]  every judged test in one file, per-dimension level+status',
+  '  summary    [reportPath|-]  headline needs-change/needs-review/status/dimension aggregate',
+  '  worklist   [reportPath|-]  needs-change tests (files) + needs-review reasons (needsReview)',
+  '  file       <path> [reportPath|-] [--full]  compact fix-brief detail by default; --full for every judged test/dimension',
   '  test       <name-substring|testCaseId> [reportPath|-]  matching tests, full per-dimension detail',
   '  folders    [reportPath|-]  ranked folder aggregate',
   '  dimensions [reportPath|-]  ranked dimension aggregate, worst-first',
-  '  batches    --by file|folder [--max-tests N] [--exclude-needs-review] [reportPath|-]',
+  '  batches    --by file|folder [--max-tests N] [--include-needs-review] [reportPath|-]',
   '  diff       <beforeRunId|path> [afterRunId|path]  before/after comparison (default after = latest)',
   '  runs       list persisted run ids under .jta/reports',
   '',
@@ -111,8 +115,12 @@ function parseArgs(argv) {
       options.help = true;
       continue;
     }
-    if (argument === '--exclude-needs-review') {
-      options.excludeNeedsReview = true;
+    if (argument === '--include-needs-review') {
+      options.includeNeedsReview = true;
+      continue;
+    }
+    if (argument === '--full') {
+      options.full = true;
       continue;
     }
     const key = VALUE_FLAG_KEYS[argument];
@@ -238,16 +246,67 @@ function directorySegments(path) {
   return path.split('/').slice(0, -1);
 }
 
-function depthOneFolderKey(path) {
-  const dirs = directorySegments(path);
-  return dirs.length === 0 ? '.' : dirs[0];
+/**
+ * The next real (non-generic) directory-segment boundary past `fromIndex`, silently absorbing any
+ * generic segments along the way — or `undefined` when nothing but generic segments (or nothing at
+ * all) remains, meaning this path has no further real segment to split on. Mirrors
+ * `nextFolderBoundary`, src/domain/report-overview.ts.
+ */
+function nextFolderBoundary(dirs, fromIndex) {
+  let index = fromIndex;
+  while (index < dirs.length && FOLDER_GENERIC_SEGMENTS.has(dirs[index])) index += 1;
+  return index < dirs.length ? index + 1 : undefined;
 }
 
-function depthTwoFolderKey(path) {
-  const dirs = directorySegments(path);
-  if (dirs.length === 0) return '.';
-  if (dirs.length === 1) return dirs[0];
-  return dirs.slice(0, 2).join('/');
+/**
+ * Deterministic adaptive folder split — mirrors `adaptiveFolderGroups`, src/domain/report-overview.ts,
+ * byte-for-byte (proven by this file's own parity tests). `items` are `{ path, count, ... }`; `count`
+ * is a weight (1 per classification for `summarizeTopFolders`, tests-per-file for
+ * `buildFolderBatches`, which must never split one file across two folders). Recurses from
+ * `prefix`/`prefixDepth`: while this node's own count holds at least `FOLDER_DOMINANT_SHARE` of
+ * `grandTotal`, it splits into its next real (non-generic) child segments; a child whose count is
+ * under `HEATMAP_MIN_GROUP_SIZE` folds back into `prefix`'s own row instead of becoming its own.
+ * Returns leaf groups only — `{ folder, items }[]` — every input item in exactly one group.
+ */
+/**
+ * `isRemainder` mirrors `AdaptiveFolderGroup.isRemainder`, src/domain/report-overview.ts: `true`
+ * exactly when this row is the LEFTOVER slice of a folder that ALSO split into its own deeper child
+ * rows (e.g. tests directly in `backend/src/modules/tickets` when `.../tickets/eval` also became its
+ * own row) — never for a folder that stayed one row outright. `folder` is deliberately left
+ * unsuffixed here too; callers decide how to label a remainder row for a human reader.
+ */
+function adaptiveFolderGroups(items, prefix, prefixDepth, grandTotal) {
+  const total = items.reduce((sum, item) => sum + item.count, 0);
+  if (total === 0) return [];
+  if (total / grandTotal < FOLDER_DOMINANT_SHARE) return [{ folder: prefix, items, isRemainder: false }];
+
+  const buckets = new Map();
+  const leftover = [];
+  for (const item of items) {
+    const dirs = directorySegments(item.path);
+    const newDepth = nextFolderBoundary(dirs, prefixDepth);
+    if (newDepth === undefined) {
+      leftover.push(item);
+      continue;
+    }
+    const key = dirs.slice(0, newDepth).join('/');
+    const bucket = buckets.get(key);
+    if (bucket === undefined) buckets.set(key, [item]);
+    else bucket.push(item);
+  }
+
+  const childGroups = [];
+  for (const [key, bucketItems] of buckets) {
+    const bucketTotal = bucketItems.reduce((sum, item) => sum + item.count, 0);
+    if (bucketTotal < HEATMAP_MIN_GROUP_SIZE) {
+      leftover.push(...bucketItems);
+      continue;
+    }
+    childGroups.push(...adaptiveFolderGroups(bucketItems, key, key.split('/').length, grandTotal));
+  }
+  const groups = childGroups;
+  if (leftover.length > 0) groups.push({ folder: prefix, items: leftover, isRemainder: childGroups.length > 0 });
+  return groups;
 }
 
 function matchesDimensionFilter(classification, dimensionFilter) {
@@ -275,9 +334,18 @@ function summarizeStatusCounts(classifications) {
   return counts;
 }
 
+// `needs-review` is deliberately excluded here — see src/domain/report-overview.ts, "'Needs a
+// change' never counts needs-review": the model was uncertain, never a confirmed defect.
 function summarizeNeedsChange(classifications, statusCounts) {
   const denominator = classifications.length;
-  const count = statusCounts.misleading + statusCounts.weak + statusCounts['needs-review'];
+  const count = statusCounts.misleading + statusCounts.weak;
+  return { count, denominator, share: safeShare(count, denominator) };
+}
+
+/** `needs-review`'s own figure, over the SAME denominator as `summarizeNeedsChange` — never folded into it. Mirrors `summarizeNeedsReview`, src/domain/report-overview.ts. */
+function summarizeNeedsReview(classifications, statusCounts) {
+  const denominator = classifications.length;
+  const count = statusCounts['needs-review'];
   return { count, denominator, share: safeShare(count, denominator) };
 }
 
@@ -312,31 +380,25 @@ function summarizeDimensions(classifications) {
 }
 
 /**
- * The canonical, folded folder ranking — the same "Other"-merge `summarizeFolderHeatmap`
- * (`src/domain/report-overview.ts`) performs, at the SAME fixed thresholds
- * (`HEATMAP_ROWS_LIMIT`/`HEATMAP_MIN_GROUP_SIZE`), never `--limit`: the merge is part of what
- * "top folders" means, not a display cap. `--limit`/`--offset` paginate this already-folded,
- * already-capped (`HEATMAP_ROWS_LIMIT` + 1 "Other" row at most) list afterwards.
+ * The canonical, folded folder ranking — the same adaptive-drill-down "Other"-merge
+ * `summarizeFolderHeatmap` (`src/domain/report-overview.ts`) performs, at the SAME fixed thresholds
+ * (`HEATMAP_ROWS_LIMIT`/`HEATMAP_MIN_GROUP_SIZE`/`FOLDER_DOMINANT_SHARE`), never `--limit`: the merge
+ * is part of what "top folders" means, not a display cap. `--limit`/`--offset` paginate this
+ * already-folded, already-capped (`HEATMAP_ROWS_LIMIT` + 1 "Other" row at most) list afterwards.
  */
 function summarizeTopFolders(classifications) {
-  const candidateKeys = classifications.map((classification) => depthTwoFolderKey(classification.repositoryRelativePath));
-  const candidateSizes = new Map();
-  for (const key of candidateKeys) candidateSizes.set(key, (candidateSizes.get(key) ?? 0) + 1);
+  const items = classifications.map((classification) => ({ path: classification.repositoryRelativePath, count: 1, classification }));
+  const groups = adaptiveFolderGroups(items, '.', 0, classifications.length);
 
   const folders = new Map();
-  classifications.forEach((classification, index) => {
-    const candidate = candidateKeys[index];
-    const key = (candidateSizes.get(candidate) ?? 0) >= HEATMAP_MIN_GROUP_SIZE
-      ? candidate
-      : depthOneFolderKey(classification.repositoryRelativePath);
-    let tally = folders.get(key);
-    if (tally === undefined) {
-      tally = { needsChange: 0, total: 0 };
-      folders.set(key, tally);
+  for (const group of groups) {
+    const tally = { needsChange: 0, total: 0, isRemainder: group.isRemainder };
+    for (const item of group.items) {
+      tally.total += 1;
+      if (item.classification.status === 'misleading' || item.classification.status === 'weak') tally.needsChange += 1;
     }
-    tally.total += 1;
-    if (classification.status !== 'healthy') tally.needsChange += 1;
-  });
+    folders.set(group.folder, tally);
+  }
 
   const ranked = [...folders.entries()].sort(
     ([leftKey, left], [rightKey, right]) => right.needsChange - left.needsChange || right.total - left.total || leftKey.localeCompare(rightKey),
@@ -350,6 +412,7 @@ function summarizeTopFolders(classifications) {
     judgedTotal: tally.total,
     share: safeShare(tally.needsChange, tally.total),
     isOther: false,
+    isRemainder: tally.isRemainder,
   }));
 
   if (overflow.length > 0) {
@@ -364,6 +427,7 @@ function summarizeTopFolders(classifications) {
       judgedTotal: merged.total,
       share: safeShare(merged.needsChange, merged.total),
       isOther: true,
+      isRemainder: false,
     });
   }
 
@@ -376,7 +440,7 @@ function summarizeTopFiles(classifications) {
   for (const classification of classifications) {
     const tally = byPath.get(classification.repositoryRelativePath) ?? { needsChange: 0, total: 0 };
     tally.total += 1;
-    if (classification.status !== 'healthy') tally.needsChange += 1;
+    if (classification.status === 'misleading' || classification.status === 'weak') tally.needsChange += 1;
     byPath.set(classification.repositoryRelativePath, tally);
   }
   return [...byPath.entries()]
@@ -410,6 +474,7 @@ function cmdSummary(positionals, options) {
     discovered: report.discovery.totals.testCases,
     judged: filtered.length,
     needsChange: summarizeNeedsChange(filtered, statusCounts),
+    needsReview: summarizeNeedsReview(filtered, statusCounts),
     statusCounts,
     dimensions: summarizeDimensions(filtered),
     topFolders: paginate(summarizeTopFolders(filtered), foldersLimit.limit, foldersLimit.offset),
@@ -420,10 +485,13 @@ function cmdSummary(positionals, options) {
 /**
  * Both groups read `classification.dimensions` directly (never `findings`) — the same source
  * `summary`/`dimensions`/`file`/`test` already read, so there is exactly one place a dimension's
- * level/status/reason comes from. `files`: non-healthy tests grouped by file, with their judged
- * misleading/weak dimensions (a judged dimension never carries a `reason` — only a needs-review
- * dimension does). `needsReview`: the previously-dead `reason` codes, one entry per needs-review
- * dimension, grouped by file.
+ * level/status/reason comes from. `files`: needs-change tests (status misleading/weak — NEVER
+ * needs-review, which is uncertain rather than a confirmed defect) grouped by file, with their
+ * judged misleading/weak dimensions (a judged dimension never carries a `reason` — only a
+ * needs-review dimension does). `needsReview`: the previously-dead `reason` codes, one entry per
+ * needs-review dimension, grouped by file — scanned over every filtered classification, so a
+ * misleading/weak test that ALSO carries a needs-review dimension on another dimensionId still
+ * appears in both groups.
  */
 function cmdWorklist(positionals, options) {
   const report = readAndParseReport(positionals[0], options);
@@ -436,7 +504,9 @@ function cmdWorklist(positionals, options) {
 
   const byFile = new Map();
   for (const classification of filtered) {
-    if (classification.status === 'healthy') continue;
+    // needs a change = misleading/weak only; needs-review is uncertain, never a confirmed defect,
+    // and is already surfaced separately below (`needsReviewByFile`).
+    if (classification.status !== 'misleading' && classification.status !== 'weak') continue;
     const list = byFile.get(classification.repositoryRelativePath) ?? [];
     list.push(classification);
     byFile.set(classification.repositoryRelativePath, list);
@@ -477,6 +547,44 @@ function cmdWorklist(positionals, options) {
   };
 }
 
+/** `--full`: every judged test, every dimension, unchanged historical shape. */
+function fullFileItems(matches) {
+  return matches.map((classification) => ({
+    name: classification.name,
+    status: classification.status,
+    dimensions: classification.dimensions.map((dimension) => ({
+      dimensionId: dimension.dimensionId,
+      dimensionLabel: dimension.dimensionLabel,
+      status: dimension.status,
+      level: dimension.level ?? null,
+    })),
+  }));
+}
+
+/**
+ * Default (compact) mode: a fix brief needs the tests that ACTUALLY carry a judged weak/misleading
+ * dimension, and for those only the offending dimensions — never every dimension of every judged
+ * test, which is what made this subcommand too heavy for a fix brief (see this file's own doc and
+ * `odd/tasks/report-needs-change-semantics.md`). A healthy test, or a needs-review-only test with no
+ * weak/misleading dimension, is dropped entirely: neither needs a change. A needs-review dimension on
+ * an otherwise-included test is still worth knowing about, so it is kept — but as an id only, never
+ * its full detail, since compactness is the whole point.
+ */
+function compactFileItems(matches) {
+  const items = [];
+  for (const classification of matches) {
+    const dimensions = (classification.dimensions ?? [])
+      .filter((dimension) => dimension.status === 'judged' && (dimension.level === 'misleading' || dimension.level === 'weak'))
+      .map((dimension) => ({ dimensionId: dimension.dimensionId, level: dimension.level }));
+    if (dimensions.length === 0) continue;
+    const needsReview = (classification.dimensions ?? [])
+      .filter((dimension) => dimension.status === 'needs-review')
+      .map((dimension) => dimension.dimensionId);
+    items.push({ name: classification.name, status: classification.status, dimensions, needsReview });
+  }
+  return items;
+}
+
 function cmdFile(positionals, options) {
   const filePath = positionals[0];
   if (filePath === undefined) throw new UsageError('file requires a <path> argument');
@@ -484,19 +592,9 @@ function cmdFile(positionals, options) {
   const matches = report.classifications.filter((classification) => classification.repositoryRelativePath === filePath);
   if (matches.length === 0) throw new UsageError(`No judged tests found for file "${filePath}"`);
   const { limit, offset } = limitOffset(options, DEFAULT_FILE_TESTS_LIMIT);
-  const items = matches
-    .map((classification) => ({
-      name: classification.name,
-      status: classification.status,
-      dimensions: classification.dimensions.map((dimension) => ({
-        dimensionId: dimension.dimensionId,
-        dimensionLabel: dimension.dimensionLabel,
-        status: dimension.status,
-        level: dimension.level ?? null,
-      })),
-    }))
+  const items = (options.full ? fullFileItems(matches) : compactFileItems(matches))
     .sort((left, right) => left.name.localeCompare(right.name));
-  return { path: filePath, tests: paginate(items, limit, offset) };
+  return { path: filePath, mode: options.full ? 'full' : 'compact', tests: paginate(items, limit, offset) };
 }
 
 function cmdTest(positionals, options) {
@@ -579,7 +677,14 @@ function buildFileBatches(candidates) {
   return batches;
 }
 
-/** Packs files (never splitting one file across batches — "one subagent per file") into folder-scoped batches, greedily chunked to `maxTests` when given. Folder key folding reuses the same depth-two/depth-one rule `summarizeTopFolders` uses, scoped to the candidate files only — never the "Other" row cutoff, since every batch must stay actionable. */
+/**
+ * Packs files (never splitting one file across batches — "one subagent per file") into
+ * folder-scoped batches, greedily chunked to `maxTests` when given. Groups with the same adaptive
+ * drill-down `summarizeTopFolders` uses, weighted by tests-per-file and scoped to the candidate
+ * files only — never the "Other" row cutoff, since every batch must stay actionable — so the same
+ * folder isn't reported as `backend/src/modules/budgets` in `folders`/`summary` and merely
+ * `backend/src` here.
+ */
 function buildFolderBatches(candidates, maxTests) {
   const byFile = new Map();
   for (const classification of candidates) {
@@ -589,32 +694,25 @@ function buildFolderBatches(candidates, maxTests) {
   }
   const fileEntries = [...byFile.entries()].map(([path, entries]) => ({ path, entries, count: entries.length }));
 
-  const candidateKeys = fileEntries.map((file) => depthTwoFolderKey(file.path));
-  // Counts TESTS, not files, per candidate key — matching what `summarizeTopFolders` counts, so
-  // the same folder isn't reported as "src/area" there and merely "src" here.
-  const candidateSizes = new Map();
-  fileEntries.forEach((file, index) => {
-    const key = candidateKeys[index];
-    candidateSizes.set(key, (candidateSizes.get(key) ?? 0) + file.count);
-  });
+  const totalTests = fileEntries.reduce((sum, file) => sum + file.count, 0);
+  const items = fileEntries.map((file) => ({ path: file.path, count: file.count, file }));
+  const groups = adaptiveFolderGroups(items, '.', 0, totalTests);
 
   const byFolder = new Map();
-  fileEntries.forEach((file, index) => {
-    const candidate = candidateKeys[index];
-    const key = (candidateSizes.get(candidate) ?? 0) >= HEATMAP_MIN_GROUP_SIZE ? candidate : depthOneFolderKey(file.path);
-    const list = byFolder.get(key) ?? [];
-    list.push(file);
-    byFolder.set(key, list);
-  });
+  for (const group of groups) byFolder.set(group.folder, { files: group.items.map((item) => item.file), isRemainder: group.isRemainder });
 
   const batches = [];
-  for (const [folderKey, files] of byFolder.entries()) {
+  for (const [folderKey, { files, isRemainder }] of byFolder.entries()) {
     files.sort((left, right) => right.count - left.count || left.path.localeCompare(right.path));
+    // A remainder folder's own leftover files (e.g. "backend/src/modules/tickets" alongside its own
+    // ".../tickets/eval" batch) are labeled "(other files)" so this batch is never mistaken for the
+    // whole folder — see `isRemainder`, mirrored from `adaptiveFolderGroups`/`summarizeTopFolders`.
+    const label = isRemainder ? `${folderKey} (other files)` : folderKey;
     const chunks = maxTests === undefined ? [files] : greedyChunk(files, maxTests);
     chunks.forEach((chunkFiles, index) => {
       const entries = chunkFiles.flatMap((file) => file.entries);
-      const key = chunks.length > 1 ? `${folderKey} (part ${index + 1})` : folderKey;
-      batches.push({ key, files: chunkFiles.map((file) => file.path), testCount: entries.length, worstDimensions: worstDimensionsFor(entries) });
+      const key = chunks.length > 1 ? `${label} (part ${index + 1})` : label;
+      batches.push({ key, files: chunkFiles.map((file) => file.path), testCount: entries.length, worstDimensions: worstDimensionsFor(entries), isRemainder });
     });
   }
   batches.sort((left, right) => right.testCount - left.testCount || left.key.localeCompare(right.key));
@@ -638,14 +736,22 @@ function greedyChunk(files, maxTests) {
   return chunks;
 }
 
+/**
+ * Default candidates are needs-change only (misleading/weak) — a fix batch proposes tests to FIX,
+ * and `needs-review` means the model was uncertain, never a confirmed defect (see SKILL.md's own
+ * Hard Rule: "never present it as a defect"). `--include-needs-review` opts uncertain tests back in
+ * for a batch that also wants a human to double-check them alongside real fixes.
+ */
 function cmdBatches(positionals, options) {
   const report = readAndParseReport(positionals[0], options);
   const by = options.by ?? 'file';
   if (by !== 'file' && by !== 'folder') throw new UsageError('--by must be "file" or "folder"');
   const maxTests = options.maxTests !== undefined ? parsePositiveIntOption(options.maxTests, 'max-tests') : undefined;
 
-  let candidates = report.classifications.filter((classification) => classification.status !== 'healthy');
-  if (options.excludeNeedsReview) candidates = candidates.filter((classification) => classification.status !== 'needs-review');
+  let candidates = report.classifications.filter((classification) => classification.status === 'misleading' || classification.status === 'weak');
+  if (options.includeNeedsReview) {
+    candidates = report.classifications.filter((classification) => classification.status !== 'healthy');
+  }
 
   const { limit, offset } = limitOffset(options, DEFAULT_BATCHES_LIMIT);
   const batches = by === 'file' ? buildFileBatches(candidates) : buildFolderBatches(candidates, maxTests);

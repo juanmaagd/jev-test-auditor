@@ -20,6 +20,12 @@
  * page no longer embeds that canonical JSON either (Phase 6 shipped it as `#jev-report-data`; a real
  * 7,234-test run made the file weigh megabytes) — the HTML is for a glance, the JSON is for a tool.
  *
+ * **"Needs a change" never counts `needs-review`.** The hero headline and every downstream ranking
+ * (top files, folder heatmap) count only misleading/weak tests — `needs-review` means the model was
+ * uncertain, never a confirmed defect (README). It is shown as its own, visually secondary figure
+ * right below the headline (`renderNeedsReviewFigure`, `.hero-secondary`), over the same judged
+ * denominator, so a reader sees both without either folding into the other.
+ *
  * **Escaping.** Every value interpolated into element text content, a double-quoted attribute, or a
  * `title="…"` hover string goes through {@link escapeHtml} (`&`, `<`, `>`, `"`, `'`). This is what
  * makes a hostile test name, file path, folder name, or diagnostic message safe to render as
@@ -215,6 +221,19 @@ function renderStatusStack(overview: ReportOverview): string {
   ].join('\n');
 }
 
+/** Secondary, visually muted figure for `needs-review` — same judged denominator as the headline, never merged into it. Empty when there is nothing to review (no denominator, or zero needs-review). */
+function renderNeedsReviewFigure(overview: ReportOverview): string {
+  const { needsReview } = overview;
+  if (needsReview.judgedTotal === 0) return '';
+  const judgedWord = needsReview.judgedTotal === 1 ? 'judged test needs' : 'judged tests need';
+  return [
+    '<p class="hero-secondary">',
+    `<span class="hero-secondary-value">${formatPercent(needsReview.share)}</span>`,
+    `<span class="hero-secondary-label">of ${needsReview.judgedTotal} ${judgedWord} review (uncertain, not a confirmed defect)</span>`,
+    '</p>',
+  ].join('');
+}
+
 function renderHero(overview: ReportOverview): string {
   const { needsChange } = overview;
   const judgedWord = needsChange.judgedTotal === 1 ? 'judged test needs' : 'judged tests need';
@@ -224,7 +243,8 @@ function renderHero(overview: ReportOverview): string {
     `<span class="hero-value">${formatPercent(needsChange.share)}</span>`,
     `<span class="hero-label">of ${needsChange.judgedTotal} ${judgedWord} a change</span>`,
     '</p>',
-    `<p class="hero-note">${needsChange.count} of ${needsChange.judgedTotal} judged tests are misleading, weak, or need review.</p>`,
+    `<p class="hero-note">${needsChange.count} of ${needsChange.judgedTotal} judged tests are misleading or weak.</p>`,
+    renderNeedsReviewFigure(overview),
     renderStatusStack(overview),
     '</section>',
   ].join('\n');
@@ -402,18 +422,24 @@ function heatColor(share: number): string {
   return color;
 }
 
+/** `row.folder` is never suffixed (see `report-overview.ts`'s own doc, "Folder grouping") — this is the ONE place a remainder row's leftover count is distinguished from its own child rows for a human reader, e.g. `"backend/src/modules/tickets (other files)"`. */
+function heatmapRowLabel(row: ReportOverviewHeatmapRow): string {
+  return row.isRemainder ? `${row.folder} (other files)` : row.folder;
+}
+
 function renderHeatmapRow(row: ReportOverviewHeatmapRow): string {
+  const label = heatmapRowLabel(row);
   const cells = row.cells.map((cell) => {
     if (cell.share === undefined) {
-      return `<td><span class="heat-cell heat-cell-na" title="${escapeHtml(row.folder)} · ${escapeHtml(cell.dimensionLabel)}: n/a (0 applicable)">n/a</span></td>`;
+      return `<td><span class="heat-cell heat-cell-na" title="${escapeHtml(label)} · ${escapeHtml(cell.dimensionLabel)}: n/a (0 applicable)">n/a</span></td>`;
     }
     const percent = formatPercent(cell.share);
     const style = `background:${heatColor(cell.share)};color:#000000`;
-    const title = `${escapeHtml(row.folder)} · ${escapeHtml(cell.dimensionLabel)}: ${percent} (${cell.badCount}/${cell.applicableCount})`;
+    const title = `${escapeHtml(label)} · ${escapeHtml(cell.dimensionLabel)}: ${percent} (${cell.badCount}/${cell.applicableCount})`;
     return `<td><span class="heat-cell" style="${style}" title="${title}">${percent}</span></td>`;
   }).join('');
   const rowClass = row.isOther ? ' class="heat-other"' : '';
-  return `<tr${rowClass}><th scope="row" class="heat-folder-name">${escapeHtml(row.folder)}</th>${cells}</tr>`;
+  return `<tr${rowClass}><th scope="row" class="heat-folder-name">${escapeHtml(label)}</th>${cells}</tr>`;
 }
 
 /** Folder x dimension heatmap — see the Authorized scope addition (2026-09-23): palette neutrals with ember hotspots, a legend naming the steps, a printed percentage where it fits, and a `<title>` per cell. A cell with zero applicable tests reads `n/a`, never `NaN` or a misleading `0%`. */
@@ -428,7 +454,7 @@ function renderHeatmapSection(overview: ReportOverview): string {
   return [
     '<section id="jev-heatmap">',
     '<h2>Where the changes are</h2>',
-    '<p>Share of each folder’s own applicable tests that are misleading or weak, per dimension. A folder groups by its first one or two path segments; folders too small to be meaningful on their own fold into their parent, and the smallest-ranked folders fold into “Other”.</p>',
+    '<p>Share of each folder’s own applicable tests that are misleading or weak, per dimension. Folders drill down adaptively — a folder big enough to be worth resolving further splits into its modules/features; a folder too small to split, or too small to be meaningful on its own, stays at the coarser level — and the smallest-ranked folders fold into “Other”.</p>',
     `<div class="heat-legend">${legend}</div>`,
     renderDataTable(`<th class="heat-folder"></th>${head}`, rows.map(renderHeatmapRow).join('\n'), 'heatmap'),
     '</section>',
@@ -711,7 +737,18 @@ section > p { max-width: 68ch; color: var(--graphite); }
   letter-spacing: 0.2px;
   max-width: 34ch;
 }
-.hero-note { color: var(--smoke); margin: 0 0 24px; }
+.hero-note { color: var(--smoke); margin: 0 0 12px; }
+.hero-secondary { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin: 0 0 24px; }
+.hero-secondary-value {
+  font-family: var(--font-display);
+  font-weight: 300;
+  font-size: 28px;
+  line-height: 1;
+  letter-spacing: -0.4px;
+  color: var(--violet);
+  font-variant-numeric: proportional-nums;
+}
+.hero-secondary-label { font-size: 13px; font-weight: 500; letter-spacing: 0.13px; color: var(--smoke); max-width: 34ch; }
 .status-stack { display: flex; flex-direction: column; gap: 16px; }
 .stack-bar {
   display: flex;

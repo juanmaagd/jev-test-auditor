@@ -132,6 +132,24 @@ describe('summarizeReport: needs-change is over judged tests, never discovered',
   });
 });
 
+describe('summarizeReport: needs-review is its own figure, never folded into needs-change', () => {
+  it('excludes needs-review from needsChange and reports it separately with the same judged denominator', () => {
+    const misleading = classification({ testCaseId: 'tc:v1:m' as TestCaseId, status: 'misleading' });
+    const needsReview = classification({ testCaseId: 'tc:v1:r' as TestCaseId, status: 'needs-review' });
+    const healthy = classification({ testCaseId: 'tc:v1:h' as TestCaseId, status: 'healthy' });
+    const report = minimalReport({
+      totals: {
+        ...minimalReport().totals,
+        statusCounts: { healthy: 1, weak: 0, misleading: 1, 'needs-review': 1 },
+      },
+      classifications: [misleading, needsReview, healthy],
+    });
+    const overview = summarizeReport(report);
+    expect(overview.needsChange).toEqual({ count: 1, judgedTotal: 3, share: 1 / 3 });
+    expect(overview.needsReview).toEqual({ count: 1, judgedTotal: 3, share: 1 / 3 });
+  });
+});
+
 describe('summarizeReport: status breakdown', () => {
   it('lists every status worst-first with count and share over judged tests', () => {
     const report = minimalReport({
@@ -272,6 +290,18 @@ describe('summarizeReport: top files', () => {
     const overview = summarizeReport(report);
     expect(overview.topFiles).toEqual([]);
   });
+
+  it('never counts a needs-review test toward needsChangeCount, and excludes a file whose non-healthy tests are all needs-review', () => {
+    const report = minimalReport({
+      classifications: [
+        classification({ testCaseId: 'tc:v1:1' as TestCaseId, repositoryRelativePath: 'mixed.test.ts', status: 'weak' }),
+        classification({ testCaseId: 'tc:v1:2' as TestCaseId, repositoryRelativePath: 'mixed.test.ts', status: 'needs-review' }),
+        classification({ testCaseId: 'tc:v1:3' as TestCaseId, repositoryRelativePath: 'uncertain-only.test.ts', status: 'needs-review' }),
+      ],
+    });
+    const overview = summarizeReport(report);
+    expect(overview.topFiles).toEqual([{ path: 'mixed.test.ts', needsChangeCount: 1, judgedTotal: 2, share: 0.5 }]);
+  });
 });
 
 describe('summarizeReport: folder x dimension heatmap', () => {
@@ -296,8 +326,23 @@ describe('summarizeReport: folder x dimension heatmap', () => {
     expect(row).toBeDefined();
     expect(row!.judgedTotal).toBe(3);
     expect(row!.needsChangeCount).toBe(2);
+    expect(row!.isRemainder).toBe(false); // this folder never split into child rows
     const cell = row!.cells.find((entry) => entry.dimensionId === 'falsifiability');
     expect(cell).toEqual({ dimensionId: 'falsifiability', dimensionLabel: 'Falsifiability', badCount: 2, applicableCount: 3, share: 2 / 3 });
+  });
+
+  it('never counts a needs-review test toward a row\'s needsChangeCount', () => {
+    const classifications = [
+      withPathAndStatus('src/payments/checkout.test.ts', '1', 'weak', { level: 'weak' }),
+      withPathAndStatus('src/payments/refund.test.ts', '2', 'needs-review', { level: undefined, status: 'needs-review', reason: 'boundary-straddle' }),
+      withPathAndStatus('src/payments/invoice.test.ts', '3', 'needs-review', { level: undefined, status: 'needs-review', reason: 'boundary-straddle' }),
+    ];
+    const report = minimalReport({ classifications });
+    const overview = summarizeReport(report);
+    const row = overview.folderHeatmap.rows.find((entry) => entry.folder === 'src/payments');
+    expect(row).toBeDefined();
+    expect(row!.judgedTotal).toBe(3);
+    expect(row!.needsChangeCount).toBe(1);
   });
 
   it('renders a cell with zero applicable tests as share undefined, never NaN or 0', () => {
@@ -319,20 +364,75 @@ describe('summarizeReport: folder x dimension heatmap', () => {
     expect(cell).toEqual({ dimensionId: 'assertion-strength', dimensionLabel: 'Assertion strength', badCount: 0, applicableCount: 0, share: undefined });
   });
 
-  it('falls back to the shallower (first-segment) folder key when a depth-two group is smaller than the minimum meaningful size', () => {
+  it('folds a too-small candidate group up into its nearest ancestor row instead of giving it its own row', () => {
     expect(HEATMAP_MIN_GROUP_SIZE).toBeGreaterThan(1);
-    const classifications = Array.from({ length: HEATMAP_MIN_GROUP_SIZE - 1 }, (_, index) =>
+    const common = Array.from({ length: 6 }, (_, index) =>
+      withPathAndStatus(`src/common/${index}.test.ts`, `common-${index}`, 'weak', { level: 'weak' }));
+    const rare = Array.from({ length: HEATMAP_MIN_GROUP_SIZE - 1 }, (_, index) =>
       withPathAndStatus(`src/rare/${index}.test.ts`, `rare-${index}`, 'weak', { level: 'weak' }));
-    const report = minimalReport({ classifications });
+    const report = minimalReport({ classifications: [...common, ...rare] });
     const overview = summarizeReport(report);
-    expect(overview.folderHeatmap.rows.map((row) => row.folder)).toContain('src');
-    expect(overview.folderHeatmap.rows.map((row) => row.folder)).not.toContain('src/rare');
+    const folders = overview.folderHeatmap.rows.map((row) => row.folder);
+    expect(folders).toContain('src/common');
+    expect(folders).not.toContain('src/rare');
+    expect(folders).not.toContain('src'); // "src" is a generic segment, never a row of its own
+    // The too-small "src/rare" group folds up to the nearest ancestor row that was actually
+    // established (root, "."), since "src" alone is never a candidate row.
+    const root = overview.folderHeatmap.rows.find((row) => row.folder === '.');
+    expect(root).toBeDefined();
+    expect(root!.judgedTotal).toBe(rare.length);
   });
 
   it('buckets a root-level test file (no directory) under "."', () => {
     const report = minimalReport({ classifications: [withPathAndStatus('smoke.test.ts', '1', 'weak', { level: 'weak' })] });
     const overview = summarizeReport(report);
     expect(overview.folderHeatmap.rows.map((row) => row.folder)).toContain('.');
+  });
+
+  it('drills down past generic segments to module/feature level for a supermarket-pro-shaped monorepo', () => {
+    const backendModules = ['budgets', 'inventory', 'orders'];
+    const mobileFeatures = ['checkout', 'cart'];
+    const classifications = [
+      ...backendModules.flatMap((mod) => Array.from({ length: 8 }, (_, index) =>
+        withPathAndStatus(`backend/src/modules/${mod}/__tests__/${mod}-${index}.spec.ts`, `${mod}-${index}`, 'weak', { level: 'weak' }))),
+      ...mobileFeatures.flatMap((feature) => Array.from({ length: 6 }, (_, index) =>
+        withPathAndStatus(`mobile/src/features/${feature}/${feature}-${index}.test.tsx`, `${feature}-${index}`, 'weak', { level: 'weak' }))),
+    ];
+    const report = minimalReport({ classifications });
+    const overview = summarizeReport(report);
+    const folders = overview.folderHeatmap.rows.map((row) => row.folder);
+    for (const mod of backendModules) expect(folders).toContain(`backend/src/modules/${mod}`);
+    for (const feature of mobileFeatures) expect(folders).toContain(`mobile/src/features/${feature}`);
+    // Never a coarse stop at a bare top-level or "src" prefix — those are too coarse to be useful.
+    expect(folders).not.toContain('backend');
+    expect(folders).not.toContain('backend/src');
+    expect(folders).not.toContain('mobile');
+    expect(folders).not.toContain('mobile/src');
+    // Every test is accounted for somewhere — the drill-down never silently drops a test.
+    const total = overview.folderHeatmap.rows.reduce((sum, row) => sum + row.judgedTotal, 0);
+    expect(total).toBe(classifications.length);
+  });
+
+  it('marks a split folder\'s own leftover row as isRemainder, distinct from its child rows, without touching the plain "folder" path', () => {
+    const classifications = [
+      ...['eval', 'services', 'extraction'].flatMap((sub) => Array.from({ length: 5 }, (_, index) =>
+        withPathAndStatus(`backend/src/modules/tickets/${sub}/${sub}-${index}.test.ts`, `${sub}-${index}`, 'weak', { level: 'weak' }))),
+      // Tests directly in "tickets", with no further real segment — these are the remainder.
+      ...Array.from({ length: 4 }, (_, index) =>
+        withPathAndStatus(`backend/src/modules/tickets/direct-${index}.test.ts`, `direct-${index}`, 'weak', { level: 'weak' })),
+    ];
+    const report = minimalReport({ classifications });
+    const overview = summarizeReport(report);
+    const rows = overview.folderHeatmap.rows;
+
+    const evalRow = rows.find((row) => row.folder === 'backend/src/modules/tickets/eval');
+    expect(evalRow).toBeDefined();
+    expect(evalRow!.isRemainder).toBe(false);
+
+    const remainderRow = rows.find((row) => row.folder === 'backend/src/modules/tickets');
+    expect(remainderRow).toBeDefined();
+    expect(remainderRow!.isRemainder).toBe(true);
+    expect(remainderRow!.judgedTotal).toBe(4);
   });
 
   it('caps rows at the limit, folding the remaining folders into one "Other" row summing their counts', () => {

@@ -229,7 +229,18 @@ section > p { max-width: 68ch; color: var(--graphite); }
   letter-spacing: 0.2px;
   max-width: 34ch;
 }
-.hero-note { color: var(--smoke); margin: 0 0 24px; }
+.hero-note { color: var(--smoke); margin: 0 0 12px; }
+.hero-secondary { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin: 0 0 24px; }
+.hero-secondary-value {
+  font-family: var(--font-display);
+  font-weight: 300;
+  font-size: 28px;
+  line-height: 1;
+  letter-spacing: -0.4px;
+  color: var(--violet);
+  font-variant-numeric: proportional-nums;
+}
+.hero-secondary-label { font-size: 13px; font-weight: 500; letter-spacing: 0.13px; color: var(--smoke); max-width: 34ch; }
 .status-stack { display: flex; flex-direction: column; gap: 16px; }
 .stack-bar {
   display: flex;
@@ -483,10 +494,11 @@ footer p { margin: 0; max-width: 62ch; }
 
 <section id="jev-hero" class="hero">
 <p class="hero-figure">
-<span class="hero-value">60%</span>
+<span class="hero-value">40%</span>
 <span class="hero-label">of 5 judged tests need a change</span>
 </p>
-<p class="hero-note">3 of 5 judged tests are misleading, weak, or need review.</p>
+<p class="hero-note">2 of 5 judged tests are misleading or weak.</p>
+<p class="hero-secondary"><span class="hero-secondary-value">20%</span><span class="hero-secondary-label">of 5 judged tests need review (uncertain, not a confirmed defect)</span></p>
 <div class="status-stack">
 <div class="stack-bar" role="img" aria-label="Status share of judged tests"><span class="stack-seg status-misleading" style="flex-grow:1" title="Misleading: 1 (20%)"></span><span class="stack-seg status-weak" style="flex-grow:1" title="Weak: 1 (20%)"></span><span class="stack-seg status-needs-review" style="flex-grow:1" title="Needs review: 1 (20%)"></span><span class="stack-seg status-healthy" style="flex-grow:2" title="Healthy: 2 (40%)"></span></div>
 <div class="status-summary"><span class="badge status-misleading">Misleading<span class="stat-count">1</span><span class="stat-share">20%</span></span><span class="badge status-weak">Weak<span class="stat-count">1</span><span class="stat-share">20%</span></span><span class="badge status-needs-review">Needs review<span class="stat-count">1</span><span class="stat-share">20%</span></span><span class="badge status-healthy">Healthy<span class="stat-count">2</span><span class="stat-share">40%</span></span></div>
@@ -531,21 +543,21 @@ footer p { margin: 0; max-width: 62ch; }
 </section>
 <section id="jev-heatmap">
 <h2>Where the changes are</h2>
-<p>Share of each folder’s own applicable tests that are misleading or weak, per dimension. A folder groups by its first one or two path segments; folders too small to be meaningful on their own fold into their parent, and the smallest-ranked folders fold into “Other”.</p>
+<p>Share of each folder’s own applicable tests that are misleading or weak, per dimension. Folders drill down adaptively — a folder big enough to be worth resolving further splits into its modules/features; a folder too small to split, or too small to be meaningful on its own, stays at the coarser level — and the smallest-ranked folders fold into “Other”.</p>
 <div class="heat-legend"><span class="heat-legend-swatch" style="background:#ebe8e4" aria-hidden="true"></span><span class="heat-legend-label">0–24%</span><span class="heat-legend-swatch" style="background:#a59f97" aria-hidden="true"></span><span class="heat-legend-label">25–49%</span><span class="heat-legend-swatch" style="background:#ff4704" aria-hidden="true"></span><span class="heat-legend-label">≥ 50% hotspot</span></div>
 <div class="table-wrap">
 <table class="heatmap">
 <thead><tr><th class="heat-folder"></th><th title="Falsifiability">Fals.</th><th title="Behavioral focus">Behav.</th><th title="Refactor resistance">Refac.</th><th title="Assertion strength">Assert.</th><th title="Test-double quality">Double</th><th title="Determinism and isolation">Determ.</th><th title="Diagnostic quality">Diagn.</th></tr></thead>
 <tbody>
-<tr><th scope="row" class="heat-folder-name">src</th><td><span class="heat-cell" style="background:#ff4704;color:#000000" title="src · Falsifiability: 75% (3/4)">75%</span></td><td><span class="heat-cell" style="background:#ff4704;color:#000000" title="src · Behavioral focus: 60% (3/5)">60%</span></td><td><span class="heat-cell" style="background:#ebe8e4;color:#000000" title="src · Refactor resistance: 0% (0/5)">0%</span></td><td><span class="heat-cell" style="background:#ff4704;color:#000000" title="src · Assertion strength: 50% (2/4)">50%</span></td><td><span class="heat-cell" style="background:#a59f97;color:#000000" title="src · Test-double quality: 40% (2/5)">40%</span></td><td><span class="heat-cell" style="background:#ebe8e4;color:#000000" title="src · Determinism and isolation: 0% (0/5)">0%</span></td><td><span class="heat-cell" style="background:#ff4704;color:#000000" title="src · Diagnostic quality: 67% (2/3)">67%</span></td></tr>
+<tr><th scope="row" class="heat-folder-name">.</th><td><span class="heat-cell" style="background:#ff4704;color:#000000" title=". · Falsifiability: 75% (3/4)">75%</span></td><td><span class="heat-cell" style="background:#ff4704;color:#000000" title=". · Behavioral focus: 60% (3/5)">60%</span></td><td><span class="heat-cell" style="background:#ebe8e4;color:#000000" title=". · Refactor resistance: 0% (0/5)">0%</span></td><td><span class="heat-cell" style="background:#ff4704;color:#000000" title=". · Assertion strength: 50% (2/4)">50%</span></td><td><span class="heat-cell" style="background:#a59f97;color:#000000" title=". · Test-double quality: 40% (2/5)">40%</span></td><td><span class="heat-cell" style="background:#ebe8e4;color:#000000" title=". · Determinism and isolation: 0% (0/5)">0%</span></td><td><span class="heat-cell" style="background:#ff4704;color:#000000" title=". · Diagnostic quality: 67% (2/3)">67%</span></td></tr>
 </tbody></table>
 </div>
 </section>
 <section id="jev-top-files">
 <h2>Top files</h2>
 <p>Files ranked by tests needing a change, each against its own judged test count — top 2.</p>
-<div class="file-list"><div class="file-row"><span class="file-path" title="src/billing.test.ts">src/billing.test.ts</span><span class="file-bar-track"><span class="file-bar-fill" style="width:66.66666666666666%;background:#ff4704" title="src/billing.test.ts: 2/3 (67%)"></span></span><span class="file-bar-value">2/3 · 67%</span></div>
-<div class="file-row"><span class="file-path" title="src/invoice.test.ts">src/invoice.test.ts</span><span class="file-bar-track"><span class="file-bar-fill" style="width:50%;background:#ff4704" title="src/invoice.test.ts: 1/2 (50%)"></span></span><span class="file-bar-value">1/2 · 50%</span></div></div>
+<div class="file-list"><div class="file-row"><span class="file-path" title="src/invoice.test.ts">src/invoice.test.ts</span><span class="file-bar-track"><span class="file-bar-fill" style="width:50%;background:#ff4704" title="src/invoice.test.ts: 1/2 (50%)"></span></span><span class="file-bar-value">1/2 · 50%</span></div>
+<div class="file-row"><span class="file-path" title="src/billing.test.ts">src/billing.test.ts</span><span class="file-bar-track"><span class="file-bar-fill" style="width:33.33333333333333%;background:#a59f97" title="src/billing.test.ts: 1/3 (33%)"></span></span><span class="file-bar-value">1/3 · 33%</span></div></div>
 </section>
 <section id="jev-diagnostics">
 <h2>Diagnostics</h2>
