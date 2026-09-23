@@ -3797,6 +3797,19 @@ describe('persisted run reports (.jta/) — feature "persisted-run-reports", tas
  * exercising `report` against it.
  */
 describe('jta report — feature "persisted-run-reports", task T2', () => {
+  it('documents jta report, --last, --run <runId>, and .jta/ in --help', async () => {
+    const output = captureOutput();
+
+    const exitCode = await runCli(['--help'], output.io);
+
+    expect(exitCode).toBe(0);
+    const help = output.lines[0]!;
+    expect(help).toContain('jta report');
+    expect(help).toContain('--last');
+    expect(help).toContain('--run <runId>');
+    expect(help).toContain('.jta');
+  });
+
   const mathFixtureFiles = {
     'math.test.ts': "import { expect, test } from 'vitest';\ntest('adds', () => { expect(1 + 1).toBe(2); });\n",
   };

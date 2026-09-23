@@ -144,6 +144,7 @@ const HELP = `jta (jev-test-auditor) — inspect semantic test quality
 
 Usage:
   jta audit [options]
+  jta report [--last | --run <runId>] [--json | --html [path]] [--open] [--rootDir <path>]
   jta auth <login|status|logout>
   jta --help
 
@@ -156,7 +157,22 @@ Commands:
                 the same no-network, no-write cost/call estimate --dry-run computes (discovered/
                 evaluable/skipped test cases, exact initial Jev call count, cache status, and
                 approximate input-token/USD ranges). See --json below to print the underlying
-                discovery data as one JSON line instead.
+                discovery data as one JSON line instead. Every "audit --evaluate" run also persists
+                its canonical report to <rootDir>/.jta/ — see "jta report" below.
+  report        Read-only: prints or re-renders a run's canonical report already persisted to
+                <rootDir>/.jta/ by a prior "audit --evaluate" run (see "Persisted run reports" in
+                README.md) — no API key, no network, no audit store access, and it never runs a new
+                evaluation. Selects WHICH run with --last (the default) or --run <runId>; selects the
+                OUTPUT with --json (the exact stored JSON), --html [path] (renders the same
+                fixed-size offline overview "audit --evaluate --html" does, at [path] or report.html
+                in the current directory by default; --open opens it once written), or neither (a
+                short human summary: run id and recorded time, the headline "needs a change" share
+                and its denominator, and the worst folders by tests needing a change). --rootDir
+                <path> reads <rootDir>/.jta/ instead of the current directory. Exits 1 with a clear
+                message when no report has ever been persisted there yet (suggesting "jta audit
+                --evaluate"), when --run names a run id that does not exist (listing the ids that
+                do), or when the stored JSON is unreadable or fails the same schema
+                "audit --evaluate --json" itself publishes.
   auth login    Store a TypeSafe API key locally for this tool. Reads from an interactive,
                 no-echo prompt when stdin is a TTY; reads one trimmed line from stdin
                 otherwise (so automation/CI can pipe a key in). NEVER accepts the key as a
