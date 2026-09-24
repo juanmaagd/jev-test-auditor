@@ -1,5 +1,9 @@
 # jev-test-auditor (`jta`)
 
+![jev-test-auditor HTML report: headline share of judged tests that need a change, the needs-review share, and a status bar split into misleading, weak, needs review, and healthy](https://raw.githubusercontent.com/juanmaagd/jev-test-auditor/main/docs/images/report-overview.png)
+
+<sub>This repository's own test suite, audited by itself: `jta audit --evaluate --cache-only --html` (real judgments served from the local cache, 863 tests judged).</sub>
+
 `jev-test-auditor` (executable command: `jta`) is a local-first CLI for auditing the semantic quality of existing JavaScript and TypeScript tests. The pipeline discovers supported test files, reads them without executing project code, extracts deterministic structural test understanding, and — for every extracted test case — selects a minimal, provenance-aware local evidence bundle (the test body plus the smallest useful helper and production fragments it references). By default nothing built here is sent anywhere: discovery, extraction, evidence selection, and the default `audit` summary are entirely offline and need no API key. Real Jev evaluation is opt-in only (`audit --evaluate`, see below) — nothing leaves this machine unless that flag is passed, and `--evaluate` also persists its results to a local SQLite database, reuses an unchanged test's prior judgment instead of paying for it again, dispatches through an adaptive scheduler that reduces concurrency under real provider throttling and observes request/token budgets, and can resume an interrupted run by its run id instead of starting over (see "Audit store", "Content-addressed caching", "Adaptive scheduling and resilience", and "Resume" below).
 
 ## Installation
