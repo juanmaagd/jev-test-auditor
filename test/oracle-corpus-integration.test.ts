@@ -154,6 +154,6 @@ describe('proveCorpus against the real, committed discrimination corpus', () => 
 
       expect(await ownScratchDirCount(port), 'every scratch directory must have been cleaned up').toBe(0);
     },
-    120_000,
+    300_000, // real oracles under a real runner; 120 s timed out on loaded machines
   );
 });

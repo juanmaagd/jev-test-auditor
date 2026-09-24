@@ -17,6 +17,12 @@ class RecordingIo {
 }
 
 const REAL_CORPUS_DIR = 'test/fixtures/corpus/discrimination';
+/**
+ * Proving the real corpus runs executable oracles (real mutations under a real test runner), so each
+ * of these tests takes tens of seconds and far longer on a loaded machine or a CI runner. 60-90 s
+ * budgets timed out intermittently even when this file ran alone; the budget is generous on purpose.
+ */
+const REAL_CORPUS_TIMEOUT_MS = 300_000;
 
 let storeFile: string;
 let jsonlPath: string;
@@ -166,7 +172,7 @@ describe('runBenchmarkCli --metrics: real per-dimension report over the real cor
     expect(output).toMatch(/\d+ distinct case\(s\), from \d+ sample\(s\)/);
     expect(output).toMatch(/n=\d+ distinct cases?\b/);
     expect(output).toMatch(/n=\d+ samples?\b/);
-  }, 60_000);
+  }, REAL_CORPUS_TIMEOUT_MS);
 
   it('exports one JSONL line per recorded case outcome when --jsonl is given, and nothing without it', async () => {
     const io = new RecordingIo();
@@ -192,7 +198,7 @@ describe('runBenchmarkCli --metrics: real per-dimension report over the real cor
       expect(validDimensionIds.has(record.dimension)).toBe(true);
       expect(record.dimension).not.toBe(record.operator);
     }
-  }, 60_000);
+  }, REAL_CORPUS_TIMEOUT_MS);
 
   it('pools two runs when given comma-separated run ids', async () => {
     const io1 = new RecordingIo();
@@ -204,7 +210,7 @@ describe('runBenchmarkCli --metrics: real per-dimension report over the real cor
     const exitCode = await runBenchmarkCli(['--store', storeFile, '--metrics', `${runIdOne},${runIdTwo}`], metricsIo);
     expect(exitCode).toBe(0);
     expect(metricsIo.lines.join('\n')).toMatch(/2 run/i);
-  }, 90_000);
+  }, REAL_CORPUS_TIMEOUT_MS);
 });
 
 describe('runBenchmarkCli --store: exit code reflects sampling, not proof alone (closes the P7-3 open question)', () => {
@@ -216,7 +222,7 @@ describe('runBenchmarkCli --store: exit code reflects sampling, not proof alone 
 
     expect(io.lines).toContain('70/70 case(s) proven.');
     expect(exitCode).toBe(1);
-  }, 60_000);
+  }, REAL_CORPUS_TIMEOUT_MS);
 
   it('still exits 0 when every case proves and every sample succeeds', async () => {
     const io = new RecordingIo();
@@ -226,5 +232,5 @@ describe('runBenchmarkCli --store: exit code reflects sampling, not proof alone 
 
     expect(io.lines).toContain('70/70 case(s) proven.');
     expect(exitCode).toBe(0);
-  }, 60_000);
+  }, REAL_CORPUS_TIMEOUT_MS);
 });
