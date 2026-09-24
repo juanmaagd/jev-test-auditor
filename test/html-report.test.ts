@@ -156,6 +156,16 @@ describe('renderAuditReportHtml: document shape', () => {
     expect(html).toMatch(/<meta charset="utf-8">/i);
   });
 
+  it('puts the run metadata at the bottom, after every data section and right before the footer', () => {
+    const html = renderAuditReportHtml(minimalReport({ runId: 'run-meta-1' }));
+    const mast = html.slice(html.indexOf('<header class="mast">'), html.indexOf('</header>'));
+    expect(mast).not.toContain('Run id');
+    const metaAt = html.indexOf('id="jev-run-details"');
+    expect(metaAt).toBeGreaterThan(html.indexOf('id="jev-coverage"'));
+    expect(metaAt).toBeLessThan(html.indexOf('<footer>'));
+    expect(html.slice(metaAt, html.indexOf('<footer>'))).toContain('run-meta-1');
+  });
+
   it('embeds no canonical JSON data block at all — per-test/canonical detail lives only in `audit --evaluate --json`', () => {
     const html = renderAuditReportHtml(minimalReport());
     expect(html).not.toContain('application/json');
