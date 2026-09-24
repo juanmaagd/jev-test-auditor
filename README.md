@@ -76,7 +76,12 @@ jta auth login
 
 # 4. Run real semantic evaluation and open the self-contained offline HTML report
 jta audit --evaluate --html --open   # writes ./report.html
+
+# 5. Re-read that same run later — no API key, no network, no re-evaluation
+jta report
 ```
+
+Every `--evaluate` run also persists its full report inside the audited project at `.jta/` (see "Persisted run reports" below), and a coding agent can read, explain, and — only with your approval — help fix the results through the bundled agent skill (see "Agent skill" below).
 
 From this repository's own development checkout:
 
@@ -373,7 +378,7 @@ The plain `audit` default (see "Current CLI" above) folds this exact same estima
 | 3. Evidence and context | For every extracted test case, resolve its relative imports safely and select the smallest useful helper/production-seam evidence within configured budgets, exposed locally through `--inspect-payloads`, plus a no-network `--dry-run` cost/call estimate. | **Completed** |
 | 4. Jev evaluation MVP | Versioned rubric and request composition, a TypeSafe HTTP gateway, deterministic non-compensatory classification, opt-in `audit --evaluate` wiring with terminal and canonical JSON reporting, and local per-user API key storage (`auth login`/`status`/`logout`). | **Completed** |
 | 5. Persistence, caching, and resilience | SQLite run store and cache, `--fresh`/resume, adaptive scheduling, provider-throttling resilience, and a cache-aware dry-run estimate. | **Completed** — SQLite run store (task P5-1), content-addressed caching/`--fresh` (task P5-2), adaptive scheduling with request/token budgets (task P5-3), `--resume <runId>` (task P5-4), and cache-aware `--dry-run` (task P5-5) all shipped, see "Audit store", "Content-addressed caching", "Adaptive scheduling and resilience", "Resume", and "Dry-run cost and call estimate" above |
-| 6. HTML reporting | Per-request latency capture, the versioned canonical JSON report, terminal progress during a run, and a self-contained offline HTML renderer embedding that same JSON report. | **Completed** — see "Canonical JSON report", "Progress during a run", and "Self-contained HTML report" above |
+| 6. HTML reporting | Per-request latency capture, the versioned canonical JSON report, terminal progress during a run, and a self-contained offline HTML renderer. | **Completed** — originally embedded the full JSON report; rewritten as a fixed-size visual overview with no embedded JSON (`odd/tasks/html-report-overview.md`) — see "Canonical JSON report", "Progress during a run", and "Self-contained HTML report" above |
 | 7. Deterministic benchmarks | A Git-stored fixture corpus with controlled mutation operators, executable oracles that prove each operator's expected effect before its case counts toward any metric, persisted benchmark comparisons, per-dimension metrics, and JSONL export. | **Completed** — corpus and operators (task P7-1), oracle proof by execution (task P7-2), persisted benchmark runs and comparisons (task P7-3), and per-dimension metrics plus JSONL export (task P7-4) all shipped, see "Deterministic evaluation" in `docs/technical-design.md` |
 | 8. Benchmark-review skill | A development-only skill (never a product runtime dependency) that shards selected benchmark cases across blind read-only subagents, freezes their assessments before comparing them with Jev's, and records the comparison without promoting it to ground truth. | **Completed** — pure domain double-blind selection, blind payloads with strict leakage assertions, SQLite schema v2 review persistence, 4-way discrepancy taxonomy, and registered `jev-benchmark-review` development skill |
 | 9. Calibration and first release | Run the deterministic baseline, publish per-dimension metrics, cost, and latency, replace the classification policy's provisional thresholds with evidence-backed ones recorded against their rubric version, and document privacy, CI artifacts, failure recovery, and contribution before publishing. | **Completed** — threshold calibration (`CLASSIFICATION_POLICY_V2`), offline calibration regression suite, privacy guarantees (`docs/privacy.md`), contributing guide (`CONTRIBUTING.md`), MIT license, and packaging verification |
