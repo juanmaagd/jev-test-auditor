@@ -75,12 +75,13 @@ jobs:
       - name: Run pr-hero
         if: steps.gate.outputs.proceed == 'true'
         id: pr-hero
-        uses: juanmaagd/pr-hero@v1
+        uses: juanmaagd/pr-hero@dev
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
           claude-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          # routing / opencode-auth need a pr-hero release newer than v1.1.0; add them back when pinning one.
+          routing: "${{ vars.PRHERO_ROUTING }}"
+          opencode-auth: ${{ secrets.OPENCODE_AUTH_JSON }}
           pr-number: ${{ inputs.pr }}
           force: true
 
