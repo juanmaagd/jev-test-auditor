@@ -2245,6 +2245,218 @@ describe('content-addressed caching wiring (Phase 5, task P5-2)', () => {
 });
 
 /**
+ * `--cache-only` (`odd/tasks/cache-only-evaluation.md`): serves the local content-addressed cache
+ * only, through the real `runCli` pipeline — no API key, no network, no provider request ever.
+ */
+describe('--cache-only (odd/tasks/cache-only-evaluation.md)', () => {
+  useIsolatedConfigHome();
+
+  const mathFixtureFiles = {
+    'math.test.ts': "import { expect, test } from 'vitest';\ntest('adds', () => { expect(1 + 1).toBe(2); });\n",
+  };
+
+  function trackedEvaluationPort(onEvaluate: () => void): AuditEvaluationPort {
+    return {
+      async evaluate(request) {
+        onEvaluate();
+        return {
+          evaluation: {
+            requestedModel: 'jev-1.13.0',
+            respondedModel: 'jev-1.13.0',
+            modelMatchesPin: true,
+            answers: {},
+            usage: { inputTokens: 10, outputTokens: 1 },
+            attempts: 1,
+          },
+          classification: {
+            testCaseId: request.testCase.id,
+            repositoryRelativePath: request.testCase.repositoryRelativePath,
+            name: request.testCase.name,
+            status: 'healthy',
+            dimensions: [],
+            findings: [],
+            policyVersion: 2,
+            rubricVersion: 2,
+            model: { requested: 'jev-1.13.0', responded: 'jev-1.13.0', matchesPin: true },
+            usage: { inputTokens: 10, outputTokens: 1 },
+          },
+        };
+      },
+    };
+  }
+
+  /**
+   * A stateful in-memory store, persisted ACROSS `runCli` calls — identical in shape to the
+   * `statefulStore()` fake in the `SQLite audit store` describe block above; duplicated locally
+   * since describe-scoped helpers do not cross block boundaries. See that block's own doc for
+   * exactly what it simulates.
+   */
+  function statefulStore(): AuditStorePort {
+    const workItemCalls: { readonly runId: string; readonly outcome: AuditStoreWorkItemOutcome }[] = [];
+    const rootDirByRunId = new Map<string, string>();
+    const finishedRunIds = new Set<string>();
+    let runCount = 0;
+    return {
+      beginRun: async (rootDir) => {
+        runCount += 1;
+        const runId = `run-${runCount}`;
+        rootDirByRunId.set(runId, rootDir);
+        return runId;
+      },
+      canonicalizeRootDir: async (rootDir) => rootDir,
+      recordWorkItem: async (runId, outcome) => { workItemCalls.push({ runId, outcome }); },
+      lookup: async (cacheKey) => {
+        for (let index = workItemCalls.length - 1; index >= 0; index -= 1) {
+          const { outcome } = workItemCalls[index]!;
+          if (outcome.state === 'completed' && outcome.cacheKey === cacheKey && outcome.evaluation.modelMatchesPin) {
+            return { evaluation: outcome.evaluation };
+          }
+        }
+        return undefined;
+      },
+      finishRun: async (runId) => { finishedRunIds.add(runId); },
+      loadRunState: async (runId) => {
+        const rootDir = rootDirByRunId.get(runId);
+        if (rootDir === undefined) return undefined;
+        const lastByIdentity = new Map<string, AuditStoreWorkItemOutcome>();
+        for (const call of workItemCalls) {
+          if (call.runId !== runId) continue;
+          lastByIdentity.set(
+            JSON.stringify([call.outcome.identity.testCaseId, call.outcome.identity.repositoryRelativePath, call.outcome.identity.name]),
+            call.outcome,
+          );
+        }
+        const terminalWorkItems = [...lastByIdentity.values()].filter(
+          (outcome) => outcome.state === 'completed' || outcome.state === 'cached' || outcome.state === 'failed' || outcome.state === 'skipped',
+        );
+        return { rootDir, rootDirCanonical: true, finished: finishedRunIds.has(runId), terminalWorkItems };
+      },
+      close: async () => undefined,
+    };
+  }
+
+  it('rejects --cache-only without --evaluate as a usage error and never runs the audit seam', async () => {
+    const output = captureOutput();
+
+    const exitCode = await runCli(['audit', '--cache-only'], output.io, {
+      audit: async () => { throw new Error('must not run'); },
+    });
+
+    expect(exitCode).toBe(1);
+    expect(output.lines[0]).toContain('--cache-only');
+    expect(output.lines[0]).toContain('--evaluate');
+  });
+
+  it('rejects --evaluate --cache-only --fresh as a usage error', async () => {
+    const output = captureOutput();
+
+    const exitCode = await runCli(['audit', '--evaluate', '--cache-only', '--fresh'], output.io, {
+      audit: async () => { throw new Error('must not run'); },
+    });
+
+    expect(exitCode).toBe(1);
+    expect(output.lines[0]).toContain('--cache-only');
+    expect(output.lines[0]).toContain('--fresh');
+  });
+
+  it('rejects --evaluate --cache-only --resume <runId> as a usage error', async () => {
+    const output = captureOutput();
+
+    const exitCode = await runCli(['audit', '--evaluate', '--cache-only', '--resume', 'some-run'], output.io, {
+      audit: async () => { throw new Error('must not run'); },
+    });
+
+    expect(exitCode).toBe(1);
+    expect(output.lines[0]).toContain('--cache-only');
+    expect(output.lines[0]).toContain('--resume');
+  });
+
+  it(
+    'needs no API key and makes no network call — through the REAL (non-test-seam) cache-only port construction '
+    + 'path, never dependencies.createEvaluationPort',
+    async () => {
+      const root = await fixture(mathFixtureFiles);
+      const savedKey = process.env['TYPESAFE_API_KEY'];
+      delete process.env['TYPESAFE_API_KEY'];
+      const originalFetch = globalThis.fetch;
+      const fetchSpy = vi.fn(() => { throw new Error('network access is not allowed'); });
+      globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+      try {
+        const output = captureOutput();
+        const store = statefulStore();
+
+        // Deliberately no `createEvaluationPort` override: a real cache-only run must never reach
+        // it at all, even to resolve a key it does not need.
+        const exitCode = await runCli(['audit', '--rootDir', root, '--evaluate', '--cache-only'], output.io, {
+          createStorePort: () => store,
+        });
+
+        expect(exitCode).toBe(0);
+        expect(fetchSpy).not.toHaveBeenCalled();
+      } finally {
+        if (savedKey === undefined) delete process.env['TYPESAFE_API_KEY']; else process.env['TYPESAFE_API_KEY'] = savedKey;
+        globalThis.fetch = originalFetch;
+      }
+    },
+  );
+
+  it('mutation probe: never calls dependencies.createEvaluationPort under --cache-only, even though it would succeed', async () => {
+    const root = await fixture(mathFixtureFiles);
+    const output = captureOutput();
+    const store = statefulStore();
+
+    const exitCode = await runCli(['audit', '--rootDir', root, '--evaluate', '--cache-only'], output.io, {
+      createEvaluationPort: () => { throw new Error('must not be called under --cache-only'); },
+      createStorePort: () => store,
+    });
+
+    expect(exitCode).toBe(0);
+  });
+
+  it(
+    'serves warm hits from a prior real --evaluate run with no new provider request, reports a genuinely new test '
+    + 'case as not-in-cache — never as failed — and the persisted .jta/ report and --json both show the count',
+    async () => {
+      const root = await fixture(mathFixtureFiles);
+      const store = statefulStore();
+      let evaluateCalls = 0;
+
+      const warm = await runCli(['audit', '--rootDir', root, '--evaluate'], captureOutput().io, {
+        createEvaluationPort: () => trackedEvaluationPort(() => { evaluateCalls += 1; }),
+        createStorePort: () => store,
+      });
+      expect(warm).toBe(0);
+      expect(evaluateCalls).toBe(1);
+
+      // A genuinely new test case this store has never seen.
+      await writeFile(join(root, 'other.test.ts'), "import { expect, test } from 'vitest';\ntest('subtracts', () => { expect(2 - 1).toBe(1); });\n");
+
+      const output = captureOutput();
+      const exitCode = await runCli(['audit', '--rootDir', root, '--evaluate', '--cache-only', '--json'], output.io, {
+        createEvaluationPort: () => { throw new Error('must not be called under --cache-only, even for a would-be-successful call'); },
+        createStorePort: () => store,
+      });
+
+      expect(exitCode).toBe(0);
+      expect(evaluateCalls).toBe(1); // unchanged — no new provider request
+
+      const report = JSON.parse(output.lines[0] ?? '') as {
+        runId: string;
+        totals: { evaluated: number; cached: number; notCached: number; failed: number };
+      };
+      expect(report.totals).toMatchObject({ evaluated: 0, cached: 1, notCached: 1, failed: 0 });
+
+      // The persisted `.jta/` report on disk carries the identical count.
+      const persisted = JSON.parse(await readFile(join(root, '.jta', 'latest.json'), 'utf8')) as {
+        totals: { notCached: number };
+      };
+      expect(persisted.totals.notCached).toBe(1);
+    },
+  );
+});
+
+/**
  * `--resume <runId>` wiring end-to-end (Phase 5, task P5-4), through the real `runCli` pipeline
  * and, for the central test, the REAL `node:sqlite` adapter — not a store fake — so this exercises
  * genuine persistence and reopening, not a stand-in for it.

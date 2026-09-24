@@ -601,6 +601,29 @@ export class AuditResumeUnavailableError extends AuditResumeErrorBase {
 export type AuditResumeError = AuditResumeRunNotFoundError | AuditResumeRootDirMismatchError | AuditResumeLegacyRootDirError | AuditResumeUnavailableError;
 
 /**
+ * `--cache-only` (`RunAuditOptions.cacheOnly`, `odd/tasks/cache-only-evaluation.md`) was requested
+ * but no working content-addressed cache is available to serve it from — {@link AuditPorts.store}
+ * or {@link AuditPorts.cacheKey} is missing, so there is nowhere to look an evaluable test case's
+ * key up in at all. Refused visibly, exactly like {@link AuditResumeUnavailableError}, rather than
+ * silently reporting every evaluable test case as "not in cache" — a result that would be
+ * indistinguishable from an honestly cold cache and could mislead a reader into thinking nothing
+ * was ever judged. Production CLI wiring (`--evaluate --cache-only`) always constructs a store and
+ * a cache-key port together whenever `--evaluate` is used — see `runCli` — so this is reachable
+ * only through a direct library caller that omits one or both.
+ */
+export class AuditCacheOnlyUnavailableError extends Error {
+  readonly code = 'cache-only-unavailable' as const;
+
+  constructor() {
+    super(
+      '--cache-only requires a working audit store and a content-addressed cache-key port '
+      + '(pass --evaluate with caching enabled; --cache-only has nothing to serve without one).',
+    );
+    this.name = new.target.name;
+  }
+}
+
+/**
  * `--resume <runId>`'s own summary of one audit run (Phase 5, task P5-4),
  * present on {@link AuditResult} only when `RunAuditOptions.resume` was
  * used. `outstanding` is how many currently evaluable work items were NOT
@@ -630,8 +653,15 @@ export interface AuditResumeSummary {
  * with `Exclude`, rather than a second hand-written literal union, so a future phase that ever
  * does wire up `uncertain` is forced to decide what a progress reporter does with it instead of
  * silently falling outside this type's coverage.
+ *
+ * `'not-cached'` (`odd/tasks/cache-only-evaluation.md`) is added on top of that `Exclude`, not
+ * folded into it: it is a real terminal transition a `--cache-only` run reports to
+ * {@link AuditProgressPort.report}, but it is deliberately NOT one of {@link WORK_ITEM_STATES} —
+ * see {@link AuditStoreWorkItemOutcome}'s own doc — since a cache-only miss is never persisted to
+ * the store at all (progress describes what this run is doing, not what gets persisted; see
+ * {@link AuditProgressPort}'s own doc).
  */
-export type AuditProgressState = Exclude<WorkItemState, 'uncertain'>;
+export type AuditProgressState = Exclude<WorkItemState, 'uncertain'> | 'not-cached';
 
 /**
  * One per-item checkpoint transition, reported to {@link AuditProgressPort.report} at exactly the
@@ -800,11 +830,28 @@ export interface AuditTotals {
  * this to be reported, never hidden (Phase 4 Scope), and a single "first
  * success" `respondedModel` alone would silently hide a mismatch on a
  * later call.
+ *
+ * **`--cache-only` (`odd/tasks/cache-only-evaluation.md`)** widens this invariant rather than
+ * breaking it: under `RunAuditOptions.cacheOnly`, `evaluated` and `failed` are always `0` (nothing
+ * is ever dispatched, so nothing can succeed or fail as a fresh provider call), and `notCached`
+ * takes the place a dispatch-and-fail outcome would otherwise have occupied — `evaluated + cached +
+ * (notCached ?? 0) + failed + skipped.total` always equals the run's total considered test cases.
  */
 export interface AuditEvaluationTotals {
   readonly evaluated: number;
   /** Test cases served from the content-addressed cache this run, at zero provider cost (Phase 5, task P5-2). Always `0` when caching is not wired (see {@link AuditPorts.cacheKey}). */
   readonly cached: number;
+  /**
+   * Evaluable test cases considered under `--cache-only` whose content-addressed key was NOT found
+   * in the store — never dispatched, never counted as `failed` (`odd/tasks/cache-only-evaluation.md`:
+   * "cache misses are not counted as failed and appear under the new not-in-cache count"). Present
+   * (even as `0`) only when this run actually used `--cache-only`; genuinely absent — never a
+   * fabricated `0` — for an ordinary run, matching this project's established convention for
+   * "genuinely absent" fields (e.g. {@link TestCaseLatency.attemptLatenciesMs}). Always additive:
+   * `docs/report-schema.json`/`REPORT_JSON_SCHEMA` never required it, so an older persisted report
+   * (predating this field) still validates.
+   */
+  readonly notCached?: number;
   readonly failed: number;
   readonly skipped: DryRunSkippedTotals;
   /** Tokens actually spent by THIS run's fresh provider requests only — never includes a cache hit's reused `classification.usage` (see this interface's own doc). */
@@ -837,7 +884,15 @@ export interface AuditEvaluationTotals {
  * `'cached'` entries sum to; this map is what makes that count attributable to a specific test
  * case, which the run-level count alone cannot do.
  */
-export type TestCaseCacheStatus = 'cached' | 'fresh' | 'not-evaluated';
+/**
+ * `'not-cached'` (`odd/tasks/cache-only-evaluation.md`) is a fourth, distinct provenance: an
+ * evaluable test case considered under `--cache-only` (`RunAuditOptions.cacheOnly`,
+ * `src/application/audit.ts`) whose content-addressed key was never found in the store — never
+ * dispatched (cache-only makes no provider request, ever) and never counted as `'not-evaluated'`,
+ * which specifically means "dispatched and failed." See `AuditEvaluationTotals.notCached` for the
+ * run-level aggregate this value sums to.
+ */
+export type TestCaseCacheStatus = 'cached' | 'fresh' | 'not-evaluated' | 'not-cached';
 
 /**
  * One test case's measured latency for a FRESH dispatch this run (Phase 6, task P6-2) — never

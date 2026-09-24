@@ -1,4 +1,5 @@
 import {
+  AuditCacheOnlyUnavailableError,
   AuditResumeLegacyRootDirError,
   AuditResumeRootDirMismatchError,
   AuditResumeRunNotFoundError,
@@ -19,6 +20,7 @@ import {
   type AuditStoreRunState,
   type AuditStoreWorkItemIdentity,
   type AuditStoreWorkItemOutcome,
+  type TestCaseCacheStatus,
 } from '../domain/audit.js';
 import type { ClassificationResult, OverallClassificationStatus } from '../domain/classification.js';
 import { classifyTestCase, type DryRunSkippedReason } from '../domain/estimate.js';
@@ -135,7 +137,15 @@ function collectEvaluableItems(files: readonly AuditFileResult[]): {
 type EvaluationOutcome =
   | { readonly kind: 'success'; readonly testCase: TestCase; readonly classification: ClassificationResult; readonly evaluation: JevEvaluation }
   | { readonly kind: 'cached'; readonly testCase: TestCase; readonly classification: ClassificationResult }
-  | { readonly kind: 'failure'; readonly testCase: TestCase; readonly error: unknown };
+  | { readonly kind: 'failure'; readonly testCase: TestCase; readonly error: unknown }
+  /**
+   * `--cache-only` (`odd/tasks/cache-only-evaluation.md`): an evaluable test case whose
+   * content-addressed key was not found in the store, under `RunAuditOptions.cacheOnly`. Never
+   * produced outside cache-only mode. Carries no error and no classification — it was never
+   * attempted, so it is neither a `failure` (which implies a dispatch was made and it broke) nor a
+   * judgment of any kind.
+   */
+  | { readonly kind: 'not-cached'; readonly testCase: TestCase };
 
 /**
  * Content-addressed caching inputs (Phase 5, task P5-2), bundled together
@@ -303,6 +313,20 @@ interface EvaluationSchedulerOptions {
  * fresh dispatch's result is still a new, immutable, appended `completed`
  * record; it never mutates or deletes the judgment(s) already stored under
  * that key.
+ *
+ * **`cacheOnly` (`odd/tasks/cache-only-evaluation.md`)**: requires `cacheEnabled` (a store, a run
+ * id, and `cache` all present) — throws {@link AuditCacheOnlyUnavailableError} up front, before
+ * dispatching anything, when it is not (`runAudit`'s production wiring always constructs a store
+ * and a cache-key port together whenever `--evaluate` is used, so this is reachable only through a
+ * direct library caller). Every evaluable item's cache key is looked up exactly like an ordinary
+ * warm-cache check above; a hit is recorded and classified identically. A MISS never reaches
+ * `evaluationPort.evaluate` at all — `evaluationPort` itself is never referenced anywhere on this
+ * path — and produces a `'not-cached'` outcome instead: not persisted to the store (no
+ * `pending`/`running`/`failed` row; see this function's own `!cacheOnly` guards below — "the run is
+ * persisted like any `--evaluate` run, for the served items" is deliberately narrower than an
+ * ordinary dispatch's full checkpoint trail), never counted as `failed`, and reported under
+ * `AuditEvaluationTotals.notCached` instead. `evaluated`/`failed` are always `0` under `cacheOnly`:
+ * nothing is ever dispatched, so nothing can succeed or fail as a fresh provider call.
  */
 async function runEvaluation(
   files: readonly AuditFileResult[],
@@ -321,9 +345,12 @@ async function runEvaluation(
    * store still reports every transition.
    */
   progress?: AuditProgressPort,
+  /** `--cache-only` (`odd/tasks/cache-only-evaluation.md`) — see this function's own doc. `false` by default; every existing caller is unaffected. */
+  cacheOnly = false,
 ): Promise<EvaluationRunResult> {
   const { items, skippedByReason, skippedItems } = collectEvaluableItems(files);
   const cacheEnabled = store !== undefined && runId !== undefined && cache !== undefined;
+  if (cacheOnly && !cacheEnabled) throw new AuditCacheOnlyUnavailableError();
   const controller = createAdaptiveConcurrencyController({ ceiling: concurrency, restoreWindow: DEFAULT_ADAPTIVE_CONCURRENCY_RESTORE_WINDOW });
   const budgetGate = createRequestTokenBudgetGate(scheduler.budget, scheduler.clock, scheduler.sleep);
 
@@ -385,14 +412,21 @@ async function runEvaluation(
   // row for an item that already had one (e.g. it reached `running` before the interruption) is
   // still honest, append-only history: "we are attempting this item again, as of now."
   for (const item of outstandingItems) {
-    if (store !== undefined && runId !== undefined) {
+    // `--cache-only` (`odd/tasks/cache-only-evaluation.md`): never records a `pending` checkpoint
+    // for ANY item, hit or miss — a cache-only run never dispatches, so there is no "intended
+    // work" for `--resume <runId>` to read back here; the run is persisted only for the items it
+    // actually SERVES (see the `cached` branch below). Progress still fires unconditionally —
+    // progress describes what this run is doing, not what gets persisted.
+    if (store !== undefined && runId !== undefined && !cacheOnly) {
       await store.recordWorkItem(runId, { state: 'pending', identity: identityOf(item.testCase) });
     }
     progress?.report({ state: 'pending', identity: identityOf(item.testCase), concurrencyLimit: controller.limit });
   }
 
   const dispatchedOutcomes = await runAdaptiveSchedule<EvaluableItem, EvaluationOutcome>(outstandingItems, controller, async (item) => {
-    if (store !== undefined && runId !== undefined) {
+    // See the `pending` loop's own comment just above: `--cache-only` never records `running`
+    // either.
+    if (store !== undefined && runId !== undefined && !cacheOnly) {
       await store.recordWorkItem(runId, { state: 'running', identity: identityOf(item.testCase) });
     }
     progress?.report({ state: 'running', identity: identityOf(item.testCase), concurrencyLimit: controller.limit });
@@ -424,6 +458,16 @@ async function runEvaluation(
           }
         }
       }
+    }
+
+    // `--cache-only` (`odd/tasks/cache-only-evaluation.md`): every path that reaches here under
+    // cache-only is a miss (cache disabled — impossible, `cacheOnly` requires it above — a
+    // `cache.fresh` bypass, a missing source text, or a genuine lookup miss) — `evaluationPort` is
+    // NEVER referenced below this point on this branch, so a cache-only run makes no provider
+    // request no matter how any of those inputs vary.
+    if (cacheOnly) {
+      progress?.report({ state: 'not-cached', identity: identityOf(item.testCase), concurrencyLimit: controller.limit });
+      return { result: { kind: 'not-cached', testCase: item.testCase }, signal: 'neutral' };
     }
 
     await budgetGate.waitForCapacity();
@@ -474,6 +518,7 @@ async function runEvaluation(
   const fileDiagnosticsByPath = new Map<string, Diagnostic[]>();
   let evaluated = 0;
   let cached = 0;
+  let notCached = 0;
   let failed = 0;
   let modelMismatches = 0;
   let inputTokens = 0;
@@ -487,7 +532,7 @@ async function runEvaluation(
   // pass over `outcomes` (already the run's one deterministic, fully-merged — dispatched and
   // resume-reused alike — outcome list) rather than a second traversal, so it can never disagree
   // with `classifications`/`totals` about which items were cached/fresh/failed.
-  const cacheStatusByTestCaseId = new Map<TestCaseId, 'cached' | 'fresh' | 'not-evaluated'>();
+  const cacheStatusByTestCaseId = new Map<TestCaseId, TestCaseCacheStatus>();
   const latencyByTestCaseId = new Map<TestCaseId, { readonly latencyMs: number; readonly attemptLatenciesMs?: readonly number[] }>();
 
   for (const outcome of outcomes) {
@@ -521,6 +566,12 @@ async function runEvaluation(
       continue;
     }
 
+    if (outcome.kind === 'not-cached') {
+      notCached += 1;
+      cacheStatusByTestCaseId.set(outcome.testCase.id, 'not-cached');
+      continue;
+    }
+
     failed += 1;
     cacheStatusByTestCaseId.set(outcome.testCase.id, 'not-evaluated');
     const plainDiagnostic: Diagnostic = {
@@ -538,6 +589,9 @@ async function runEvaluation(
   const totals: AuditEvaluationTotals = {
     evaluated,
     cached,
+    // Present only when this run actually used `--cache-only` (never a fabricated `0` for an
+    // ordinary run) — see `AuditEvaluationTotals.notCached`'s own doc (`src/domain/audit.ts`).
+    ...(cacheOnly ? { notCached } : {}),
     failed,
     skipped: { total: skippedTotal, byReason: skippedByReason },
     usage: { inputTokens, outputTokens },
@@ -619,6 +673,20 @@ export interface RunAuditOptions {
    * asks for it.
    */
   readonly retainSourceText?: boolean;
+  /**
+   * `--cache-only` at the CLI (`odd/tasks/cache-only-evaluation.md`): serves every evaluable test
+   * case from the content-addressed judgment cache only — `evaluationPort.evaluate` is never
+   * called, no matter how many test cases miss the cache, and no API key is ever needed to run
+   * this way. A hit is recorded and re-classified under the current policy exactly like an
+   * ordinary warm-cache hit; a miss is neither dispatched nor counted as `failed` — it is reported
+   * under `AuditEvaluationTotals.notCached` instead (see `runEvaluation`'s own doc,
+   * `src/application/audit.ts`, for exactly what gets persisted for a miss: nothing — only served
+   * items get a store row). Requires `ports.store` and `ports.cacheKey` both present — there is
+   * nowhere to look a key up in otherwise — throwing {@link AuditCacheOnlyUnavailableError} when
+   * they are not (the CLI itself only ever offers `--cache-only` alongside `--evaluate`, and always
+   * constructs both together). `false` by default; every existing caller is unaffected.
+   */
+  readonly cacheOnly?: boolean;
 }
 
 const EMPTY_AUDIT_TOTALS = {
@@ -952,7 +1020,10 @@ export async function runAudit(
     const resumeOptions = resumeState === undefined
       ? undefined
       : { terminalByIdentityKey: new Map(resumeState.terminalWorkItems.map((outcome) => [identityKey(outcome.identity), outcome])) };
-    const evaluationRun = await runEvaluation(results, ports.evaluation, request.concurrency, scheduler, ports.store, runId, cache, resumeOptions, ports.progress);
+    const evaluationRun = await runEvaluation(
+      results, ports.evaluation, request.concurrency, scheduler, ports.store, runId, cache, resumeOptions, ports.progress,
+      options.cacheOnly === true,
+    );
     evaluation = evaluationRun.evaluation;
     diagnostics.push(...evaluationRun.diagnostics);
     finalFiles = withEvaluationDiagnostics(results, evaluationRun.fileDiagnosticsByPath);

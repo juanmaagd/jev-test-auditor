@@ -124,8 +124,13 @@ export interface AuditReportEvidenceProvenance {
   readonly omitted: readonly OmittedEvidence[];
 }
 
-/** A classification's cache status is always `cached` or `fresh` — a `not-evaluated` test case never produced a `ClassificationResult` to attach one to (see {@link TestCaseCacheStatus}'s own doc). */
-export type AuditReportClassificationCacheStatus = Exclude<TestCaseCacheStatus, 'not-evaluated'>;
+/**
+ * A classification's cache status is always `cached` or `fresh` — a `not-evaluated` test case
+ * never produced a `ClassificationResult` to attach one to, and (`odd/tasks/cache-only-evaluation.md`)
+ * neither did a `not-cached` one: a `--cache-only` miss is never dispatched and never judged, so it
+ * never reaches `classifications` either (see {@link TestCaseCacheStatus}'s own doc).
+ */
+export type AuditReportClassificationCacheStatus = Exclude<TestCaseCacheStatus, 'not-evaluated' | 'not-cached'>;
 
 /** One test case's full report entry: the existing {@link ClassificationResult} shape (scores, probabilities, findings, model/rubric/policy — unchanged from the pre-P6-2 `--evaluate --json` payload) plus this task's three additions. */
 export interface AuditReportClassification extends ClassificationResult {

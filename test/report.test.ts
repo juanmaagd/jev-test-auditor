@@ -457,6 +457,34 @@ describe('validateAgainstSchema — the validator actually rejects a broken repo
     const result = validateAgainstSchema(REPORT_JSON_SCHEMA, validReportObject());
     expect(result).toEqual({ valid: true, errors: [] });
   });
+
+  it(
+    'accepts a --cache-only-shaped report (totals.notCached present, a not-cached cacheStatus entry) as schema-valid '
+    + '— additive, never requiring reportVersion to move (odd/tasks/cache-only-evaluation.md)',
+    () => {
+      const base = mixedResult();
+      // `failedCase` (mixedResult's own third test case) never produced a classification either
+      // way, so relabeling its provenance from `not-evaluated` to `not-cached` here is purely a
+      // shape substitution for this schema check, not a claim about a realistic cache-only run.
+      const failedCaseId = base.files[1]!.testCases[0]!.id;
+      const cacheOnlyResult: AuditResult = {
+        ...base,
+        evaluation: {
+          ...base.evaluation!,
+          totals: { ...base.evaluation!.totals, notCached: 1 },
+          cacheStatusByTestCaseId: new Map([...base.evaluation!.cacheStatusByTestCaseId, [failedCaseId, 'not-cached']]),
+        },
+      };
+
+      const report = buildAuditReport(cacheOnlyResult, context);
+
+      expect(report.reportVersion).toBe(REPORT_VERSION);
+      expect(report.totals.notCached).toBe(1);
+      expect(report.cacheStatus.find((entry) => entry.testCaseId === failedCaseId)?.status).toBe('not-cached');
+      const validation = validateAgainstSchema(REPORT_JSON_SCHEMA, JSON.parse(JSON.stringify(report)) as unknown);
+      expect(validation).toEqual({ valid: true, errors: [] });
+    },
+  );
 });
 
 describe('docs/report-schema.json stays in sync with REPORT_JSON_SCHEMA', () => {

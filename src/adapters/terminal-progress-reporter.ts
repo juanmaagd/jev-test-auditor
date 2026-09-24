@@ -32,7 +32,7 @@ export interface TerminalProgressReporterOptions {
   readonly isTTY: boolean;
 }
 
-const TERMINAL_STATES: ReadonlySet<AuditProgressState> = new Set(['completed', 'cached', 'failed', 'skipped']);
+const TERMINAL_STATES: ReadonlySet<AuditProgressState> = new Set(['completed', 'cached', 'not-cached', 'failed', 'skipped']);
 
 /**
  * Replaces every embedded carriage return or newline with a plain space. Applied to
@@ -57,18 +57,21 @@ function phaseLine(event: AuditPrePhaseEvent): string {
 }
 
 /**
- * Builds a real {@link AuditProgressPort}. Tracks four independently counted terminal outcomes —
- * a genuinely fresh dispatch (`completed`), a cache hit (`cached`), a failure (`failed`), and a
- * static skip (`skipped`) — against the `total` {@link AuditProgressPort.begin} names, so the
- * rendered line always distinguishes "served from cache" from "actually dispatched" (materially
- * different to a user watching provider cost accrue) and always shows the adaptive scheduler's
- * current concurrency limit (P5-3 makes it change mid-run — see `AuditProgressEvent`'s own doc).
+ * Builds a real {@link AuditProgressPort}. Tracks five independently counted terminal outcomes —
+ * a genuinely fresh dispatch (`completed`), a cache hit (`cached`), a `--cache-only` miss
+ * (`not-cached`; `odd/tasks/cache-only-evaluation.md` — never dispatched, never a failure), a
+ * failure (`failed`), and a static skip (`skipped`) — against the `total` {@link AuditProgressPort.begin}
+ * names, so the rendered line always distinguishes "served from cache" from "actually dispatched"
+ * (materially different to a user watching provider cost accrue) and always shows the adaptive
+ * scheduler's current concurrency limit (P5-3 makes it change mid-run — see `AuditProgressEvent`'s
+ * own doc).
  */
 export function createTerminalProgressReporter(options: TerminalProgressReporterOptions): AuditProgressPort {
   const { write, isTTY } = options;
   let total = 0;
   let doneCount = 0;
   let cachedCount = 0;
+  let notCachedCount = 0;
   let failedCount = 0;
   let skippedCount = 0;
   // T3, TTY only: `true` while the most recent write was an un-terminated `\r` phase redraw (a
@@ -89,9 +92,9 @@ export function createTerminalProgressReporter(options: TerminalProgressReporter
   let maxPhaseLineWidth = 0;
 
   function statusLine(concurrencyLimit: number): string {
-    const freshCount = doneCount - cachedCount - failedCount - skippedCount;
-    return `${doneCount}/${total} done (fresh ${freshCount}, cached ${cachedCount}, failed ${failedCount}, `
-      + `skipped ${skippedCount}, limit ${concurrencyLimit})`;
+    const freshCount = doneCount - cachedCount - notCachedCount - failedCount - skippedCount;
+    return `${doneCount}/${total} done (fresh ${freshCount}, cached ${cachedCount}, not cached ${notCachedCount}, `
+      + `failed ${failedCount}, skipped ${skippedCount}, limit ${concurrencyLimit})`;
   }
 
   return {
@@ -99,6 +102,7 @@ export function createTerminalProgressReporter(options: TerminalProgressReporter
       total = newTotal;
       doneCount = 0;
       cachedCount = 0;
+      notCachedCount = 0;
       failedCount = 0;
       skippedCount = 0;
       if (isTTY && phaseLineOpen) {
@@ -120,6 +124,7 @@ export function createTerminalProgressReporter(options: TerminalProgressReporter
       if (terminal) {
         doneCount += 1;
         if (event.state === 'cached') cachedCount += 1;
+        else if (event.state === 'not-cached') notCachedCount += 1;
         else if (event.state === 'failed') failedCount += 1;
         else if (event.state === 'skipped') skippedCount += 1;
       }
