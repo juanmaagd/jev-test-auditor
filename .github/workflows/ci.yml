@@ -42,6 +42,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # test/bin-smoke.test.ts installs the packed tarball with `npm install --offline`. `npm ci` caches
+      # dependency tarballs but not their registry metadata, which an offline install also needs, so a
+      # fresh runner fails with ENOTCACHED. Warm the cache with the exact runtime dependency first.
+      - name: Warm npm cache for the offline packed-install smoke test
+        run: npm cache add "typescript@$(node -p "require('./package.json').dependencies.typescript")"
+
       - name: Typecheck
         run: npm run typecheck
 
