@@ -193,6 +193,9 @@
         "cached": {
           "type": "integer"
         },
+        "notCached": {
+          "type": "integer"
+        },
         "failed": {
           "type": "integer"
         },
@@ -327,7 +330,8 @@
             "enum": [
               "cached",
               "fresh",
-              "not-evaluated"
+              "not-evaluated",
+              "not-cached"
             ]
           }
         }

@@ -212,9 +212,20 @@ describe('summarizeReport: run coverage', () => {
       fresh: 3,
       failed: 1,
       notEvaluated: 1,
+      notCached: 0,
       skippedTotal: 2,
       skippedByReason: { skip: 1, todo: 1, 'evidence-unavailable': 0 },
     });
+  });
+
+  it('reports notCached from totals.notCached, defaulting to 0 when the underlying report predates --cache-only', () => {
+    const report = minimalReport({
+      totals: { ...minimalReport().totals, notCached: 4 },
+    });
+
+    const overview = summarizeReport(report);
+
+    expect(overview.coverage.notCached).toBe(4);
   });
 });
 

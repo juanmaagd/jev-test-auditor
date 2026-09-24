@@ -89,7 +89,7 @@ const CLASSIFICATION_LEVEL_ENUM = ['misleading', 'weak', 'acceptable', 'strong']
 const OVERALL_STATUS_ENUM = ['healthy', 'weak', 'misleading', 'needs-review'] as const;
 const DIMENSION_STATUS_ENUM = ['judged', 'not-applicable', 'needs-review'] as const;
 const DIMENSION_REASON_ENUM = ['low-confidence', 'missing-answer', 'boundary-straddle'] as const;
-const CACHE_STATUS_ENUM = ['cached', 'fresh', 'not-evaluated'] as const;
+const CACHE_STATUS_ENUM = ['cached', 'fresh', 'not-evaluated', 'not-cached'] as const;
 const CLASSIFICATION_CACHE_STATUS_ENUM = ['cached', 'fresh'] as const;
 
 const skippedTotalsSchema: JsonSchema = {
@@ -128,6 +128,11 @@ const evaluationTotalsSchema: JsonSchema = {
   properties: {
     evaluated: { type: 'integer' },
     cached: { type: 'integer' },
+    // `odd/tasks/cache-only-evaluation.md`: deliberately NOT in `required` above — present only on
+    // a `--cache-only` run (never a fabricated `0` otherwise; see `AuditEvaluationTotals.notCached`'s
+    // own doc, `src/domain/audit.ts`), so an older persisted report predating this field still
+    // validates against this schema unchanged.
+    notCached: { type: 'integer' },
     failed: { type: 'integer' },
     skipped: skippedTotalsSchema,
     usage: usageSchema,

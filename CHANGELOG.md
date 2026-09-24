@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- `audit --evaluate --cache-only`: serves every evaluable test case from the local content-addressed cache only — no TypeSafe request ever, no API key needed. A hit is served and re-classified under the current policy exactly like an ordinary warm-cache hit; a miss is neither dispatched nor counted as failed — it is reported honestly under a new `totals.notCached` count (`Not in cache` in text/HTML/`jta report`). Additive report shape only: `totals.notCached` and the `cacheStatus` value `not-cached` are both optional in `docs/report-schema.json`, so `reportVersion` did not move and an older persisted report still validates. Cannot be combined with `--fresh` or `--resume` (`odd/tasks/cache-only-evaluation.md`).
+
 ## [0.1.1] - 2026-09-24
 
 ### Added

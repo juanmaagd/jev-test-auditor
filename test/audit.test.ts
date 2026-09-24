@@ -18,6 +18,7 @@ import type { ClassificationResult, OverallClassificationStatus } from '../src/d
 import type { DiscoveredTestFile, DiscoveryResult } from '../src/domain/discovery.js';
 import type { TestExtractionResult } from '../src/domain/extraction.js';
 import { buildEvidenceBundle, DEFAULT_EVIDENCE_BUDGET, type EvidenceBundle } from '../src/domain/evidence.js';
+import { AuditCacheOnlyUnavailableError } from '../src/domain/audit.js';
 import { JevAuthError, JevRateLimitError, type JevEvaluation } from '../src/domain/jev-gateway.js';
 import type { TestCase, TestCaseId, TestModifierKind } from '../src/domain/test-understanding.js';
 
@@ -1594,6 +1595,119 @@ describe('content-addressed caching (Phase 5, task P5-2)', () => {
     expect(evaluateCalls).toBe(2); // still no new request
     expect(third.evaluation?.classifications[0]?.status).toBe('weak');
     expect(third.evaluation?.totals).toMatchObject({ evaluated: 0, cached: 1 });
+  });
+});
+
+// --- Cache-only evaluation (odd/tasks/cache-only-evaluation.md) -------------
+
+describe('cache-only evaluation (--cache-only, odd/tasks/cache-only-evaluation.md)', () => {
+  it(
+    'serves a warm cache hit and reports a cold miss as notCached — never calling an evaluation port that would '
+    + 'succeed, never counting the miss as failed, re-classifying the hit under the current policy, and persisting '
+    + 'no pending/running/failed row for the miss (only the served hit gets a store row)',
+    async () => {
+      const store = fakeStore();
+      // A locally-scoped cache-key port, deliberately distinct from the SEEDED work item's own
+      // `classification` below (`status: 'healthy'`): `classifyCached` here always answers `'weak'`
+      // instead, so the assertion below can only pass if the hit's reported classification was
+      // genuinely RE-DERIVED through `classifyCached` (must-prove 4), never merely echoed back from
+      // the stored row — real key computation (`createAuditCacheKeyPort().computeKey`, so the
+      // lookup can actually find the seeded row), fabricated re-classification.
+      const cacheKeyPort: AuditCacheKeyPort = {
+        computeKey: (request, fullTestSource) => createAuditCacheKeyPort().computeKey(request, fullTestSource),
+        classifyCached: (request, evaluation) => classificationFor(request.testCase.id, {
+          status: 'weak', inputTokens: evaluation.usage.inputTokens, outputTokens: evaluation.usage.outputTokens,
+        }),
+      };
+      const hitCase = testCaseWithModifiers('tc:v1:co-hit', [], 'co.test.ts');
+      const missCase = testCaseWithModifiers('tc:v1:co-miss', [], 'co.test.ts');
+      const discovery: DiscoveryResult = { files: [discovered('co.test.ts')], excluded: [], diagnostics: [] };
+      const sourceText = 'source';
+      const hitKey = cacheKeyPort.computeKey({ testCase: hitCase, bundle: emptyBundle(hitCase.id) }, sourceText);
+
+      // Pre-seed a completed judgment under the hit case's exact key, with `classification.status`
+      // deliberately different (`healthy`) from what `classifyCached` above will answer (`weak`).
+      await store.recordWorkItem('seed-run', {
+        state: 'completed',
+        identity: { testCaseId: hitCase.id, repositoryRelativePath: hitCase.repositoryRelativePath, name: hitCase.name },
+        cacheKey: hitKey,
+        evaluation: {
+          requestedModel: 'jev-1.13.0', respondedModel: 'jev-1.13.0', modelMatchesPin: true,
+          answers: {}, usage: { inputTokens: 5, outputTokens: 0 }, attempts: 1,
+        },
+        classification: classificationFor(hitCase.id, { status: 'healthy', outputTokens: 1 }),
+      });
+
+      let evaluateCalls = 0;
+      const evaluation = stubEvaluationPort(async (request) => {
+        evaluateCalls += 1;
+        return classificationFor(request.testCase.id, { status: 'healthy' });
+      });
+
+      const result = await runAudit(configuration, {
+        discovery: { discover: async () => discovery },
+        sourceReader: { read: async () => sourceText },
+        extractor: { extract: () => ({ testCases: [hitCase, missCase], dynamicMetadata: [], diagnostics: [] }) },
+        evidence: { build: async (request) => ({ bundles: request.testCases.map((testCase) => emptyBundle(testCase.id)), diagnostics: [] }) },
+        evaluation,
+        store,
+        cacheKey: cacheKeyPort,
+      }, { cacheOnly: true });
+
+      // (1) An evaluation port that would succeed is never called.
+      expect(evaluateCalls).toBe(0);
+      // (3) The miss is not counted as failed and appears under the new not-in-cache count.
+      expect(result.evaluation?.totals).toMatchObject({ evaluated: 0, cached: 1, notCached: 1, failed: 0 });
+      expect(result.evaluation?.classifications.map((entry) => entry.testCaseId)).toEqual([hitCase.id]);
+      // Genuinely re-derived through `classifyCached`, not the seeded row's own `status: 'healthy'`.
+      expect(result.evaluation?.classifications[0]?.status).toBe('weak');
+      expect(result.evaluation?.cacheStatusByTestCaseId.get(hitCase.id)).toBe('cached');
+      expect(result.evaluation?.cacheStatusByTestCaseId.get(missCase.id)).toBe('not-cached');
+      // Two genuine lookups happened — the miss was not skipped, it was looked up and missed.
+      expect(store.lookupCalls.length).toBe(2);
+
+      const thisRunCalls = store.workItemCalls.filter(({ runId }) => runId === result.runId);
+      const missCalls = thisRunCalls.filter(({ outcome }) => outcome.identity.testCaseId === missCase.id);
+      expect(missCalls).toEqual([]);
+      const hitCalls = thisRunCalls.filter(({ outcome }) => outcome.identity.testCaseId === hitCase.id);
+      expect(hitCalls.map(({ outcome }) => outcome.state)).toEqual(['cached']);
+    },
+  );
+
+  it('throws AuditCacheOnlyUnavailableError when --cache-only is requested but no store/cache-key port is wired', async () => {
+    const discovery: DiscoveryResult = { files: [discovered('a.test.ts')], excluded: [], diagnostics: [] };
+    const evaluation = stubEvaluationPort(async (request) => classificationFor(request.testCase.id));
+
+    await expect(runAudit(configuration, {
+      discovery: { discover: async () => discovery },
+      sourceReader: { read: async () => 'source' },
+      extractor: { extract: () => extraction('a') },
+      evidence: { build: defaultEvidenceBuild },
+      evaluation,
+    }, { cacheOnly: true })).rejects.toThrow(AuditCacheOnlyUnavailableError);
+  });
+
+  it('a run with nothing at all in the cache reports every evaluable test case as notCached, still evaluates zero and fails zero', async () => {
+    const store = fakeStore();
+    const cacheKeyPort = createAuditCacheKeyPort();
+    const coldCase = testCaseWithModifiers('tc:v1:co-cold', [], 'cold.test.ts');
+    const discovery: DiscoveryResult = { files: [discovered('cold.test.ts')], excluded: [], diagnostics: [] };
+    let evaluateCalls = 0;
+    const evaluation = stubEvaluationPort(async (request) => { evaluateCalls += 1; return classificationFor(request.testCase.id); });
+
+    const result = await runAudit(configuration, {
+      discovery: { discover: async () => discovery },
+      sourceReader: { read: async () => 'source' },
+      extractor: { extract: () => ({ testCases: [coldCase], dynamicMetadata: [], diagnostics: [] }) },
+      evidence: { build: async (request) => ({ bundles: request.testCases.map((testCase) => emptyBundle(testCase.id)), diagnostics: [] }) },
+      evaluation,
+      store,
+      cacheKey: cacheKeyPort,
+    }, { cacheOnly: true });
+
+    expect(evaluateCalls).toBe(0);
+    expect(result.evaluation?.totals).toMatchObject({ evaluated: 0, cached: 0, notCached: 1, failed: 0 });
+    expect(result.evaluation?.classifications).toEqual([]);
   });
 });
 

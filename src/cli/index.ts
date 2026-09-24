@@ -40,6 +40,7 @@ import { estimateDryRun, JEV_ESTIMATE_SNAPSHOT, type DryRunCacheNotConsultedReas
 import { JevConfigurationError } from '../domain/jev-gateway.js';
 import { JEV_MODEL_ID, RUBRIC_V2 } from '../domain/rubric.js';
 import {
+  AuditCacheOnlyUnavailableError,
   AuditResumeLegacyRootDirError,
   AuditResumeRootDirMismatchError,
   AuditResumeRunNotFoundError,
@@ -239,6 +240,23 @@ Options:
                       classification policy version, test source, and evidence are unchanged from a
                       prior run is served from the local store at zero cost, reported as cached
                       rather than evaluated. Requires --evaluate.
+  --cache-only        Serves every evaluable test case from the local content-addressed judgment
+                      cache only: makes no TypeSafe request, ever, and needs no API key — works
+                      even when TYPESAFE_API_KEY is unset and no key was ever stored with 'jta auth
+                      login'. A test case already judged (unchanged rubric/model/policy/source/
+                      evidence) is served and re-classified under the CURRENT policy, exactly like
+                      an ordinary warm-cache hit (zero cost, never a fresh request). Anything not
+                      already in the cache is neither dispatched nor counted as failed: it is
+                      reported honestly as not cached (totals.notCached in --json; "Not in cache"
+                      in the text summary), so a report built this way never claims to have judged
+                      more than it actually served from local storage. Still persisted like any
+                      --evaluate run — a store record for every served (cached) item, plus the
+                      usual <rootDir>/.jta/ report — so --json/--html/'jta report' all show the
+                      not-cached count; percentages elsewhere stay over judged tests only. A
+                      cache-only run always finishes immediately (nothing is ever outstanding), so
+                      there is nothing meaningful for a later --resume to continue. Requires
+                      --evaluate. Cannot be combined with --fresh (nothing is ever fresh in this
+                      mode) or --resume.
   --resume <runId>   Continues a previously started run instead of starting a new one: reloads that
                       run's outstanding work items (anything that never reached completed/cached/
                       failed/skipped) and completes only those, leaving every already-terminal item
@@ -305,6 +323,26 @@ Options:
  * never has to decide when caching is meaningful; it only wires whatever
  * it is given.
  */
+/**
+ * `--cache-only`'s evaluation port (`odd/tasks/cache-only-evaluation.md`): constructing this
+ * touches nothing — no API key resolution, no `createJevHttpGateway`, no network — and `evaluate`
+ * itself always rejects. `runEvaluation`'s own cache-only path (`src/application/audit.ts`) never
+ * calls it (a miss becomes `'not-cached'` before ever reaching `evaluationPort.evaluate`); this
+ * port rejecting rather than silently succeeding is defense in depth — if a future defect ever did
+ * reach it, the affected test case surfaces as a visible `evaluation-failed` diagnostic instead of
+ * fabricating a judgment or silently pretending a request was made.
+ */
+function createCacheOnlyEvaluationPort(): AuditEvaluationPort {
+  return {
+    async evaluate() {
+      throw new Error(
+        '--cache-only: provider dispatch is disabled and should be unreachable; this indicates a defect '
+        + 'in cache-only wiring, not a genuine evaluation failure.',
+      );
+    },
+  };
+}
+
 function createProductionPorts(
   rootDir: string,
   evaluationPort?: AuditEvaluationPort,
@@ -558,12 +596,18 @@ function evaluateTextReport(result: AuditResult): string {
     `Root: ${result.rootDir}`,
     `Evaluated: ${totals.evaluated}`,
     `Cached: ${totals.cached}`,
+    // `odd/tasks/cache-only-evaluation.md`: present only on a `--cache-only` run — see
+    // `AuditEvaluationTotals.notCached`'s own doc (`src/domain/audit.ts`) for why its presence,
+    // not its value, is the signal.
+    ...(totals.notCached === undefined ? [] : [`Not in cache (not evaluated this run): ${totals.notCached}`]),
     `Healthy: ${statusCounts.healthy}, Weak: ${statusCounts.weak}, Misleading: ${statusCounts.misleading}, Needs review: ${statusCounts['needs-review']}`,
     `Skipped: ${skipped.total} (skip: ${skipped.byReason.skip}, todo: ${skipped.byReason.todo}, evidence-unavailable: ${skipped.byReason['evidence-unavailable']})`,
     `Failed: ${totals.failed}`,
     `Usage (total input tokens): ${totals.usage.inputTokens}`,
     ...diagnosticsTextLines(result.diagnostics),
-    'Evidence for every evaluated test case was sent to TypeSafe; nothing else leaves this machine, and nothing is sent without --evaluate.',
+    totals.notCached === undefined
+      ? 'Evidence for every evaluated test case was sent to TypeSafe; nothing else leaves this machine, and nothing is sent without --evaluate.'
+      : 'Cache-only run: every judgment above was served from the local content-addressed cache; nothing was sent to TypeSafe, and no network request was made.',
   ].join('\n');
 }
 
@@ -770,6 +814,8 @@ interface ParsedAuditOptions {
   readonly dryRun: boolean;
   readonly evaluate: boolean;
   readonly fresh: boolean;
+  /** `--cache-only` (`odd/tasks/cache-only-evaluation.md`) — see `HELP`'s own entry. */
+  readonly cacheOnly: boolean;
   readonly json: boolean;
   /** `--resume <runId>` (Phase 5, task P5-4), parsed like `--rootDir` — consumes the next argument. `undefined` unless given. */
   readonly resume?: string;
@@ -792,6 +838,7 @@ function parseAuditOptions(args: readonly string[]): ParsedAuditOptions | { read
   let dryRun = false;
   let evaluate = false;
   let fresh = false;
+  let cacheOnly = false;
   let json = false;
   let resume: string | undefined;
   let html: string | undefined;
@@ -813,6 +860,10 @@ function parseAuditOptions(args: readonly string[]): ParsedAuditOptions | { read
     }
     if (argument === '--fresh') {
       fresh = true;
+      continue;
+    }
+    if (argument === '--cache-only') {
+      cacheOnly = true;
       continue;
     }
     if (argument === '--json') {
@@ -857,6 +908,11 @@ function parseAuditOptions(args: readonly string[]): ParsedAuditOptions | { read
   if (evaluate && inspectPayloads) return { error: '--evaluate cannot be combined with --inspect-payloads' };
   if (fresh && !evaluate) return { error: '--fresh requires --evaluate (audit --evaluate --fresh)' };
   if (resume !== undefined && !evaluate) return { error: '--resume requires --evaluate (audit --evaluate --resume <runId>)' };
+  if (cacheOnly && !evaluate) return { error: '--cache-only requires --evaluate (audit --evaluate --cache-only)' };
+  if (cacheOnly && fresh) return { error: '--cache-only cannot be combined with --fresh (nothing is ever fresh under --cache-only)' };
+  if (cacheOnly && resume !== undefined) {
+    return { error: '--cache-only cannot be combined with --resume (a cache-only run never dispatches, so it always finishes with nothing outstanding)' };
+  }
   if (html !== undefined && dryRun) return { error: '--html cannot be combined with --dry-run' };
   if (html !== undefined && inspectPayloads) return { error: '--html cannot be combined with --inspect-payloads' };
   if (html !== undefined && !evaluate) return { error: '--html requires --evaluate (audit --evaluate --html [path])' };
@@ -867,6 +923,7 @@ function parseAuditOptions(args: readonly string[]): ParsedAuditOptions | { read
     dryRun,
     evaluate,
     fresh,
+    cacheOnly,
     json,
     ...(resume === undefined ? {} : { resume }),
     ...(html === undefined ? {} : { html }),
@@ -973,6 +1030,12 @@ function reportSummaryText(report: AuditReport, recordedAt: Date): string {
   const needsReviewLine = needsReview.judgedTotal === 0
     ? 'Needs review (uncertain): n/a (no judged test cases)'
     : `Needs review (uncertain): ${needsReview.count}/${needsReview.judgedTotal} (${(needsReview.share * 100).toFixed(1)}%)`;
+  // `odd/tasks/cache-only-evaluation.md`: only for a --cache-only run (never a fabricated `0` line
+  // otherwise — `overview.coverage.notCached` is always `0` for an ordinary run, matching this
+  // project's established "genuinely absent" convention for a fact that does not apply).
+  const notCachedLine = overview.coverage.notCached === 0
+    ? undefined
+    : `Not in cache (not evaluated this run): ${overview.coverage.notCached}`;
   const topFolders = overview.folderHeatmap.rows
     .filter((row) => !row.isOther && row.needsChangeCount > 0)
     .slice(0, 5)
@@ -986,6 +1049,7 @@ function reportSummaryText(report: AuditReport, recordedAt: Date): string {
     `Root: ${report.rootDir}`,
     needsChangeLine,
     needsReviewLine,
+    ...(notCachedLine === undefined ? [] : [notCachedLine]),
     ...(topFolders.length === 0 ? [] : ['Top folders needing a change:', ...topFolders]),
   ].join('\n');
 }
@@ -1239,7 +1303,12 @@ export async function runCli(
   const configuration = getResolvedConfiguration(parsed.overrides);
 
   let evaluationPort: AuditEvaluationPort | undefined;
-  if (parsed.evaluate && dependencies.audit === undefined) {
+  if (parsed.evaluate && dependencies.audit === undefined && parsed.cacheOnly) {
+    // `--cache-only`: never resolves an API key, never touches `dependencies.createEvaluationPort`
+    // (the test seam a real key-resolving build would go through), never constructs a gateway —
+    // see `createCacheOnlyEvaluationPort`'s own doc.
+    evaluationPort = createCacheOnlyEvaluationPort();
+  } else if (parsed.evaluate && dependencies.audit === undefined) {
     const buildEvaluationPort = dependencies.createEvaluationPort
       ?? (async (): Promise<AuditEvaluationPort> => {
         const resolved = await resolveEvaluationApiKey();
@@ -1352,6 +1421,7 @@ export async function runCli(
           createProductionPorts(configuration.rootDir, evaluationPort, storePort, cacheKeyPort, progressPort),
           {
             fresh: parsed.fresh,
+            ...(parsed.cacheOnly ? { cacheOnly: true } : {}),
             ...(parsed.resume === undefined ? {} : { resume: parsed.resume }),
             ...(dryRunLookup === undefined ? {} : { retainSourceText: true }),
           },
@@ -1365,12 +1435,16 @@ export async function runCli(
       // exact same convention as every other `runAudit` usage error above: a readable message on
       // `io`, exit code 1, no stack trace. "Already finished, nothing outstanding" is NOT an error
       // and never reaches this catch — `runAudit` reports it via `result.resume.nothingOutstanding`
-      // instead (handled below).
+      // instead (handled below). `AuditCacheOnlyUnavailableError` (`odd/tasks/cache-only-evaluation.md`)
+      // joins the same convention: reachable only when `--cache-only` is used through a direct
+      // `runAudit` caller with no store/cache-key port wired — never through the shipped CLI, which
+      // always wires both together whenever `--evaluate` is used.
       if (
         error instanceof AuditResumeRunNotFoundError
         || error instanceof AuditResumeRootDirMismatchError
         || error instanceof AuditResumeLegacyRootDirError
         || error instanceof AuditResumeUnavailableError
+        || error instanceof AuditCacheOnlyUnavailableError
       ) {
         io.writeLine(error.message);
         return 1;

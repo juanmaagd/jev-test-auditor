@@ -283,6 +283,7 @@ export {
 
 export { computeDryRunCacheHits, runAudit, type RunAuditOptions } from './application/audit.js';
 export {
+  AuditCacheOnlyUnavailableError,
   AuditResumeLegacyRootDirError,
   AuditResumeRootDirMismatchError,
   AuditResumeRunNotFoundError,
