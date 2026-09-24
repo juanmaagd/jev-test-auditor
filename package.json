@@ -1,6 +1,6 @@
 {
   "name": "jev-test-auditor",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A local-first semantic test quality auditor.",
   "author": "Juan Manuel Gomez Dagum <juanmanuelgomezomil@gmail.com>",
   "license": "MIT",
@@ -18,7 +18,8 @@
   },
   "files": [
     "dist",
-    "skills/jev-test-audit"
+    "skills/jev-test-audit",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
