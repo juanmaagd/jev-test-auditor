@@ -157,7 +157,7 @@ function renderHeader(report: AuditReport): string {
     '<header class="mast">',
     '<div class="mast-copy">',
     '<h1>Jev test audit report</h1>',
-    '<p class="disclosure">This tool never executed the audited repository’s code. Classification thresholds are provisional and uncalibrated — see README.md; nothing here is a claim of validated accuracy.</p>',
+    '<p class="disclosure">This tool never executed the audited repository’s code. Classification thresholds are provisional, partially calibrated by a blind review — see README.md; this is not a claim of validated accuracy.</p>',
     '</div>',
     `<div class="sphere ${sphereKind(report)}" aria-hidden="true"><span class="sphere-core"></span></div>`,
     '</header>',

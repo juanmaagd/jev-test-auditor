@@ -26,16 +26,16 @@ echo "---------------------------------"
 # 1. Verify Node.js presence
 if ! command -v node >/dev/null 2>&1; then
   echo "${RED}Error: Node.js is required but was not found in PATH.${RESET}" >&2
-  echo "Please install Node.js >= 22.13.0 and rerun this installer." >&2
+  echo "Please install Node.js >= 22.16.0 and rerun this installer." >&2
   echo "Download: https://nodejs.org or use nvm / fnm / brew." >&2
   exit 1
 fi
 
-# 2. Verify Node.js version >= 22.13.0
+# 2. Verify Node.js version >= 22.16.0
 NODE_VER=$(node -v 2>/dev/null | tr -d 'v')
 NODE_OK=$(node -e '
   const [major, minor] = process.versions.node.split(".").map(Number);
-  if (major > 22 || (major === 22 && minor >= 13)) {
+  if (major > 22 || (major === 22 && minor >= 16)) {
     process.stdout.write("ok");
   } else {
     process.stdout.write("fail");
@@ -43,8 +43,8 @@ NODE_OK=$(node -e '
 ' 2>/dev/null || echo "fail")
 
 if [ "$NODE_OK" != "ok" ]; then
-  echo "${RED}Error: Node.js >= 22.13.0 is required (found v${NODE_VER}).${RESET}" >&2
-  echo "jta uses built-in SQLite persistence available unflagged in Node >= 22.13.0." >&2
+  echo "${RED}Error: Node.js >= 22.16.0 is required (found v${NODE_VER}).${RESET}" >&2
+  echo "jta uses built-in SQLite persistence, whose read-only file: URI opening needs Node >= 22.16.0." >&2
   echo "Please upgrade Node.js and rerun this installer." >&2
   exit 1
 fi

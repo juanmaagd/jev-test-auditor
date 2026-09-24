@@ -203,10 +203,14 @@ describe('renderAuditReportHtml: document shape', () => {
     expect(withoutRunId).not.toContain('run:v1:');
   });
 
-  it('states the classification thresholds are provisional and uncalibrated, never claiming accuracy', () => {
+  it('states the classification thresholds are provisional and partially calibrated by a blind review, never claiming validated accuracy', () => {
     const html = renderAuditReportHtml(minimalReport());
-    expect(html.toLowerCase()).toContain('provisional');
-    expect(html.toLowerCase()).not.toContain('calibrated accuracy');
+    const lower = html.toLowerCase();
+    expect(lower).toContain('provisional');
+    expect(lower).toContain('partially calibrated');
+    expect(lower).toContain('blind review');
+    expect(lower).not.toContain('uncalibrated');
+    expect(lower).toContain('not a claim of validated accuracy');
   });
 
   it('paints the page with the warm editorial palette, and lights violet and ember only as data marks', () => {

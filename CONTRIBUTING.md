@@ -6,7 +6,7 @@ Thank you for contributing to `jev-test-auditor`. This guide outlines developmen
 
 ## 1. Prerequisites and Setup
 
-- **Node.js**: Requires Node.js `>= 22.13.0`. The persistence engine uses the built-in `node:sqlite` module without experimental flags.
+- **Node.js**: Requires Node.js `>= 22.16.0`. The persistence engine uses the built-in `node:sqlite` module without experimental flags.
 - **Package Manager**: `npm`.
 
 Clone the repository and install dependencies:

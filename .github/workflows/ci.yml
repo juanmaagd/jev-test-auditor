@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# contents: read is enough for actions/checkout and every step below — this
+# workflow only reads the repository, installs dependencies, and runs
+# typecheck/lint/test/build. It never writes back to the repository or to a
+# pull request. CI is reporting-only in v1: no step here can fail a build for
+# an audit finding, only for a genuine typecheck/lint/test/build failure.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # The full suite takes roughly 5 minutes locally; this leaves generous
+    # headroom for slower CI hardware plus the two known-environmental tests
+    # (benchmark-cli-metrics, oracle-corpus-integration) that can each run up
+    # to their own ~90s internal timeout before failing.
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          # package.json "engines" requires >=22.13.0, but this package's own
+          # tests fail on that exact floor: `DatabaseSync` cannot open a
+          # `file:` URL (used by the read-only --dry-run/jta report cache
+          # lookup) until Node 22.16.0, verified empirically against real
+          # node:sqlite builds (22.13.0: 6 failing tests; 22.16.0: passes).
+          # Floating on the 22.x line avoids pinning CI to a version the
+          # package cannot actually run on; fixing "engines" itself is a
+          # product decision out of this change's authorized scope.
+          node-version: '22.x'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
