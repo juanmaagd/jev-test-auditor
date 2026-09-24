@@ -34,10 +34,17 @@
  *     decision is to key on the version explicitly, so a hypothetical
  *     future bump whose wording happens to stay byte-identical still
  *     invalidates cleanly.
- *   - the classification policy's own numeric `version`: never sent to Jev
- *     at all — the policy runs entirely locally, after the fact, against
- *     the already-returned raw answers, so nothing about it could ever
- *     appear in a `JevRequest`.
+ *
+ * **Deliberately NOT covered: the classification policy.** The policy never
+ * reaches Jev — it runs entirely locally, after the fact, over the stored raw
+ * answers — so a cache hit re-derives its classification under the CURRENT
+ * policy ({@link AuditCacheKeyPort.classifyCached}) instead of reusing the
+ * stored verdict, and a policy change never costs a provider request
+ * (`odd/tasks/policy-free-cache-and-calibration.md`, task T1). The payload
+ * still carries a `policyVersion` field, frozen at
+ * {@link LEGACY_POLICY_VERSION_SLOT}: every audit store written before T1
+ * hashed that exact value, and keeping the payload byte-identical is what
+ * keeps those entries hits instead of re-billing a whole suite once.
  *
  * `hashEvidenceBundle` (`src/adapters/evidence-hash.ts`) is deliberately
  * NOT used here, even though it exists for exactly this phase: its
@@ -51,10 +58,20 @@
  * the judgment.
  */
 import { normalizeTestSource } from '../domain/test-understanding.js';
-import { CLASSIFICATION_POLICY_V2 } from '../domain/classification.js';
+import { CLASSIFICATION_POLICY_V3, classifyEvaluation, type ClassificationPolicy, type ClassificationResult } from '../domain/classification.js';
+import type { JevEvaluation } from '../domain/jev-gateway.js';
 import { buildJevRequest, canonicalizeJevRequest, type JevRequest } from '../domain/jev-request.js';
 import { RUBRIC_V2, type Rubric } from '../domain/rubric.js';
 import type { AuditCacheKeyPort, AuditEvaluationRequest } from '../domain/audit.js';
+
+/**
+ * The `policyVersion` value hashed into every cache key, frozen forever at
+ * the classification policy version every pre-T1 audit store was written
+ * with. It is not a policy pin and must never change: changing it would turn
+ * every existing entry into a miss and re-bill the whole suite. See this
+ * module's doc.
+ */
+export const LEGACY_POLICY_VERSION_SLOT = 2;
 import { sha256 } from './hash.js';
 
 export interface CacheKeyInput {
@@ -62,15 +79,15 @@ export interface CacheKeyInput {
   /** The whole file's raw, un-normalized source text — normalized (and hashed) inside {@link computeCacheKey}, never by the caller. */
   readonly fullTestSource: string;
   readonly rubricVersion: number;
-  readonly policyVersion: number;
 }
 
 /**
  * Computes the cache key: `sha256` over a JSON payload combining
  * `canonicalizeJevRequest(input.request)`, the normalized full test-source
- * hash, `input.rubricVersion`, and `input.policyVersion` — see this
- * module's own doc for exactly which of those four ingredients the
- * canonical request serialization already covers on its own. Deterministic
+ * hash, `input.rubricVersion`, and the frozen {@link LEGACY_POLICY_VERSION_SLOT}
+ * — see this module's own doc for exactly which ingredients the canonical
+ * request serialization already covers on its own, and why the policy slot
+ * is a constant. Deterministic
  * and independent of `rootDir`: nothing here ever sees an absolute path
  * (`canonicalizeJevRequest`'s paths are already repository-relative, per
  * Phase 3 provenance).
@@ -80,27 +97,40 @@ export function computeCacheKey(input: CacheKeyInput): string {
     request: canonicalizeJevRequest(input.request),
     fullTestSourceHash: sha256(normalizeTestSource(input.fullTestSource)),
     rubricVersion: input.rubricVersion,
-    policyVersion: input.policyVersion,
+    policyVersion: LEGACY_POLICY_VERSION_SLOT,
   });
   return sha256(payload);
 }
 
 /**
  * Creates the production {@link AuditCacheKeyPort}, pinned to `rubric` and
- * `policyVersion` (defaulting to the shipped `RUBRIC_V2`/
- * `CLASSIFICATION_POLICY_V2.version` — the exact pair
- * `src/adapters/jev-evaluation-port.ts` wires for real evaluation, so a
- * cache key always describes the same request an actual evaluation attempt
- * would make). No I/O, no state: safe to construct freely.
+ * `policy` (defaulting to the shipped `RUBRIC_V2`/`CLASSIFICATION_POLICY_V3`
+ * — the exact pair `src/adapters/jev-evaluation-port.ts` wires for real
+ * evaluation). `rubric` shapes the key, so a key always describes the same
+ * request an actual evaluation attempt would make; `policy` never touches the
+ * key and only classifies a hit's stored raw answers. No I/O, no state: safe
+ * to construct freely.
  */
 export function createAuditCacheKeyPort(
   rubric: Rubric = RUBRIC_V2,
-  policyVersion: number = CLASSIFICATION_POLICY_V2.version,
+  policy: ClassificationPolicy = CLASSIFICATION_POLICY_V3,
 ): AuditCacheKeyPort {
   return {
     computeKey(request: AuditEvaluationRequest, fullTestSource: string): string {
       const jevRequest = buildJevRequest({ testCase: request.testCase, bundle: request.bundle, rubric });
-      return computeCacheKey({ request: jevRequest, fullTestSource, rubricVersion: rubric.version, policyVersion });
+      return computeCacheKey({ request: jevRequest, fullTestSource, rubricVersion: rubric.version });
+    },
+    classifyCached(request: AuditEvaluationRequest, evaluation: JevEvaluation): ClassificationResult {
+      return classifyEvaluation({
+        testCase: {
+          testCaseId: request.testCase.id,
+          repositoryRelativePath: request.testCase.repositoryRelativePath,
+          name: request.testCase.name,
+        },
+        evaluation,
+        rubric,
+        policy,
+      });
     },
   };
 }

@@ -238,9 +238,16 @@ const MIGRATIONS: readonly Migration[] = [
  * `--dry-run` reader (`openSqliteAuditStoreForLookup`, Phase 5, task P5-5):
  * one module-level constant, not two hand-copied query strings, so the two
  * can never silently drift apart and disagree on what counts as a hit.
+ *
+ * Returns the stored attempt's raw answers, never the stored classification
+ * (`odd/tasks/policy-free-cache-and-calibration.md`, task T1): the caller
+ * re-classifies them under the current policy. The `judgments` join stays so
+ * the hit rule is unchanged — only a completed item that also recorded a
+ * judgment is a hit.
  */
 export const LOOKUP_CACHED_JUDGMENT_SQL = `
-  SELECT j.classification AS classification
+  SELECT a.requested_model, a.responded_model, a.model_matches_pin, a.attempts, a.raw_answers,
+    a.input_tokens, a.output_tokens, a.latency_ms, a.attempt_latencies_ms
   FROM work_items w
   JOIN attempts a ON a.work_item_id = w.id
   JOIN judgments j ON j.work_item_id = w.id
@@ -355,7 +362,10 @@ function loadAttempt(db: DatabaseSync, workItemId: number): JevEvaluation | unde
     SELECT requested_model, responded_model, model_matches_pin, attempts, raw_answers, input_tokens, output_tokens, latency_ms, attempt_latencies_ms
     FROM attempts WHERE work_item_id = ?
   `).get(workItemId) as StoredAttemptRow | undefined;
-  if (row === undefined) return undefined;
+  return row === undefined ? undefined : evaluationFromAttemptRow(row);
+}
+
+function evaluationFromAttemptRow(row: StoredAttemptRow): JevEvaluation {
   return {
     requestedModel: row.requested_model,
     respondedModel: row.responded_model,
@@ -369,6 +379,12 @@ function loadAttempt(db: DatabaseSync, workItemId: number): JevEvaluation | unde
     ...(row.latency_ms === null ? {} : { latencyMs: row.latency_ms }),
     ...(row.attempt_latencies_ms === null ? {} : { attemptLatenciesMs: JSON.parse(row.attempt_latencies_ms) as readonly number[] }),
   };
+}
+
+/** Runs {@link LOOKUP_CACHED_JUDGMENT_SQL} — shared by the live store and the read-only `--dry-run` reader so both return the identical hit. */
+function lookupCachedJudgment(db: DatabaseSync, cacheKey: string): AuditStoreCachedJudgment | undefined {
+  const row = db.prepare(LOOKUP_CACHED_JUDGMENT_SQL).get(cacheKey) as StoredAttemptRow | undefined;
+  return row === undefined ? undefined : { evaluation: evaluationFromAttemptRow(row) };
 }
 
 function loadJudgment(db: DatabaseSync, workItemId: number): ClassificationResult | undefined {
@@ -537,9 +553,7 @@ export async function createSqliteAuditStore(options: CreateSqliteAuditStoreOpti
     },
 
     async lookup(cacheKey: string): Promise<AuditStoreCachedJudgment | undefined> {
-      const row = db.prepare(LOOKUP_CACHED_JUDGMENT_SQL).get(cacheKey) as { readonly classification: string } | undefined;
-      if (row === undefined) return undefined;
-      return { classification: JSON.parse(row.classification) as AuditStoreCachedJudgment['classification'] };
+      return lookupCachedJudgment(db, cacheKey);
     },
 
     async finishRun(runId: string): Promise<void> {
@@ -762,9 +776,7 @@ export async function openSqliteAuditStoreForLookup(
     available: true,
     lookup: {
       async lookup(cacheKey: string): Promise<AuditStoreCachedJudgment | undefined> {
-        const row = db.prepare(LOOKUP_CACHED_JUDGMENT_SQL).get(cacheKey) as { readonly classification: string } | undefined;
-        if (row === undefined) return undefined;
-        return { classification: JSON.parse(row.classification) as AuditStoreCachedJudgment['classification'] };
+        return lookupCachedJudgment(db, cacheKey);
       },
 
       async close(): Promise<void> {

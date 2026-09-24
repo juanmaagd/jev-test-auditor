@@ -60,10 +60,9 @@ function bundle(testCaseId: string, overrides: Partial<Parameters<typeof buildEv
 }
 
 // Deliberately version 7 (not 1, 2, or anything else used elsewhere in this file) — see the
-// P5-1 verifier's warning about symmetric fixture values: `rubricVersion` (7) and `policyVersion`
-// (11, below) must never collide with each other or with a real shipped version number, so a
-// swap between the two in `computeCacheKey`'s payload would turn a test RED instead of passing
-// by accident.
+// P5-1 verifier's warning about symmetric fixture values: `rubricVersion` (7) must never collide
+// with the frozen legacy policy slot (`2`) in `computeCacheKey`'s payload, so a swap between the
+// two would turn a test RED instead of passing by accident.
 const tinyRubric: Rubric = {
   version: 7,
   model: JEV_MODEL_ID,
@@ -84,7 +83,6 @@ function input(overrides: Partial<CacheKeyInput> = {}): CacheKeyInput {
     request: goldenRequest,
     fullTestSource: "test('adds numbers', () => {});\n",
     rubricVersion: 7,
-    policyVersion: 11,
     ...overrides,
   };
 }
@@ -94,20 +92,19 @@ describe('computeCacheKey', () => {
     expect(computeCacheKey(input())).toBe(computeCacheKey(input()));
   });
 
-  // --- Required invalidation tests: each of the five inputs gets its own test ---
+  // --- Required invalidation tests: each input gets its own test ---
 
-  it('invalidates on a rubric version change alone, with the canonical request, full test source, and policy version held byte-identical (kills a "drop rubricVersion from the payload" mutation — canonicalizeJevRequest never carries this numeric field on its own)', () => {
+  it('invalidates on a rubric version change alone, with the canonical request and full test source held byte-identical (kills a "drop rubricVersion from the payload" mutation — canonicalizeJevRequest never carries this numeric field on its own)', () => {
     const before = computeCacheKey(input({ rubricVersion: 7 }));
     const after = computeCacheKey(input({ rubricVersion: 8 }));
 
     expect(before).not.toBe(after);
   });
 
-  it('invalidates on a classification policy version change alone, with every other input held byte-identical (the policy version is never sent to Jev and never appears anywhere in canonicalizeJevRequest\'s output)', () => {
-    const before = computeCacheKey(input({ policyVersion: 11 }));
-    const after = computeCacheKey(input({ policyVersion: 12 }));
+  it('is independent of the classification policy: the policy runs locally over stored raw answers, so the key is frozen at the exact formula every existing store was written with (golden, computed before the policy left the key)', () => {
+    const key = computeCacheKey({ request: goldenRequest, fullTestSource: "test('adds numbers', () => {});\n", rubricVersion: 2 });
 
-    expect(before).not.toBe(after);
+    expect(key).toBe('6e537acbc694e986a828b69336b3768b6f2c2ae1c7aadb9e08e77de91732822e');
   });
 
   it('invalidates on a model id change, through canonicalizeJevRequest\'s own `model` field — already covered by the canonical serialization, no separate hash input needed', () => {
@@ -142,12 +139,12 @@ describe('computeCacheKey', () => {
 
   // --- Documented scenario: the rubric v2 rewrite this task exists to guard against ---
 
-  it('never serves a pre-v2 rubric judgment against post-v2 questions: RUBRIC_V1 and RUBRIC_V2 produce different keys for the identical test case and bundle, from the request bytes alone (rubricVersion and policyVersion held identical across both calls, isolating this from the "rubric version" invalidation test above — this one proves the question-wording difference alone already invalidates, via canonicalizeJevRequest, independent of the explicit numeric field)', () => {
+  it('never serves a pre-v2 rubric judgment against post-v2 questions: RUBRIC_V1 and RUBRIC_V2 produce different keys for the identical test case and bundle, from the request bytes alone (rubricVersion held identical across both calls, isolating this from the "rubric version" invalidation test above — this one proves the question-wording difference alone already invalidates, via canonicalizeJevRequest, independent of the explicit numeric field)', () => {
     const requestV1 = buildJevRequest({ testCase: goldenTestCase, bundle: goldenBundle, rubric: RUBRIC_V1 });
     const requestV2 = buildJevRequest({ testCase: goldenTestCase, bundle: goldenBundle, rubric: RUBRIC_V2 });
 
-    const keyV1 = computeCacheKey({ request: requestV1, fullTestSource: 'x', rubricVersion: 7, policyVersion: 11 });
-    const keyV2 = computeCacheKey({ request: requestV2, fullTestSource: 'x', rubricVersion: 7, policyVersion: 11 });
+    const keyV1 = computeCacheKey({ request: requestV1, fullTestSource: 'x', rubricVersion: 7 });
+    const keyV2 = computeCacheKey({ request: requestV2, fullTestSource: 'x', rubricVersion: 7 });
 
     expect(keyV1).not.toBe(keyV2);
   });

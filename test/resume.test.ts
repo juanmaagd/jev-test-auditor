@@ -164,12 +164,12 @@ function countingStore(): CountingStore {
     async recordWorkItem(runId, outcome): Promise<void> {
       workItemCalls.push({ runId, outcome });
     },
-    async lookup(cacheKey): Promise<{ readonly classification: ClassificationResult } | undefined> {
+    async lookup(cacheKey): Promise<{ readonly evaluation: JevEvaluation } | undefined> {
       lookupCalls.push(cacheKey);
       for (let index = workItemCalls.length - 1; index >= 0; index -= 1) {
         const { outcome } = workItemCalls[index]!;
         if (outcome.state === 'completed' && outcome.cacheKey === cacheKey && outcome.evaluation.modelMatchesPin) {
-          return { classification: outcome.classification };
+          return { evaluation: outcome.evaluation };
         }
       }
       return undefined;

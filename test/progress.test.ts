@@ -191,7 +191,7 @@ function fakeStore(): AuditStorePort & { readonly workItemCalls: FakeStoreCall[]
     async lookup(cacheKey: string) {
       for (let index = workItemCalls.length - 1; index >= 0; index -= 1) {
         const { outcome } = workItemCalls[index]!;
-        if (outcome.state === 'completed' && outcome.cacheKey === cacheKey) return { classification: outcome.classification };
+        if (outcome.state === 'completed' && outcome.cacheKey === cacheKey) return { evaluation: outcome.evaluation };
       }
       return undefined;
     },
@@ -264,7 +264,7 @@ describe('progress reporting (Phase 6, task P6-3)', () => {
     const testCase = baseTestCase('cache-me', 'cache-me.test.ts');
     const discovery: DiscoveryResult = { files: [discovered('cache-me.test.ts')], excluded: [], diagnostics: [] };
     const store = fakeStore();
-    const cacheKeyPort = { computeKey: () => 'fixed-key' };
+    const cacheKeyPort = { computeKey: () => 'fixed-key', classifyCached: (request: AuditEvaluationRequest) => classificationFor(request.testCase.id) };
     const progress = fakeProgress();
     const basePorts = portsFor(discovery, [testCase], immediateEvaluationPort(), { store, cacheKey: cacheKeyPort });
 
@@ -480,7 +480,7 @@ describe('pre-dispatch phase progress (T3, odd/tasks/audit-run-responsiveness.md
   it('reports a checking-cache phase exactly once, right before begin, only when content-addressed caching is actually enabled for this run', async () => {
     const discovery: DiscoveryResult = { files: [discovered('cache-check.test.ts')], excluded: [], diagnostics: [] };
     const store = fakeStore();
-    const cacheKeyPort = { computeKey: () => 'fixed-key-for-phase-test' };
+    const cacheKeyPort = { computeKey: () => 'fixed-key-for-phase-test', classifyCached: (request: AuditEvaluationRequest) => classificationFor(request.testCase.id) };
     const { ports, phaseCalls } = portsWithPhaseTracking(discovery, { store, cacheKey: cacheKeyPort });
 
     await runAudit(configuration, ports);

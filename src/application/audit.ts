@@ -293,7 +293,8 @@ interface EvaluationSchedulerOptions {
  * too — caching without persistence has nothing to look anything up in),
  * each item's cache key is computed first. Unless `cache.fresh` is `true`,
  * `store.lookup` runs before ever calling `evaluationPort.evaluate`: a hit
- * records a `cached` work item and reuses the stored judgment, skipping
+ * records a `cached` work item whose judgment is re-derived locally from the
+ * stored raw answers under the current policy (`cache.port.classifyCached`), skipping
  * the provider call (and the request/token budget gate, and any throttle
  * signal — a cache hit is `'neutral'`) entirely; a miss (or `cache.fresh`)
  * dispatches exactly as before, and a successful dispatch's `completed`
@@ -408,14 +409,18 @@ async function runEvaluation(
         if (!cache.fresh) {
           const hit = await store.lookup(cacheKey);
           if (hit !== undefined) {
+            // Re-derived locally under the CURRENT policy from the stored raw answers, never the
+            // stored verdict (`odd/tasks/policy-free-cache-and-calibration.md`, task T1): a policy
+            // change must never cost a provider request.
+            const classification = cache.port.classifyCached({ testCase: item.testCase, bundle: item.bundle }, hit.evaluation);
             await store.recordWorkItem(runId, {
               state: 'cached',
               identity: identityOf(item.testCase),
               cacheKey,
-              classification: hit.classification,
+              classification,
             });
             progress?.report({ state: 'cached', identity: identityOf(item.testCase), concurrencyLimit: controller.limit });
-            return { result: { kind: 'cached', testCase: item.testCase, classification: hit.classification }, signal: 'neutral' };
+            return { result: { kind: 'cached', testCase: item.testCase, classification }, signal: 'neutral' };
           }
         }
       }

@@ -4,7 +4,7 @@
  * a `JevGatewayPort` (P4-2), and `classifyEvaluation` (P4-3) — into the one
  * seam `runAudit` calls per evaluable test case. Deliberately thin: this
  * file owns no policy of its own, only wiring the shipped `RUBRIC_V2` and
- * `CLASSIFICATION_POLICY_V2` together and letting every error (a malformed
+ * `CLASSIFICATION_POLICY_V3` together and letting every error (a malformed
  * bundle/test-case pair from `buildJevRequest`, or any typed `JevGatewayError`
  * from the gateway) propagate untouched — `runAudit` is what turns a
  * rejection into an isolated `evaluation-failed` diagnostic (see
@@ -22,10 +22,14 @@
  * `CLASSIFICATION_POLICY_V2.rubricVersion` to match): a rubric this adapter
  * never constructs is not a delivered fix either, and `classifyEvaluation`
  * fails closed (`RangeError`) on any rubric/policy version mismatch, so this
- * import and `CLASSIFICATION_POLICY_V2`'s pin must move together.
+ * import and the policy's `rubricVersion` pin must move together.
+ *
+ * Wired to `CLASSIFICATION_POLICY_V3` since `odd/tasks/policy-free-cache-and-calibration.md`
+ * task T3 (the boundary-mass gate with an asymmetric threshold: acceptable
+ * side 0.575, deficient side 0.65; rubric pin 2).
  */
 import type { AuditEvaluationOutcome, AuditEvaluationPort, AuditEvaluationRequest } from '../domain/audit.js';
-import { classifyEvaluation, CLASSIFICATION_POLICY_V2 } from '../domain/classification.js';
+import { classifyEvaluation, CLASSIFICATION_POLICY_V3 } from '../domain/classification.js';
 import type { JevGatewayPort } from '../domain/jev-gateway.js';
 import { buildJevRequest } from '../domain/jev-request.js';
 import { RUBRIC_V2 } from '../domain/rubric.js';
@@ -51,7 +55,7 @@ export function createJevEvaluationPort(gateway: JevGatewayPort): AuditEvaluatio
         },
         evaluation,
         rubric: RUBRIC_V2,
-        policy: CLASSIFICATION_POLICY_V2,
+        policy: CLASSIFICATION_POLICY_V3,
       });
       return { evaluation, classification };
     },

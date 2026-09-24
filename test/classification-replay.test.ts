@@ -20,6 +20,7 @@ import { describe, expect, it } from 'vitest';
 import {
   CLASSIFICATION_POLICY_V1,
   CLASSIFICATION_POLICY_V2,
+  CLASSIFICATION_POLICY_V3,
   classifyEvaluation,
   type OverallClassificationStatus,
 } from '../src/domain/classification.js';
@@ -191,6 +192,16 @@ describe('classification replay — discrimination fixture (2026-09-20, recorded
     expect(tally('v1')).toEqual({ misleading: 6, weak: 2, 'needs-review': 3, healthy: 0 });
     // V2: same 6 misleading + 2 weak for the 8 bad tests; all 3 good tests move from needs-review to healthy.
     expect(tally('v2')).toEqual({ misleading: 6, weak: 2, 'needs-review': 0, healthy: 3 });
+  });
+
+  it('replays the shipped asymmetric V3 over the same recording with the same verdict per test as V2 — no bad test absolved, all good controls healthy (every dimension here is outside the moved acceptable band)', () => {
+    const v3OnV1Recording = { ...CLASSIFICATION_POLICY_V3, rubricVersion: RUBRIC_V1.version };
+    for (const row of EXPECTED_TABLE) {
+      const recorded = FIXTURE.evaluations.find((entry) => entry.name === row.name);
+      if (recorded === undefined) throw new Error(`Fixture is missing "${row.name}"`);
+      const result = classifyEvaluation({ testCase: { testCaseId: recorded.testCaseId as TestCaseId, repositoryRelativePath: 'cart.test.ts', name: recorded.name }, evaluation: toEvaluation(recorded), rubric: RUBRIC_V1, policy: v3OnV1Recording });
+      expect(result.status, row.name).toBe(row.v2);
+    }
   });
 
   it('exposes per-level probabilities and the three derived masses on every V2-judged dimension, for audit', () => {

@@ -13,8 +13,9 @@
  * `classification.rubricVersion`, and `classification.policyVersion`. All three of those already
  * exist and mean different things — conflating them would make the report lie about what changed.
  * `versions` carries the latter three explicitly (as this build's currently active pins; an
- * individual classification's own `rubricVersion`/`policyVersion` may differ for an older cached
- * judgment reused from a prior version — see `ClassificationResult`'s own doc), clearly
+ * individual classification's own `rubricVersion`/`policyVersion` may still differ for a judgment
+ * `--resume` carries over from a run interrupted before a version bump; a cache hit is re-classified
+ * under the active policy — see `ClassificationResult`'s own doc), clearly
  * distinguished from `reportVersion` at the top level.
  *
  * **Stable key order.** Every object here is built as one object literal with a fixed key
@@ -53,7 +54,7 @@ export interface AuditReportContext {
   readonly modelRequested: string;
   /** The currently active rubric's own `version` (`RUBRIC_V2.version`) — the rubric THIS BUILD evaluates with, not necessarily every classification's own `rubricVersion` (a cached judgment can be older). */
   readonly rubricVersion: number;
-  /** The currently active classification policy's own `version` (`CLASSIFICATION_POLICY_V2.version`) — same caveat as `rubricVersion` above. */
+  /** The currently active classification policy's own `version` (`CLASSIFICATION_POLICY_V3.version`) — same caveat as `rubricVersion` above. */
   readonly policyVersion: number;
   /** This build's persistence schema version (`AUDIT_STORE_SCHEMA_VERSION`, `src/adapters/sqlite-audit-store.ts`) — a compile-time constant naming which migration generation this build's persistence layer targets, present regardless of whether a store actually opened for this particular run. */
   readonly storeSchemaVersion: number;
