@@ -160,6 +160,15 @@ function renderHeader(report: AuditReport): string {
     '<p class="disclosure">This tool never executed the audited repository’s code. Classification thresholds are provisional and uncalibrated — see README.md; nothing here is a claim of validated accuracy.</p>',
     '</div>',
     `<div class="sphere ${sphereKind(report)}" aria-hidden="true"><span class="sphere-core"></span></div>`,
+    '</header>',
+  ].join('\n');
+}
+
+/** Run metadata (root, run id, versions, models) — provenance, not findings, so it closes the page instead of opening it. */
+function renderRunDetailsSection(report: AuditReport): string {
+  return [
+    '<section id="jev-run-details">',
+    '<h2>Run details</h2>',
     '<div class="meta">',
     renderMetaRow('Root', escapeHtml(report.rootDir)),
     ...(report.runId === undefined ? [] : [renderMetaRow('Run id', escapeHtml(report.runId))]),
@@ -168,7 +177,7 @@ function renderHeader(report: AuditReport): string {
     renderMetaRow('Model responded', report.totals.respondedModel === undefined ? '—' : escapeHtml(report.totals.respondedModel)),
     renderMetaRow('Store schema / rubric / policy versions', `${report.versions.storeSchema} / ${report.versions.rubric} / ${report.versions.policy}`),
     '</div>',
-    '</header>',
+    '</section>',
   ].join('\n');
 }
 
@@ -568,9 +577,7 @@ p { margin: 0 0 16px; }
 .mast {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 200px;
-  grid-template-areas:
-    "copy sphere"
-    "meta meta";
+  grid-template-areas: "copy sphere";
   column-gap: 48px;
   row-gap: 28px;
   align-items: center;
@@ -678,7 +685,6 @@ p { margin: 0 0 16px; }
 .status-healthy::before { background: #ebe8e4; box-shadow: inset 0 0 0 1px #d9d3cc; }
 .badge-dormant::before { background: var(--stone); box-shadow: none; }
 .meta {
-  grid-area: meta;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 20px 32px;
@@ -960,8 +966,7 @@ footer p { margin: 0; max-width: 62ch; }
     grid-template-columns: 1fr;
     grid-template-areas:
       "copy"
-      "sphere"
-      "meta";
+      "sphere";
     row-gap: 24px;
   }
   .sphere { justify-self: start; width: 140px; height: 140px; }
@@ -1004,6 +1009,7 @@ export function renderAuditReportHtml(report: AuditReport): string {
     renderHeatmapSection(overview),
     renderTopFilesSection(overview),
     renderDiagnosticsSection(overview),
+    renderRunDetailsSection(report),
     renderFooter(report),
     '</main>',
     '</body>',
