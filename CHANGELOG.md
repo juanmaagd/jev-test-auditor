@@ -30,6 +30,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- The declared Node.js floor is now `>=22.16.0` (was `>=22.13.0`). On 22.13.0, `node:sqlite` cannot open the `file:` URI the read-only cache lookup (`--dry-run`) and `jta report` rely on; verified against real Node builds. `package.json` `engines`, `install.sh`, README, and CONTRIBUTING agree, and `package-lock.json` is back in sync with `package.json`.
 - `.jta/`, the persisted-report folder, is now excluded from discovery by default, so a repeat `--evaluate` run no longer discovers its own prior output as an ordinary excluded file.
 - Two documentation wording slips: the read-only guarantee's WAL under-count case, and a mislabeled `wal_autocheckpoint` claim.
 

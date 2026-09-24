@@ -30,7 +30,7 @@
     "test:watch": "vitest"
   },
   "engines": {
-    "node": ">=22.13.0"
+    "node": ">=22.16.0"
   },
   "devDependencies": {
     "@eslint/js": "9.39.5",

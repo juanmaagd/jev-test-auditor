@@ -4,7 +4,7 @@
 
 ## Installation
 
-Requires Node.js **>= 22.13.0** (`node:sqlite` persistence without experimental flags).
+Requires Node.js **>= 22.16.0** (`node:sqlite` persistence without experimental flags).
 
 ### Automated install via curl
 
