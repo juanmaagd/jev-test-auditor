@@ -56,7 +56,7 @@ import {
   type AuditResult,
   type AuditStorePort,
 } from '../domain/audit.js';
-import { CLASSIFICATION_POLICY_V2 } from '../domain/classification.js';
+import { CLASSIFICATION_POLICY_V3 } from '../domain/classification.js';
 import type { ConfigurationOverrides } from '../domain/config.js';
 import type { ExcludedTestFile } from '../domain/discovery.js';
 import { buildAuditReport, type AuditReport, type AuditReportContext } from '../domain/report.js';
@@ -502,14 +502,14 @@ const ZERO_EVALUATION_TOTALS = EMPTY_AUDIT_EVALUATION_TOTALS;
 /**
  * The canonical JSON report's build-time context (Phase 6, task P6-2): the model/rubric/policy
  * this build actively evaluates with (matching `src/adapters/jev-evaluation-port.ts`'s own
- * `RUBRIC_V2`/`CLASSIFICATION_POLICY_V2` wiring) and this build's persistence schema version —
+ * `RUBRIC_V2`/`CLASSIFICATION_POLICY_V3` wiring) and this build's persistence schema version —
  * see `AuditReportContext`'s own doc (`src/domain/report.ts`) for why these are compile-time
  * constants passed in, never derived from `AuditResult` itself.
  */
 const REPORT_CONTEXT: AuditReportContext = {
   modelRequested: JEV_MODEL_ID,
   rubricVersion: RUBRIC_V2.version,
-  policyVersion: CLASSIFICATION_POLICY_V2.version,
+  policyVersion: CLASSIFICATION_POLICY_V3.version,
   storeSchemaVersion: AUDIT_STORE_SCHEMA_VERSION,
 };
 

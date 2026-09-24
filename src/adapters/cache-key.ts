@@ -58,7 +58,7 @@
  * the judgment.
  */
 import { normalizeTestSource } from '../domain/test-understanding.js';
-import { CLASSIFICATION_POLICY_V2, classifyEvaluation, type ClassificationPolicy, type ClassificationResult } from '../domain/classification.js';
+import { CLASSIFICATION_POLICY_V3, classifyEvaluation, type ClassificationPolicy, type ClassificationResult } from '../domain/classification.js';
 import type { JevEvaluation } from '../domain/jev-gateway.js';
 import { buildJevRequest, canonicalizeJevRequest, type JevRequest } from '../domain/jev-request.js';
 import { RUBRIC_V2, type Rubric } from '../domain/rubric.js';
@@ -104,7 +104,7 @@ export function computeCacheKey(input: CacheKeyInput): string {
 
 /**
  * Creates the production {@link AuditCacheKeyPort}, pinned to `rubric` and
- * `policy` (defaulting to the shipped `RUBRIC_V2`/`CLASSIFICATION_POLICY_V2`
+ * `policy` (defaulting to the shipped `RUBRIC_V2`/`CLASSIFICATION_POLICY_V3`
  * — the exact pair `src/adapters/jev-evaluation-port.ts` wires for real
  * evaluation). `rubric` shapes the key, so a key always describes the same
  * request an actual evaluation attempt would make; `policy` never touches the
@@ -113,7 +113,7 @@ export function computeCacheKey(input: CacheKeyInput): string {
  */
 export function createAuditCacheKeyPort(
   rubric: Rubric = RUBRIC_V2,
-  policy: ClassificationPolicy = CLASSIFICATION_POLICY_V2,
+  policy: ClassificationPolicy = CLASSIFICATION_POLICY_V3,
 ): AuditCacheKeyPort {
   return {
     computeKey(request: AuditEvaluationRequest, fullTestSource: string): string {

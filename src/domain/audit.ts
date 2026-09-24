@@ -128,7 +128,7 @@ export interface AuditEvaluationOutcome {
  * and classifies the result for exactly one evaluable test case. Production
  * is `src/adapters/jev-evaluation-port.ts`, composing `buildJevRequest`, a
  * `JevGatewayPort`, and `classifyEvaluation` over the shipped
- * `RUBRIC_V2`/`CLASSIFICATION_POLICY_V2`.
+ * `RUBRIC_V2`/`CLASSIFICATION_POLICY_V3`.
  *
  * **This port is the entire opt-in gate.** `runAudit` (see {@link AuditPorts.evaluation})
  * evaluates every evaluable test case if and only if this port is present on

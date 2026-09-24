@@ -298,13 +298,27 @@ As of `odd/tasks/classification-calibration.md` task C-1, a dimension's level is
 - `acceptableMass` — the probability on `acceptable` + `strong`.
 - `criticalMass` — the probability on `misleading` alone.
 
-A dimension is deficient when `deficientMass` clears `sideMin` (0.65) and acceptable when `acceptableMass` does; a deficient dimension is reported `misleading` only when `criticalMass` also clears `criticalMin` (0.5), otherwise `weak`. `needs-review` at the dimension level now means the mass genuinely straddles that one boundary — not that the answer merely leaned toward two adjacent levels on the same side of it, which is what the earlier `confidence`-based gate mistook for uncertainty.
+A dimension is deficient when `deficientMass` clears `deficientSideMin` (0.65) and acceptable when `acceptableMass` clears `acceptableSideMin` (0.575); a deficient dimension is reported `misleading` only when `criticalMass` also clears `criticalMin` (0.5), otherwise `weak`. `needs-review` at the dimension level now means the mass genuinely straddles that one boundary — not that the answer merely leaned toward two adjacent levels on the same side of it, which is what the earlier `confidence`-based gate mistook for uncertainty.
 
 `score` and `confidence` are still reported on every dimension for transparency and audit — the full `probabilities`/`deficientMass`/`acceptableMass`/`criticalMass` breakdown appears in `--evaluate --json` — but neither is consulted to decide a level any more. That means a dimension can show a `score` under 2 (nominally "weak" by the old cut points) and still be reported `acceptable`: on the recorded pr-hero run below, one dimension scored 1.97 with a distribution of `{weak: 0.06, acceptable: 0.91, strong: 0.03}` — 94% of the mass on acceptable-or-better — and was correctly reported `acceptable`. A sub-2 score on a `healthy` test is not a bug; it means the model leaned decisively toward one side even though its weighted mean happened to sit near the old boundary.
 
-This is `CLASSIFICATION_POLICY_V2`, paired with `RUBRIC_V2` (task C-2, which rewrote the `determinism-isolation` and `falsifiability` applicability questions so they ask whether the shown evidence supports a judgment, not whether every possible influence is visible — the two dimensions were excluding themselves on tests Jev could actually judge). Both are what the shipped `--evaluate` path uses; `CLASSIFICATION_POLICY_V1` and `RUBRIC_V1` remain exported only to replay real provider output recorded before this change.
+This is `CLASSIFICATION_POLICY_V3` (see "Asymmetric side thresholds (policy v3)" below), paired with `RUBRIC_V2` (task C-2, which rewrote the `determinism-isolation` and `falsifiability` applicability questions so they ask whether the shown evidence supports a judgment, not whether every possible influence is visible — the two dimensions were excluding themselves on tests Jev could actually judge). Both are what the shipped `--evaluate` path uses; `CLASSIFICATION_POLICY_V1`, `CLASSIFICATION_POLICY_V2` (the same gate with one symmetric `sideMin` of 0.65), and `RUBRIC_V1` remain exported only to replay real provider output recorded before these changes. Because the policy is not part of the cache key, a policy change re-classifies cached answers locally, with no provider request (see "Content-addressed caching").
 
-**Thresholds remain provisional and versioned, not calibrated claims.** `applicabilityMin` (0.5), `sideMin` (0.65), and `criticalMin` (0.5) were picked mid-gap from ranges observed in one recorded run, not fit to a validated outcome; Phase 7 ("Benchmarks and calibration") is what calibrates them, and any recalibration ships as a new policy version, never a silent edit.
+**Thresholds remain provisional and versioned, not calibrated claims.** `applicabilityMin` (0.5), `deficientSideMin` (0.65), and `criticalMin` (0.5) were picked mid-gap from ranges observed in one recorded run; `acceptableSideMin` (0.575) rests on the blind review below. None is fit to an executable oracle; any recalibration ships as a new policy version, never a silent edit.
+
+### Asymmetric side thresholds (policy v3, 2026-09-24)
+
+Under policy v2, every `needs-review` dimension on three real suites was a `boundary-straddle` (mass between 0.35 and 0.65 on each side). Lowering both sides to 0.575 was tested by blind review first: independent read-only reviewers (an LLM, never shown Jev's output) judged 40 dimensions that would flip. For the 20 that would flip to acceptable (`acceptableMass` in [0.575, 0.65)) the reviewer agreed 17 times (85%); for the 20 that would flip to deficient (`deficientMass` in [0.575, 0.65)) it agreed only 4 times (20%). So v3 lowers only the acceptable side. The oracle-labelled benchmark samples (`test/fixtures/recorded/benchmark-oracle-samples-2026-09-21.json`) cannot discriminate here: every one is decisive at 0.85 or more.
+
+Projected from each suite's existing report, replayed locally with no provider call:
+
+| Suite (tests) | needs-review v2 → v3 | weak + misleading v2 → v3 |
+| --- | --- | --- |
+| supermarket-pro (7,278) | 28.6% → 19.9% | 23.3% → 23.3% |
+| pr-hero (3,628) | 15.2% → 10.2% | 9.9% → 9.9% |
+| jev-test-review (1,242) | 14.5% → 10.0% | 9.7% → 9.7% |
+
+Every moved test goes from `needs-review` to `healthy`; none becomes more severe. The 85% agreement is n = 20 against an LLM reviewer, not ground truth.
 
 ### Measured results (2026-09-20)
 

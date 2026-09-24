@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createJevEvaluationPort } from '../src/adapters/jev-evaluation-port.js';
-import { CLASSIFICATION_POLICY_V2, classifyEvaluation } from '../src/domain/classification.js';
+import { CLASSIFICATION_POLICY_V3, classifyEvaluation } from '../src/domain/classification.js';
 import type { AuditEvaluationRequest } from '../src/domain/audit.js';
 import { buildEvidenceBundle, DEFAULT_EVIDENCE_BUDGET, type EvidenceBundle } from '../src/domain/evidence.js';
 import type { JevAnswer, JevEvaluation, JevGatewayPort } from '../src/domain/jev-gateway.js';
@@ -78,7 +78,7 @@ function fixedAnswersGateway(recordedRequests: JevRequest[]): JevGatewayPort {
 }
 
 describe('createJevEvaluationPort', () => {
-  it('builds the request from RUBRIC_V2, calls the gateway, and classifies the result with CLASSIFICATION_POLICY_V2 — matching classifyEvaluation applied by hand to the same gateway response', async () => {
+  it('builds the request from RUBRIC_V2, calls the gateway, and classifies the result with the shipped CLASSIFICATION_POLICY_V3 — matching classifyEvaluation applied by hand to the same gateway response', async () => {
     const recordedRequests: JevRequest[] = [];
     const gateway = fixedAnswersGateway(recordedRequests);
     const port = createJevEvaluationPort(gateway);
@@ -95,7 +95,7 @@ describe('createJevEvaluationPort', () => {
       testCase: { testCaseId: request.testCase.id, repositoryRelativePath: request.testCase.repositoryRelativePath, name: request.testCase.name },
       evaluation: expectedEvaluation,
       rubric: RUBRIC_V2,
-      policy: CLASSIFICATION_POLICY_V2,
+      policy: CLASSIFICATION_POLICY_V3,
     });
     // Phase 5, task P5-1: `evaluate` now returns both the raw `JevEvaluation` (so a future policy
     // version can recompute the judgment without another Jev call) and the derived classification.
@@ -105,11 +105,11 @@ describe('createJevEvaluationPort', () => {
     expect(result.classification.dimensions).toHaveLength(7);
     expect(result.classification.dimensions.every((dimension) => dimension.status === 'not-applicable')).toBe(true);
     // Asserts the shipped path's policy version directly (not only via the toEqual above), so a
-    // regression that reverts src/adapters/jev-evaluation-port.ts to CLASSIFICATION_POLICY_V1
+    // regression that reverts src/adapters/jev-evaluation-port.ts to an older policy (V1 or V2)
     // fails here even if some future change made the two policies coincidentally agree elsewhere.
-    expect(result.classification.policyVersion).toBe(CLASSIFICATION_POLICY_V2.version);
+    expect(result.classification.policyVersion).toBe(3);
     // Asserts the shipped path's rubric version directly (task C-2): a regression that reverts
-    // src/adapters/jev-evaluation-port.ts to RUBRIC_V1 while CLASSIFICATION_POLICY_V2.rubricVersion
+    // src/adapters/jev-evaluation-port.ts to RUBRIC_V1 while CLASSIFICATION_POLICY_V3.rubricVersion
     // stays pinned to 2 would throw RangeError from classifyEvaluation's own version guard before
     // this assertion is even reached, which is itself the guard this test exists to exercise.
     expect(result.classification.rubricVersion).toBe(RUBRIC_V2.version);

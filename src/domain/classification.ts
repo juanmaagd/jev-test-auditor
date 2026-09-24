@@ -31,6 +31,12 @@
  * `CLASSIFICATION_POLICY_V1` and its code path (`judgeDimensionV1`) are kept
  * — exported, still validated, still covered by their original tests — as a
  * historical artifact; nothing in this codebase constructs one anymore.
+ *
+ * `CLASSIFICATION_POLICY_V3` (`odd/tasks/policy-free-cache-and-calibration.md`
+ * task T3) keeps V2's boundary-mass decision but gives each side of the
+ * boundary its own threshold ({@link ClassificationPolicyV3}); it is the
+ * shipped policy. `CLASSIFICATION_POLICY_V2` is kept, like V1, as a historical
+ * artifact for replaying recordings.
  */
 import type { JevAnswer, JevEvaluation, JevUsage } from './jev-gateway.js';
 import { validateRubric, type Rubric, type RubricDimensionId } from './rubric.js';
@@ -168,11 +174,38 @@ export interface ClassificationPolicyV2 {
  * not by `version` number, since `version` is deliberately generic (so a
  * deliberately-invalid test policy can still set it to `0` or `1.5`).
  */
-export type ClassificationPolicy = ClassificationPolicyV1 | ClassificationPolicyV2;
+export type ClassificationPolicy = ClassificationPolicyV1 | ClassificationPolicyV2 | ClassificationPolicyV3;
+
+/**
+ * The boundary-mass policy with a separate threshold per side
+ * (`odd/tasks/policy-free-cache-and-calibration.md`, task T3). Identical to
+ * {@link ClassificationPolicyV2} except that `sideMin` is split: a dimension is
+ * `acceptable` when `P(level >= acceptable) >= acceptableSideMin` and
+ * `deficient` when `P(level <= weak) >= deficientSideMin` (`>=`, not `>`).
+ * Both must be strictly greater than `0.5` (enforced by
+ * {@link validateClassificationPolicy}): the two masses are complementary, so
+ * two thresholds above one half can never both be cleared.
+ */
+export interface ClassificationPolicyV3 extends Omit<ClassificationPolicyV2, 'sideMin'> {
+  readonly acceptableSideMin: number;
+  readonly deficientSideMin: number;
+}
 
 /** Structural discriminator: a {@link ClassificationPolicyV2} is the only variant with `sideMin`. */
 export function isClassificationPolicyV2(policy: ClassificationPolicy): policy is ClassificationPolicyV2 {
   return 'sideMin' in policy;
+}
+
+/** Structural discriminator: a {@link ClassificationPolicyV3} is the only variant with `acceptableSideMin`. */
+export function isClassificationPolicyV3(policy: ClassificationPolicy): policy is ClassificationPolicyV3 {
+  return 'acceptableSideMin' in policy;
+}
+
+/** The deficient/acceptable thresholds a boundary-mass policy (V2 or V3) applies. */
+function sideThresholds(policy: ClassificationPolicyV2 | ClassificationPolicyV3): { readonly deficient: number; readonly acceptable: number } {
+  return isClassificationPolicyV3(policy)
+    ? { deficient: policy.deficientSideMin, acceptable: policy.acceptableSideMin }
+    : { deficient: policy.sideMin, acceptable: policy.sideMin };
 }
 
 /**
@@ -191,7 +224,8 @@ export const CLASSIFICATION_POLICY_V1: ClassificationPolicyV1 = {
 };
 
 /**
- * The shipped, provisional task-C-1 policy (`odd/tasks/classification-calibration.md`).
+ * The task-C-1 policy (`odd/tasks/classification-calibration.md`), shipped until
+ * {@link CLASSIFICATION_POLICY_V3} replaced it; kept as a historical artifact.
  * `sideMin` and `criticalMin` are chosen from the gaps actually observed in
  * the 2026-09-20 discrimination-fixture recording
  * (`test/fixtures/recorded/discrimination-raw-2026-09-20.json`, replayed by
@@ -243,6 +277,50 @@ export const CLASSIFICATION_POLICY_V2: ClassificationPolicyV2 = {
   criticalMin: 0.5,
   levelCutPoints: [1, 2, 3],
   criticalLevel: 'misleading',
+};
+
+/**
+ * The shipped, still provisional policy (`odd/tasks/policy-free-cache-and-calibration.md`,
+ * task T3, approved by the user on 2026-09-24): {@link CLASSIFICATION_POLICY_V2}'s
+ * boundary-mass decision with an asymmetric gate — the acceptable side lowered
+ * from `0.65` to `0.575`, the deficient side left at `0.65`. Every other
+ * field is unchanged.
+ *
+ * Evidence, stated honestly:
+ *
+ * - Blind review, 2026-09-24: 40 dimensions whose decision flips between a
+ *   symmetric `0.65` and `0.575`, drawn from the supermarket-pro, pr-hero,
+ *   and jev-test-review reports, judged by independent read-only reviewers
+ *   who never saw Jev's output. Dimensions that would flip to acceptable
+ *   (acceptableMass in `[0.575, 0.65)`): the reviewer agreed 17 of 20 (85%).
+ *   Dimensions that would flip to deficient (deficientMass in `[0.575,
+ *   0.65)`): the reviewer agreed 4 of 20 (20%). Hence only the acceptable
+ *   side moves. The reviewers are an LLM, not an executable oracle, and
+ *   `n = 20` per side is small.
+ * - Replay of already-recorded answers (task T2, no new provider call):
+ *   lowering both sides to `0.575` projected needs-review falling from 28.6%
+ *   to 14.7% on supermarket-pro, 15.2% to 7.2% on pr-hero, and 14.5% to 7.3%
+ *   on jev-test-review. This asymmetric policy decides only the acceptable
+ *   half of that band, so the same replay projects 28.6% -> 19.9%, 15.2% ->
+ *   10.2%, and 14.5% -> 10.0%, with the weak + misleading share unchanged
+ *   (23.3%, 9.9%, 9.7%): no test becomes more severe.
+ * - The oracle-labelled benchmark samples (55 samples of 11 proven cases)
+ *   are uninformative about the band: every designated dimension carries at
+ *   least 0.85 mass on one side, so they agree with any threshold from 0.50
+ *   to 0.70.
+ *
+ * Accuracy inside the band remains unmeasured by any executable oracle; both
+ * thresholds are provisional, not calibrated claims.
+ */
+export const CLASSIFICATION_POLICY_V3: ClassificationPolicyV3 = {
+  version: 3,
+  rubricVersion: CLASSIFICATION_POLICY_V2.rubricVersion,
+  applicabilityMin: CLASSIFICATION_POLICY_V2.applicabilityMin,
+  acceptableSideMin: 0.575,
+  deficientSideMin: 0.65,
+  criticalMin: CLASSIFICATION_POLICY_V2.criticalMin,
+  levelCutPoints: CLASSIFICATION_POLICY_V2.levelCutPoints,
+  criticalLevel: CLASSIFICATION_POLICY_V2.criticalLevel,
 };
 
 /**
@@ -303,6 +381,21 @@ export function validateClassificationPolicy(policy: ClassificationPolicy): void
   validateLevelCutPoints(policy.levelCutPoints);
   if (!CLASSIFICATION_LEVEL_SET.has(policy.criticalLevel)) {
     throw new RangeError(`Classification policy criticalLevel must be one of ${JSON.stringify(CLASSIFICATION_LEVELS)}: got "${policy.criticalLevel}"`);
+  }
+
+  if (isClassificationPolicyV3(policy)) {
+    for (const [name, value] of [['acceptableSideMin', policy.acceptableSideMin], ['deficientSideMin', policy.deficientSideMin]] as const) {
+      if (!(value > 0.5) || value > 1) {
+        throw new RangeError(
+          `Classification policy ${name} must be greater than 0.5 (so deficient and acceptable masses cannot both `
+          + `clear their thresholds) and at most 1: ${value}`,
+        );
+      }
+    }
+    if (!isUnitProbability(policy.criticalMin)) {
+      throw new RangeError(`Classification policy criticalMin must be a finite number within [0, 1]: ${policy.criticalMin}`);
+    }
+    return;
   }
 
   if (isClassificationPolicyV2(policy)) {
@@ -631,7 +724,8 @@ function judgeDimensionV1(
  * - `deficientMass = P(misleading) + P(weak)`, `acceptableMass =
  *   P(acceptable) + P(strong)`, `criticalMass = P(misleading)`. The
  *   dimension is `deficient` when `deficientMass >= policy.sideMin`,
- *   `acceptable` when `acceptableMass >= policy.sideMin`; `sideMin > 0.5`
+ *   `acceptable` when `acceptableMass >= policy.sideMin` (a V3 policy uses
+ *   `deficientSideMin`/`acceptableSideMin` respectively); `sideMin > 0.5`
  *   (enforced by {@link validateClassificationPolicy}) makes these mutually
  *   exclusive. Neither clearing `sideMin` needs review (`boundary-straddle`)
  *   — the mass sits across the boundary the verdict actually depends on.
@@ -647,8 +741,9 @@ function judgeDimensionV2(
   dimensionId: RubricDimensionId,
   dimensionLabel: string,
   answers: Readonly<Record<string, JevAnswer>>,
-  policy: ClassificationPolicyV2,
+  policy: ClassificationPolicyV2 | ClassificationPolicyV3,
 ): DimensionJudgment {
+  const thresholds = sideThresholds(policy);
   const applicabilityAnswer = answers[`${dimensionId}.applicable`];
   const qualityAnswer = answers[`${dimensionId}.quality`];
   const NO_MASS_FIELDS = { probabilities: undefined, deficientMass: undefined, acceptableMass: undefined, criticalMass: undefined } as const;
@@ -722,7 +817,7 @@ function judgeDimensionV2(
   const criticalMass = p0;
   const canonicalProbabilities = { '0': p0, '1': p1, '2': p2, '3': p3 } as const;
 
-  if (clearsThreshold(deficientMass, policy.sideMin)) {
+  if (clearsThreshold(deficientMass, thresholds.deficient)) {
     return {
       dimensionId,
       dimensionLabel,
@@ -740,7 +835,7 @@ function judgeDimensionV2(
     };
   }
 
-  if (clearsThreshold(acceptableMass, policy.sideMin)) {
+  if (clearsThreshold(acceptableMass, thresholds.acceptable)) {
     const scoreLevel = levelForScore(score, policy.levelCutPoints);
     return {
       dimensionId,
@@ -776,14 +871,14 @@ function judgeDimensionV2(
   };
 }
 
-/** Dispatches to {@link judgeDimensionV1} or {@link judgeDimensionV2} by which shape `policy` structurally is (see {@link isClassificationPolicyV2}). */
+/** Dispatches to {@link judgeDimensionV1} or {@link judgeDimensionV2} (which serves V2 and V3) by which shape `policy` structurally is. */
 function judgeDimension(
   dimensionId: RubricDimensionId,
   dimensionLabel: string,
   answers: Readonly<Record<string, JevAnswer>>,
   policy: ClassificationPolicy,
 ): DimensionJudgment {
-  return isClassificationPolicyV2(policy)
+  return isClassificationPolicyV2(policy) || isClassificationPolicyV3(policy)
     ? judgeDimensionV2(dimensionId, dimensionLabel, answers, policy)
     : judgeDimensionV1(dimensionId, dimensionLabel, answers, policy);
 }

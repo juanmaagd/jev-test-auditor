@@ -54,7 +54,7 @@ export interface AuditReportContext {
   readonly modelRequested: string;
   /** The currently active rubric's own `version` (`RUBRIC_V2.version`) — the rubric THIS BUILD evaluates with, not necessarily every classification's own `rubricVersion` (a cached judgment can be older). */
   readonly rubricVersion: number;
-  /** The currently active classification policy's own `version` (`CLASSIFICATION_POLICY_V2.version`) — same caveat as `rubricVersion` above. */
+  /** The currently active classification policy's own `version` (`CLASSIFICATION_POLICY_V3.version`) — same caveat as `rubricVersion` above. */
   readonly policyVersion: number;
   /** This build's persistence schema version (`AUDIT_STORE_SCHEMA_VERSION`, `src/adapters/sqlite-audit-store.ts`) — a compile-time constant naming which migration generation this build's persistence layer targets, present regardless of whether a store actually opened for this particular run. */
   readonly storeSchemaVersion: number;

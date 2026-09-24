@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   CLASSIFICATION_POLICY_V1,
   CLASSIFICATION_POLICY_V2,
+  CLASSIFICATION_POLICY_V3,
   classifyEvaluation,
   validateClassificationPolicy,
   type ClassificationPolicy,
@@ -774,6 +775,59 @@ describe('validateClassificationPolicy — CLASSIFICATION_POLICY_V2 shape', () =
     expect(() => validateClassificationPolicy({ ...validV2, applicabilityMin: 1.5 })).toThrow(RangeError);
     expect(() => validateClassificationPolicy({ ...validV2, levelCutPoints: [2, 1, 3] })).toThrow(RangeError);
     expect(() => validateClassificationPolicy({ ...validV2, criticalLevel: 'terrible' as ClassificationPolicyV2['criticalLevel'] })).toThrow(RangeError);
+  });
+});
+
+// --- CLASSIFICATION_POLICY_V3 (asymmetric boundary-mass gate) ---------------
+
+describe('CLASSIFICATION_POLICY_V3', () => {
+  it('is versioned 3, pinned to RUBRIC_V2, and validates', () => {
+    expect(CLASSIFICATION_POLICY_V3.version).toBe(3);
+    expect(CLASSIFICATION_POLICY_V3.rubricVersion).toBe(RUBRIC_V2.version);
+    expect(() => validateClassificationPolicy(CLASSIFICATION_POLICY_V3)).not.toThrow();
+  });
+
+  it('lowers only the acceptable side to 0.575 and keeps the deficient side and criticalMin at V2\'s values', () => {
+    expect(CLASSIFICATION_POLICY_V3).toMatchObject({ acceptableSideMin: 0.575, deficientSideMin: 0.65, criticalMin: 0.5, applicabilityMin: 0.5 });
+    expect(CLASSIFICATION_POLICY_V3.deficientSideMin).toBe(CLASSIFICATION_POLICY_V2.sideMin);
+  });
+
+  it('rejects either side threshold at or below 0.5, or above 1', () => {
+    for (const field of ['acceptableSideMin', 'deficientSideMin'] as const) {
+      expect(() => validateClassificationPolicy({ ...CLASSIFICATION_POLICY_V3, [field]: 0.5 })).toThrow(RangeError);
+      expect(() => validateClassificationPolicy({ ...CLASSIFICATION_POLICY_V3, [field]: 1.01 })).toThrow(RangeError);
+      expect(() => validateClassificationPolicy({ ...CLASSIFICATION_POLICY_V3, [field]: 0.500001 })).not.toThrow();
+    }
+  });
+});
+
+describe('classifyEvaluation — V3 per-dimension judgment (acceptableSideMin 0.575, deficientSideMin 0.65)', () => {
+  function judgeV3(probabilities: Readonly<Record<string, number>>): DimensionJudgment {
+    return judgeOne({ 'falsifiability.applicable': noulAnswer(0.9), 'falsifiability.quality': scoreAnswerWithProbabilities(1.5, probabilities) }, CLASSIFICATION_POLICY_V3);
+  }
+
+  it('is acceptable exactly at acceptableSideMin (acceptableMass 0.575)', () => {
+    const judgment = judgeV3({ '0': 0.2, '1': 0.225, '2': 0.5, '3': 0.075 });
+    expect(judgment.status).toBe('judged');
+    expect(judgment.level).toBe('acceptable');
+  });
+
+  it('needs review just below acceptableSideMin (acceptableMass 0.57)', () => {
+    const judgment = judgeV3({ '0': 0.2, '1': 0.23, '2': 0.5, '3': 0.07 });
+    expect(judgment.status).toBe('needs-review');
+    expect(judgment.reason).toBe('boundary-straddle');
+  });
+
+  it('keeps the deficient side at 0.65: deficientMass 0.60 still needs review (the side the blind review did not support lowering)', () => {
+    const judgment = judgeV3({ '0': 0.2, '1': 0.4, '2': 0.3, '3': 0.1 });
+    expect(judgment.status).toBe('needs-review');
+    expect(judgment.reason).toBe('boundary-straddle');
+  });
+
+  it('is deficient exactly at deficientSideMin (deficientMass 0.65), weak below criticalMin', () => {
+    const judgment = judgeV3({ '0': 0.3, '1': 0.35, '2': 0.2, '3': 0.15 });
+    expect(judgment.status).toBe('judged');
+    expect(judgment.level).toBe('weak');
   });
 });
 

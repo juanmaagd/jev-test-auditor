@@ -1464,7 +1464,7 @@ describe('--evaluate', () => {
         expect(exitCode).toBe(0);
         expect(output.lines).toHaveLength(1);
         expect(output.lines[0]).toBe(
-          '{"reportVersion":1,"rootDir":"/workspace","reportingOnly":true,"complete":true,"versions":{"storeSchema":4,"rubric":2,"policy":2},'
+          '{"reportVersion":1,"rootDir":"/workspace","reportingOnly":true,"complete":true,"versions":{"storeSchema":4,"rubric":2,"policy":3},'
           + '"modelRequested":"jev-1.13.0","discovery":{"files":[{"path":"abc.test.ts","framework":"vitest","testCaseCount":1,"dynamicMetadataCount":0,'
           + '"evidenceBundleCount":1}],"excluded":[],"totals":{"files":1,"excluded":0,"testCases":1,"dynamicMetadata":0,"diagnostics":0,'
           + '"unsupportedFrameworkFiles":0,"evidenceBundles":1,"evidenceFragments":0,"evidenceTruncatedFragments":0,"evidenceOmitted":0,'
@@ -1482,7 +1482,7 @@ describe('--evaluate', () => {
           + '"applicabilityProbability":0.1,"status":"not-applicable"},{"dimensionId":"refactor-resistance","dimensionLabel":"Refactor resistance",'
           + '"applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},{"dimensionId":"test-double-quality",'
           + '"dimensionLabel":"Test-double quality","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"}],"findings":[],'
-          + '"policyVersion":2,"rubricVersion":2,"model":{"requested":"jev-1.13.0","responded":"jev-1.13.0","matchesPin":true},"usage":{"inputTokens":100,'
+          + '"policyVersion":3,"rubricVersion":2,"model":{"requested":"jev-1.13.0","responded":"jev-1.13.0","matchesPin":true},"usage":{"inputTokens":100,'
           + '"outputTokens":0},"cache":"fresh","evidence":{"fragments":0,"truncatedFragments":0,"denied":[],"unresolved":[],"omitted":[]}}],'
           + '"diagnostics":[]}'
         );
@@ -1736,7 +1736,7 @@ describe('--evaluate', () => {
         expect(exitCode).toBe(0);
         expect(output.lines).toHaveLength(1);
         expect(output.lines[0]).toBe(
-          '{"reportVersion":1,"rootDir":"/workspace","reportingOnly":true,"complete":true,"versions":{"storeSchema":4,"rubric":2,"policy":2},'
+          '{"reportVersion":1,"rootDir":"/workspace","reportingOnly":true,"complete":true,"versions":{"storeSchema":4,"rubric":2,"policy":3},'
           + '"modelRequested":"jev-1.13.0","discovery":{"files":[{"path":"mixed.test.ts","framework":"vitest","testCaseCount":2,"dynamicMetadataCount":0,'
           + '"evidenceBundleCount":2}],"excluded":[],"totals":{"files":1,"excluded":0,"testCases":2,"dynamicMetadata":0,"diagnostics":0,'
           + '"unsupportedFrameworkFiles":0,"evidenceBundles":2,"evidenceFragments":3,"evidenceTruncatedFragments":1,"evidenceOmitted":1,'
@@ -1760,7 +1760,7 @@ describe('--evaluate', () => {
           + '"status":"not-applicable"}],"findings":[{"testCaseId":"tc:v1:misleading-case","repositoryRelativePath":"mixed.test.ts",'
           + '"name":"misleading case","dimensionId":"falsifiability","dimensionLabel":"Falsifiability","level":"misleading","score":0,"confidence":0.9,'
           + '"applicabilityProbability":0.9,"status":"judged","probabilities":{"0":0.85,"1":0.1,"2":0.03,"3":0.02},"deficientMass":0.95,'
-          + '"acceptableMass":0.05,"criticalMass":0.85}],"policyVersion":2,"rubricVersion":2,"model":{"requested":"jev-1.13.0","responded":"jev-1.13.0",'
+          + '"acceptableMass":0.05,"criticalMass":0.85}],"policyVersion":3,"rubricVersion":2,"model":{"requested":"jev-1.13.0","responded":"jev-1.13.0",'
           + '"matchesPin":true},"usage":{"inputTokens":150,"outputTokens":2},"cache":"fresh","evidence":{"fragments":1,"truncatedFragments":0,"denied":[],'
           + '"unresolved":[],"omitted":[]}},{"testCaseId":"tc:v1:healthy-case","repositoryRelativePath":"mixed.test.ts","name":"healthy case",'
           + '"status":"healthy","dimensions":[{"dimensionId":"assertion-strength","dimensionLabel":"Assertion strength","applicable":true,'
@@ -1774,7 +1774,7 @@ describe('--evaluate', () => {
           + '"applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},{"dimensionId":"refactor-resistance",'
           + '"dimensionLabel":"Refactor resistance","applicable":false,"applicabilityProbability":0.1,"status":"not-applicable"},'
           + '{"dimensionId":"test-double-quality","dimensionLabel":"Test-double quality","applicable":false,"applicabilityProbability":0.1,'
-          + '"status":"not-applicable"}],"findings":[],"policyVersion":2,"rubricVersion":2,"model":{"requested":"jev-1.13.0","responded":"jev-1.13.0",'
+          + '"status":"not-applicable"}],"findings":[],"policyVersion":3,"rubricVersion":2,"model":{"requested":"jev-1.13.0","responded":"jev-1.13.0",'
           + '"matchesPin":true},"usage":{"inputTokens":90,"outputTokens":1},"cache":"fresh","evidence":{"fragments":2,"truncatedFragments":1,'
           + '"denied":[{"repositoryRelativePath":"secret.env","rule":"deny-list:.env*"}],"unresolved":[{"specifier":"left-pad",'
           + '"reason":"bare-specifier"}],"omitted":[{"repositoryRelativePath":"big.ts","reason":"bundle-budget-exhausted"}]}}],"diagnostics":[]}'

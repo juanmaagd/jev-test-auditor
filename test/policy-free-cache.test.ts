@@ -81,12 +81,17 @@ function score(probabilities: readonly [number, number, number, number]): JevAns
  * the real recorded straddling distribution `{0.19, 0.39, 0.38, 0.04}` (deficientMass 0.58, see
  * `CLASSIFICATION_POLICY_V2`'s own doc): `needs-review` at `sideMin` 0.65, `weak` at 0.55.
  */
-function storedEvaluation(): JevEvaluation {
+type Quartet = readonly [number, number, number, number];
+const DEFICIENT_BAND: Quartet = [0.19, 0.39, 0.38, 0.04];
+/** acceptableMass 0.6: inside `[0.575, 0.65)`, so `needs-review` under V2 and `acceptable` under V3. */
+const ACCEPTABLE_BAND: Quartet = [0.05, 0.35, 0.5, 0.1];
+
+function storedEvaluation(assertionStrength: Quartet = DEFICIENT_BAND): JevEvaluation {
   const answers: Record<string, JevAnswer> = {};
   for (const dimension of RUBRIC_V2.dimensions) {
     answers[dimension.applicability.id] = { type: 'noul', probability: 0.95, raw: { type: 'noul', noul: 0.95 } };
     answers[dimension.quality.id] = dimension.id === 'assertion-strength'
-      ? score([0.19, 0.39, 0.38, 0.04])
+      ? score(assertionStrength)
       : score([0, 0.05, 0.45, 0.5]);
   }
   return {
@@ -118,12 +123,12 @@ describe('policy-free cache hits (task T1)', () => {
     directory = undefined;
   });
 
-  async function seededStore(): Promise<string> {
+  async function seededStore(assertionStrength: Quartet = DEFICIENT_BAND): Promise<string> {
     directory = await mkdtemp(join(tmpdir(), 'jta-policy-free-'));
     const databaseFile = join(directory, 'audit.db');
     const store = await createSqliteAuditStore({ databaseFile });
     const runId = await store.beginRun('/repo');
-    const evaluation = storedEvaluation();
+    const evaluation = storedEvaluation(assertionStrength);
     await store.recordWorkItem(runId, {
       state: 'completed',
       identity: { testCaseId: testCase.id, repositoryRelativePath: testCase.repositoryRelativePath, name: testCase.name },
@@ -168,13 +173,53 @@ describe('policy-free cache hits (task T1)', () => {
     }
   }
 
-  it('an entry written under the pre-change key formula stays a hit under the shipped policy, re-derived locally', async () => {
+  it('an entry written under the pre-change key formula stays a hit under policy v2, re-derived locally', async () => {
     const databaseFile = await seededStore();
 
     const { result, evaluateCalls } = await auditWithPolicy(databaseFile, CLASSIFICATION_POLICY_V2);
 
     expect(evaluateCalls).toBe(0);
     expect(result.evaluation?.totals.cached).toBe(1);
+    expect(result.evaluation?.classifications[0]?.status).toBe('needs-review');
+  });
+
+  async function auditWithDefaultPort(databaseFile: string) {
+    let evaluateCalls = 0;
+    const store = await createSqliteAuditStore({ databaseFile });
+    const discovery: DiscoveryResult = { files: [{ repositoryRelativePath: testCase.repositoryRelativePath, framework: 'vitest', frameworkEvidence: [] }], excluded: [], diagnostics: [] };
+    try {
+      const result = await runAudit(configuration, {
+        discovery: { discover: async () => discovery },
+        sourceReader: { read: async () => SOURCE },
+        extractor: { extract: () => ({ testCases: [testCase], dynamicMetadata: [], diagnostics: [] }) },
+        evidence: { build: async () => ({ bundles: [bundle], diagnostics: [] }) },
+        evaluation: { async evaluate() { evaluateCalls += 1; throw new Error('no provider request expected'); } },
+        store,
+        cacheKey: createAuditCacheKeyPort(),
+      });
+      return { result, evaluateCalls };
+    } finally {
+      await store.close();
+    }
+  }
+
+  it('the default cache-key port re-classifies a pre-change entry under the shipped policy v3 with no provider request: an in-band acceptable mass is now decided', async () => {
+    const databaseFile = await seededStore(ACCEPTABLE_BAND);
+
+    const { result, evaluateCalls } = await auditWithDefaultPort(databaseFile);
+
+    expect(evaluateCalls).toBe(0);
+    expect(result.evaluation?.classifications[0]?.policyVersion).toBe(3);
+    expect(result.evaluation?.classifications[0]?.status).toBe('healthy');
+  });
+
+  it('the shipped policy v3 keeps an in-band deficient mass (0.58) as needs-review — only the acceptable side moved', async () => {
+    const databaseFile = await seededStore(DEFICIENT_BAND);
+
+    const { result, evaluateCalls } = await auditWithDefaultPort(databaseFile);
+
+    expect(evaluateCalls).toBe(0);
+    expect(result.evaluation?.classifications[0]?.policyVersion).toBe(3);
     expect(result.evaluation?.classifications[0]?.status).toBe('needs-review');
   });
 
