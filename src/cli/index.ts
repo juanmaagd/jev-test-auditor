@@ -1030,6 +1030,12 @@ function reportSummaryText(report: AuditReport, recordedAt: Date): string {
   const needsReviewLine = needsReview.judgedTotal === 0
     ? 'Needs review (uncertain): n/a (no judged test cases)'
     : `Needs review (uncertain): ${needsReview.count}/${needsReview.judgedTotal} (${(needsReview.share * 100).toFixed(1)}%)`;
+  // `odd/tasks/cache-only-evaluation.md`: only for a --cache-only run (never a fabricated `0` line
+  // otherwise — `overview.coverage.notCached` is always `0` for an ordinary run, matching this
+  // project's established "genuinely absent" convention for a fact that does not apply).
+  const notCachedLine = overview.coverage.notCached === 0
+    ? undefined
+    : `Not in cache (not evaluated this run): ${overview.coverage.notCached}`;
   const topFolders = overview.folderHeatmap.rows
     .filter((row) => !row.isOther && row.needsChangeCount > 0)
     .slice(0, 5)
@@ -1043,6 +1049,7 @@ function reportSummaryText(report: AuditReport, recordedAt: Date): string {
     `Root: ${report.rootDir}`,
     needsChangeLine,
     needsReviewLine,
+    ...(notCachedLine === undefined ? [] : [notCachedLine]),
     ...(topFolders.length === 0 ? [] : ['Top folders needing a change:', ...topFolders]),
   ].join('\n');
 }

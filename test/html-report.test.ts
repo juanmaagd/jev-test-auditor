@@ -336,6 +336,17 @@ describe('renderAuditReportHtml: coverage', () => {
     expect(html).toContain('Failed: 1');
     expect(html).toContain('Dispatched but not evaluated: 1');
     expect(html).toContain('Skipped: 2 (skip: 1, todo: 1, evidence-unavailable: 0)');
+    expect(html).not.toContain('Not in cache');
+  });
+
+  it('shows the not-in-cache count for a --cache-only run (odd/tasks/cache-only-evaluation.md)', () => {
+    const report = minimalReport({
+      totals: { ...minimalReport().totals, cached: 1, notCached: 3 },
+    });
+
+    const html = renderAuditReportHtml(report);
+
+    expect(html).toContain('Not in cache — not evaluated this run: 3');
   });
 });
 

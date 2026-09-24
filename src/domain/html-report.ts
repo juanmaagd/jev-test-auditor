@@ -326,6 +326,8 @@ function renderCoverageSection(report: AuditReport, overview: ReportOverview): s
     : `, ${report.discovery.totals.unsupportedFrameworkFiles} unattributable-framework file(s)`;
   extra.push(`<li>${report.discovery.totals.files} file(s) discovered, ${report.discovery.totals.excluded} excluded${unsupported}.</li>`);
   if (coverage.cached > 0) extra.push(`<li>Cached: ${coverage.cached}</li>`);
+  // `odd/tasks/cache-only-evaluation.md`: a --cache-only miss — never dispatched, never a failure.
+  if (coverage.notCached > 0) extra.push(`<li>Not in cache — not evaluated this run: ${coverage.notCached}</li>`);
   if (coverage.failed > 0) extra.push(`<li>Failed: ${coverage.failed}</li>`);
   if (coverage.notEvaluated > 0) extra.push(`<li>Dispatched but not evaluated: ${coverage.notEvaluated}</li>`);
   if (coverage.skippedTotal > 0) {

@@ -112,6 +112,13 @@ export interface ReportOverviewCoverage {
   readonly fresh: number;
   readonly failed: number;
   readonly notEvaluated: number;
+  /**
+   * Evaluable test cases considered under `--cache-only` whose content-addressed key was not found
+   * in the store (`odd/tasks/cache-only-evaluation.md`) — see `AuditEvaluationTotals.notCached`'s
+   * own doc (`src/domain/audit.ts`). Always `0` for an ordinary run (never `undefined` here: unlike
+   * the raw report field, this derived overview always has a real number to report).
+   */
+  readonly notCached: number;
   readonly skippedTotal: number;
   readonly skippedByReason: Readonly<Record<'skip' | 'todo' | 'evidence-unavailable', number>>;
 }
@@ -240,6 +247,11 @@ function summarizeCoverage(report: AuditReport): ReportOverviewCoverage {
     fresh: report.totals.evaluated,
     failed: report.totals.failed,
     notEvaluated,
+    // `?? 0`: genuinely absent (not `0`) on an ordinary, non-`--cache-only` report — see
+    // `AuditEvaluationTotals.notCached`'s own doc — and possibly absent on an older persisted
+    // report predating this field entirely (`jta report` reads one back with only schema
+    // validation, no field-by-field migration).
+    notCached: report.totals.notCached ?? 0,
     skippedTotal: report.totals.skipped.total,
     skippedByReason: report.totals.skipped.byReason,
   };

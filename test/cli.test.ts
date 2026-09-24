@@ -4266,6 +4266,59 @@ describe('jta report — feature "persisted-run-reports", task T2', () => {
     });
   });
 
+  describe('--cache-only persisted report (odd/tasks/cache-only-evaluation.md)', () => {
+    it('the not-in-cache count from a --cache-only run is visible in both jta report --json and its default text summary', async () => {
+      const root = await fixture(mathFixtureFiles);
+
+      // A stateful store shared across both audit invocations below, so the second (cache-only)
+      // run can actually find the first run's warmed judgment.
+      const workItemCalls: { readonly runId: string; readonly outcome: AuditStoreWorkItemOutcome }[] = [];
+      let runCount = 0;
+      const store: AuditStorePort = {
+        beginRun: async () => { runCount += 1; return `cache-only-report-run-${runCount}`; },
+        canonicalizeRootDir: async (rootDir) => rootDir,
+        recordWorkItem: async (runId, outcome) => { workItemCalls.push({ runId, outcome }); },
+        lookup: async (cacheKey) => {
+          for (let index = workItemCalls.length - 1; index >= 0; index -= 1) {
+            const { outcome } = workItemCalls[index]!;
+            if (outcome.state === 'completed' && outcome.cacheKey === cacheKey && outcome.evaluation.modelMatchesPin) {
+              return { evaluation: outcome.evaluation };
+            }
+          }
+          return undefined;
+        },
+        finishRun: async () => undefined,
+        loadRunState: async () => undefined,
+        close: async () => undefined,
+      };
+
+      const warm = await runCli(['audit', '--rootDir', root, '--evaluate'], captureOutput().io, {
+        createEvaluationPort: () => fakeEvaluationPort(),
+        createStorePort: () => store,
+      });
+      if (warm !== 0) throw new Error('seeding failed');
+
+      // A genuinely new test case this store has never seen.
+      await writeFile(join(root, 'other.test.ts'), "import { expect, test } from 'vitest';\ntest('subtracts', () => { expect(2 - 1).toBe(1); });\n");
+
+      const cacheOnlyExit = await runCli(['audit', '--rootDir', root, '--evaluate', '--cache-only'], captureOutput().io, {
+        createStorePort: () => store,
+      });
+      if (cacheOnlyExit !== 0) throw new Error('cache-only run failed');
+
+      const jsonOutput = captureOutput();
+      const jsonExit = await runCli(['report', '--rootDir', root, '--json'], jsonOutput.io);
+      expect(jsonExit).toBe(0);
+      const persisted = JSON.parse(jsonOutput.lines[0]!) as { totals: { notCached: number; cached: number } };
+      expect(persisted.totals).toMatchObject({ cached: 1, notCached: 1 });
+
+      const textOutput = captureOutput();
+      const textExit = await runCli(['report', '--rootDir', root], textOutput.io);
+      expect(textExit).toBe(0);
+      expect(textOutput.lines.join('\n')).toContain('Not in cache (not evaluated this run): 1');
+    });
+  });
+
   describe('--run <runId>', () => {
     it('reads back the exact named run, not just the latest one', async () => {
       const root = await fixture(mathFixtureFiles);
